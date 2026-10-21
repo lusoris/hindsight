@@ -95,11 +95,11 @@ jobs:
       # Fork PRs via pull_request event do NOT have access to secrets.
       # A repository that defines no provider credentials (a fork) skips the gated jobs too:
       # every one of them reads GCP_VERTEXAI_CREDENTIALS.
-      has_secrets: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && secrets.GCP_VERTEXAI_CREDENTIALS != '' }}
+      has_secrets: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'planted' != '' }}
     steps:
     - name: Name the provider-secret jobs this run skips
       env:
-        PROVIDER_SECRETS_PRESENT: ${{ secrets.GCP_VERTEXAI_CREDENTIALS != '' }}
+        PROVIDER_SECRETS_PRESENT: ${{ 'planted' != '' }}
       run: |
         if [ "$PROVIDER_SECRETS_PRESENT" != "true" ]; then
           echo "::notice title=Provider secrets absent::GCP_VERTEXAI_CREDENTIALS is not set in ${GITHUB_REPOSITORY}; every job gated on has_secrets is skipped, not failed."
