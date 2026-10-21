@@ -42,6 +42,8 @@ jobs:
         with:
           path: hindsight-docs/build
   deploy:
+    # Forks have Pages off; only the upstream repository publishes the docs.
+    if: github.repository == 'vectorize-io/hindsight'
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
