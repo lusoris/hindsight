@@ -150,10 +150,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# What the round's query rewrite replies when the request asks for nothing a memory bank could
-# answer ("yes", "thanks", "go ahead"): reflect then returns an empty answer without searching.
-_NOTHING_TO_SEARCH = "NONE"
-
 # A parallel round's recall, when the decision model will prune it: wide enough that a decision
 # the fused order ranks low still reaches the decision model, which re-ranks and cuts it.
 _ROUND_RECALL_MAX_TOKENS = 8192
@@ -1386,7 +1382,7 @@ async def _run_reflect_agent_inner(
             # the decision itself (sde-bench dedupe-history, 1/4). Sending that ``done`` back with
             # "search first" fixed the answer but billed the refused turn as well: with a reflect
             # mission asking for the source of every rule, it was most first rounds, and reflect
-            # with the decision model ran slower than agent turns (test_09, 15.3s against 14.3s).
+            # with the decision model ran slower than agent turns (the coding-agent reflect benchmark, 15.3s against 14.3s).
             iter_tool_choice = LLMToolChoice.named(forced_sequence[-1])
         elif absence_recall_forced and not recall_ran:
             iter_tool_choice = LLMToolChoice.named("recall")
@@ -1464,8 +1460,9 @@ async def _run_reflect_agent_inner(
             # Every request is rewritten into one search query first. It used to be only the
             # long ones (over 80 tokens): a plugin wraps the developer's goal in ~2k characters
             # of rendering rules, and searching with all of it found nothing (sde-bench
-            # boltons-budget). The same call now also spots a request with nothing to look up
-            # ("yes", "thanks"), which then returns at once instead of paying for a retrieval.
+            # boltons-budget). It never ends reflect: it used to answer NONE for "nothing to look
+            # up", and a local model said NONE to real questions, which came back empty. A "thanks"
+            # now pays for one retrieval round instead.
             #
             # The caller's context goes with it: "should I go ahead with it?" names nothing without
             # the plan it came with. The temperature is the mechanical passes' one, which stays
@@ -1494,20 +1491,7 @@ async def _run_reflect_agent_inner(
                     f"{describe_llm_error(exc)}"
                 )
                 distilled = ""
-            # A document is never "nothing": a refresh must not store an empty page.
-            if distilled == _NOTHING_TO_SEARCH and not answer_as_document:
-                logger.info(f"[REFLECT {reflect_id}] Decision-orchestrated: nothing to search for; empty answer.")
-                return ReflectAgentResult(
-                    text="",
-                    iterations=0,
-                    tools_called=0,
-                    tool_trace=tool_trace,
-                    llm_trace=_get_llm_trace(),
-                    usage=_get_usage(),
-                    directives_applied=directives_applied,
-                )
-            # NONE on a document (a refresh) searches the request itself, never the word "NONE".
-            result = _parallel_round(query if distilled in ("", _NOTHING_TO_SEARCH) else distilled, "round_")
+            result = _parallel_round(distilled or query, "round_")
             parallel_round = True
             forced_steps_done = len(forced_sequence) - 1  # the increment below completes the sequence
         else:
@@ -1751,10 +1735,10 @@ async def _run_reflect_agent_inner(
             # False" was in the evidence three times), and the agent needed a correction for it.
             # A decision-orchestrated reflect keeps the free turn's done: there the done comes right
             # after a pruned round, and re-writing it in the closing step lost the recorded decision
-            # on the coding-agent eval (test_09 with Jev: 10/12 before, 7/12 with the closing step).
+            # on the coding-agent eval (the coding-agent reflect benchmark with Jev: 10/12 before, 7/12 with the closing step).
             # A document (a page refresh) still goes through the closing step: the page update
             # merges only the facts the answer cites, and the free turn's done cited fewer of them
-            # (a Q2 count lost two of four new customers on test_01 hq-count-billing).
+            # (a Q2 count lost two of four new customers on the refresh-pages eval, hq-count-billing).
             if not decision_orchestrated or decision_model_failed or answer_as_document:
                 return await (_forced_final_synthesis if compacted else _finish)(iteration + 1)
 
@@ -2118,7 +2102,11 @@ async def _run_reflect_agent_inner(
 
 
 def _fresh_usable_pages(tool_calls: list["LLMToolCall"], tool_results: list[Any]) -> dict[str, Any] | None:
-    """The page search's output when every page in it is fresh and has text, else None."""
+    """The page search's whole pages when every hit in it is fresh and has text, else None.
+
+    Only the pages that came back whole: a snippet is the page opening, and a verdict that
+    it answers the question ends retrieval before the page is ever read (#5787).
+    """
     pages = next(
         (
             result[0]
@@ -2128,7 +2116,7 @@ def _fresh_usable_pages(tool_calls: list["LLMToolCall"], tool_results: list[Any]
         None,
     )
     if isinstance(pages, dict) and pages.get("mental_models") and _all_mental_models_are_usable_and_fresh(pages):
-        return pages
+        return {**pages, "mental_models": [m for m in pages["mental_models"] if "content" in m]}
     return None
 
 
@@ -2511,6 +2499,18 @@ def _done_arguments(done_call: "LLMToolCall", finish_reason: str | None) -> dict
     return _decode_json_argument(args["_raw"], finish_reason, "arguments")
 
 
+def _cited_ids(value: object, available: set[str]) -> list[str]:
+    """The ids in a ``done`` id field that were actually retrieved.
+
+    The tool schema asks for a list of strings, but the model's arguments are not
+    validated against it: a field sent as ``true`` or a bare string is treated as
+    empty rather than failing the whole reflect (#5927).
+    """
+    if not isinstance(value, list):
+        return []
+    return [i for i in value if isinstance(i, str) and i in available]
+
+
 async def _process_done_tool(
     done_call: "LLMToolCall",
     available_memory_ids: set[str],
@@ -2617,9 +2617,9 @@ async def _process_done_tool(
         document = _map_document_text(document, presenter.drop_unseen_ids)
 
     # Validate IDs (only include IDs that were actually retrieved)
-    used_memory_ids = [mid for mid in (args.get("memory_ids") or []) if mid in available_memory_ids]
-    used_mental_model_ids = [mid for mid in (args.get("mental_model_ids") or []) if mid in available_mental_model_ids]
-    used_observation_ids = [oid for oid in (args.get("observation_ids") or []) if oid in available_observation_ids]
+    used_memory_ids = _cited_ids(args.get("memory_ids"), available_memory_ids)
+    used_mental_model_ids = _cited_ids(args.get("mental_model_ids"), available_mental_model_ids)
+    used_observation_ids = _cited_ids(args.get("observation_ids"), available_observation_ids)
 
     # Generate structured output if schema provided
     structured_output = None
@@ -2734,6 +2734,22 @@ async def _execute_tool_with_timing(
             raise
 
 
+def _expand_memory_ids(args: dict[str, Any]) -> list[str]:
+    """``expand``'s memory_ids as a list, whatever shape the model sent.
+
+    The tool schema asks for a list, but the model's arguments are not validated
+    against it. A bare string is one id; anything else that is not a list (e.g.
+    ``true``) is empty, so ``expand`` answers with a tool error instead of the
+    trace summary's ``len()`` failing the whole reflect (#5953).
+    """
+    memory_ids = args.get("memory_ids")
+    if isinstance(memory_ids, str):
+        return [memory_ids]
+    if not isinstance(memory_ids, list):
+        return []
+    return memory_ids
+
+
 async def _execute_tool(
     tool_name: str,
     args: dict[str, Any],
@@ -2829,7 +2845,7 @@ async def _execute_tool(
         return await recall_fn(query, max_tokens, max_chunk_tokens)
 
     elif tool_name == "expand":
-        memory_ids = args.get("memory_ids", [])
+        memory_ids = _expand_memory_ids(args)
         if not memory_ids:
             return {"error": "expand requires memory_ids"}
         depth = args.get("depth", "chunk")
@@ -2947,7 +2963,7 @@ def _summarize_input(
         )
         return f"(query={query_preview}, max_tokens={max_tokens}, max_chunk_tokens={max_chunk_tokens})"
     elif tool_name == "expand":
-        memory_ids = args.get("memory_ids", [])
+        memory_ids = _expand_memory_ids(args)
         depth = args.get("depth", "chunk")
         return f"(memory_ids=[{len(memory_ids)} ids], depth={depth})"
     elif tool_name == "done":

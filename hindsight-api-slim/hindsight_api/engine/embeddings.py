@@ -75,6 +75,7 @@ from .local_device import (
     resolve_model_device_type,
     select_local_device,
 )
+from .providers.openai_compatible_headers import with_openai_compatible_user_agent
 from .remote_retry import (
     RetryBudget,
     RetryPolicy,
@@ -366,13 +367,15 @@ class LocalSTEmbeddings(Embeddings):
         if self._model is not None:
             return
 
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError:
-            raise ImportError(
-                "sentence-transformers is required for LocalSTEmbeddings. "
-                "Install it with: pip install sentence-transformers"
-            )
+        # Imports transformers; see LOCAL_MODEL_BUILD_LOCK.
+        with LOCAL_MODEL_BUILD_LOCK:
+            try:
+                from sentence_transformers import SentenceTransformer
+            except ImportError:
+                raise ImportError(
+                    "sentence-transformers is required for LocalSTEmbeddings. "
+                    "Install it with: pip install sentence-transformers"
+                )
 
         logger.info(f"Embeddings: initializing local provider with model {self.model_name}")
 
@@ -566,20 +569,22 @@ class OnnxEmbeddings(Embeddings):
         if self._session is not None and self._tokenizer is not None:
             return
 
-        try:
-            import onnxruntime as ort
-            from transformers import AutoTokenizer
-        except ImportError as exc:
-            if self.device == "cuda":
+        # Imports transformers; see LOCAL_MODEL_BUILD_LOCK.
+        with LOCAL_MODEL_BUILD_LOCK:
+            try:
+                import onnxruntime as ort
+                from transformers import AutoTokenizer
+            except ImportError as exc:
+                if self.device == "cuda":
+                    raise ImportError(
+                        "CUDA OnnxEmbeddings requires transformers and a compatible onnxruntime-gpu installation "
+                        "with CUDA/cuDNN libraries. See docker/docker-compose/cuda-onnx/ for a custom image recipe; "
+                        "the local-onnx extra alone installs the CPU runtime."
+                    ) from exc
                 raise ImportError(
-                    "CUDA OnnxEmbeddings requires transformers and a compatible onnxruntime-gpu installation "
-                    "with CUDA/cuDNN libraries. See docker/docker-compose/cuda-onnx/ for a custom image recipe; "
-                    "the local-onnx extra alone installs the CPU runtime."
+                    "onnxruntime and transformers are required for OnnxEmbeddings. "
+                    "Install with: pip install 'hindsight-api-slim[local-onnx]'"
                 ) from exc
-            raise ImportError(
-                "onnxruntime and transformers are required for OnnxEmbeddings. "
-                "Install with: pip install 'hindsight-api-slim[local-onnx]'"
-            ) from exc
 
         # Reject a CPU-only runtime before downloading a potentially large graph.
         providers: list[str | tuple[str, dict[str, str]]] = ["CPUExecutionProvider"]
@@ -628,7 +633,9 @@ class OnnxEmbeddings(Embeddings):
             self.batch_size,
             self.cpu_mem_arena,
         )
-        tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name_or_path)
+        # Imports transformers; see LOCAL_MODEL_BUILD_LOCK.
+        with LOCAL_MODEL_BUILD_LOCK:
+            tokenizer = AutoTokenizer.from_pretrained(self.tokenizer_name_or_path)
         # With the arena enabled (ORT's default) freed activation blocks are cached and
         # never returned to the OS, so RSS ratchets up to the largest batch ever run and
         # holds that plateau for the life of the process. The reranker disables it for
@@ -1049,6 +1056,9 @@ class OpenAIEmbeddings(Embeddings):
             "api_key": self.api_key,
             "max_retries": self.max_retries,
             "timeout": self.timeout,
+            # Same transport identity as the LLM calls, so a gateway can attribute
+            # embedding traffic to Hindsight (#5942).
+            "default_headers": with_openai_compatible_user_agent(None),
         }
         if self.base_url:
             parsed = urlparse(self.base_url)
@@ -1123,7 +1133,9 @@ class OpenAIEmbeddings(Embeddings):
             ) from e
         usage = getattr(response, "usage", None)
         if usage is not None:
-            add_provider_input_tokens(usage.prompt_tokens)
+            # OpenAI-compatible gateways such as Voyage report only total_tokens (#5941);
+            # for an embedding that is the same number.
+            add_provider_input_tokens(usage.prompt_tokens or usage.total_tokens)
 
         # Sort by index to ensure correct order
         return [e.embedding for e in sorted(response.data, key=lambda x: x.index)]

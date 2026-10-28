@@ -23,6 +23,7 @@ import math
 import time
 import uuid
 from collections import defaultdict
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -36,6 +37,7 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, ValidationError
 
 from ...config import get_config
 from ...metrics import get_metrics_collector
+from ...operation_runs import timed_operation
 from ...worker.stage import set_stage
 from ..db import DatabaseBackend
 from ..db_utils import acquire_with_retry
@@ -56,9 +58,10 @@ from ..llm_trace import (
 )
 from ..llm_wrapper import sanitize_llm_output
 from ..memories import StoredMemory, get_memories
-from ..memory_engine import Budget, fq_table
-from ..prompt_utils import truncate_context_for_prompt
+from ..response_models import Budget
 from ..retain import embedding_utils
+from ..schema import fq_table
+from ..stored_dates import finite_utc
 from .prompts import (
     build_consolidation_input,
     build_consolidation_system_prompt,
@@ -68,7 +71,7 @@ from .triage import TriageResult, triage_facts, triage_model
 if TYPE_CHECKING:
     # The engine's connection abstraction, which is what every caller passes; the annotations
     # below named asyncpg's concrete type, which predates it.
-    from ...api.http import RequestContext
+    from ...models import RequestContext
     from ..db.base import DatabaseConnection
     from ..memories.base import StoredMemory
     from ..memory_engine import MemoryEngine
@@ -765,7 +768,21 @@ def _unique_source_ids(v: str | list[str]) -> list[str]:
     return list(dict.fromkeys(v))
 
 
+def _advertise_required(*fields: str) -> Callable[[dict[str, Any]], None]:
+    """A ``json_schema_extra`` that lists ``fields`` as required while validation keeps their
+    defaults. A grammar-constrained model skips optional fields: flash-lite left most update
+    reasons empty and filled ``current_text`` on 1 update in 100 (#5938). A provider that ignores
+    the hint, or a response without them, still validates."""
+
+    def extra(schema: dict[str, Any]) -> None:
+        schema["required"] = list(dict.fromkeys([*schema.get("required", []), *fields]))
+
+    return extra
+
+
 class _CreateAction(BaseModel):
+    model_config = ConfigDict(json_schema_extra=_advertise_required("reason"))
+
     text: str
     source_fact_ids: list[str]  # memory UUIDs from the NEW FACTS list
     # One-sentence justification from the LLM (why CREATE vs UPDATE). Diagnostic
@@ -784,16 +801,22 @@ class _CreateAction(BaseModel):
 
 
 class _UpdateAction(BaseModel):
+    model_config = ConfigDict(json_schema_extra=_advertise_required("reason", "current_text"))
+
     observation_id: str  # UUID of the existing observation to update
+    # LLM's one-sentence justification (diagnostic only). Before ``text`` on purpose, opening with
+    # the time check (``newer_than_input_facts``, see the prompt's TIME section): written after
+    # ``text`` it only rationalised the edit, and a small model let an older fact overwrite a newer
+    # observation every time (#5938, eval ``recency-same-day-amendment-arrives-first``).
+    reason: str = ""
     # The observation's text as it stands, copied before ``text`` is written. Not used by the
     # code: field order is generation order, and a small model that copies the old text first
     # edits it, where one writing ``text`` cold tends to emit just the new fact and erase the
-    # rest of the observation (eval ``noisy-service-catalogue-mission``). Optional, so a
-    # response without it still validates.
+    # rest of the observation (eval ``noisy-service-catalogue-mission``). Advertised as required:
+    # optional, it was skipped, and once ``reason`` came first the updates erased 4x more values.
     current_text: str = ""
     text: str
     source_fact_ids: list[str]  # memory UUIDs from the NEW FACTS list
-    reason: str = ""  # LLM's one-sentence justification (diagnostic only)
 
     @field_validator("text", mode="before")
     @classmethod
@@ -1373,9 +1396,35 @@ def _log_unresolved_action(kind: str, source_fact_ids: list[str], text: str, per
 
 
 def _as_dt(v: "datetime | str | None") -> "datetime | None":
-    """Coerce an ISO string to a datetime. Recall results can carry timestamps as strings while
-    the store's addressed reads hand back datetimes, so normalise before comparing."""
-    return datetime.fromisoformat(v) if isinstance(v, str) else v
+    """Coerce an ISO string to an aware UTC datetime. Recall results can carry timestamps as strings
+    while the store's addressed reads hand back datetimes, so normalise before comparing. A stored
+    year-1/9999 placeholder comes back naive and would break the comparison, so it reads as unknown."""
+    return finite_utc(datetime.fromisoformat(v) if isinstance(v, str) else v)
+
+
+def _prompt_time(v: "datetime | str | None") -> str | None:
+    """Every time the consolidation prompt shows, in ONE format (``2026-10-21T09:48Z``).
+
+    The model decides recency by comparing a fact's ``mentioned_at`` with an observation's, and the
+    two used to reach it in different shapes: ``2026-10-21 09:48:00.010000+00:00`` for a fact,
+    ``2026-10-21T10:48:00+00:00`` for an observation. gemini-3.1-flash-lite then read 09:48 as LATER
+    than 10:48 on half the calls and let the older rule overwrite its amendment (#5938); one format
+    took that call from 5/10 to 10/10. Minute precision: seconds and the sub-second offsets retain
+    adds to order one document's facts carry nothing the model needs.
+    """
+    dt = _as_dt(v)
+    return dt.strftime("%Y-%m-%dT%H:%MZ") if dt else None
+
+
+def _latest_time(*values: "datetime | str | None") -> "datetime | None":
+    """When something was last true: the latest of its ``mentioned_at`` and ``occurred_*``.
+
+    ``mentioned_at`` alone is not enough: a message sent on 07-10 in a session that started on
+    07-01 keeps the session's 07-01 as ``mentioned_at`` and its own time only in ``occurred_*``
+    (#2550). ``max`` over every time the row carries covers both.
+    """
+    times = [t for t in (_as_dt(v) for v in values) if t is not None]
+    return max(times) if times else None
 
 
 def _merge_min(a: "datetime | str | None", b: "datetime | str | None") -> "datetime | None":
@@ -1595,7 +1644,8 @@ async def run_consolidation_job(
     # trace — flushed onto every trace row on exit by attach_memory_ids.
     trace_ctx = trace_context_of(llm_config)
     trace_token = set_trace_context(trace_ctx) if trace_ctx is not None else None
-    with track_observation_changes() as observation_changes:
+    # One run per consolidation, whichever way it started: a queued task, or run inline.
+    with timed_operation("consolidation", bank_id), track_observation_changes() as observation_changes:
         try:
             return await _run_consolidation_job(
                 memory_engine,
@@ -2684,6 +2734,11 @@ async def _process_memory_batch(
             return await coro
 
     def _check_update(update: _UpdateAction) -> _PreparedUpdate | None:
+        if not update.text.strip():
+            # An empty observation says nothing, and the embedder rejects empty input,
+            # which would fail the whole batch.
+            logger.warning("[CONSOLIDATION] discarded observation UPDATE: empty text")
+            return None
         source_mems = [mem_by_id[fid] for fid in update.source_fact_ids if fid in mem_by_id]
         if not source_mems:
             _log_unresolved_action("update", update.source_fact_ids, update.text, perf)
@@ -2752,6 +2807,11 @@ async def _process_memory_batch(
     update_texts = {_norm_obs_text(u.text) for u in llm_result.updates if u.text}
 
     def _check_create(create: _CreateAction) -> _PreparedCreate | None:
+        if not create.text.strip():
+            # An empty observation says nothing, and the embedder rejects empty input,
+            # which would fail the whole batch.
+            logger.warning("[CONSOLIDATION] discarded observation CREATE: empty text")
+            return None
         source_mems = [mem_by_id[fid] for fid in create.source_fact_ids if fid in mem_by_id]
         if not source_mems:
             _log_unresolved_action("create", create.source_fact_ids, create.text, perf)
@@ -2992,13 +3052,13 @@ async def _process_memory_batch(
 
 
 def _min_date(dates: "Any") -> "datetime | None":
-    """Return the minimum non-None datetime from an iterable."""
-    return min((d for d in dates if d is not None), default=None)
+    """Return the minimum known datetime from an iterable (None and placeholders skipped)."""
+    return min((d for d in map(_as_dt, dates) if d is not None), default=None)
 
 
 def _max_date(dates: "Any") -> "datetime | None":
-    """Return the maximum non-None datetime from an iterable."""
-    return max((d for d in dates if d is not None), default=None)
+    """Return the maximum known datetime from an iterable (None and placeholders skipped)."""
+    return max((d for d in map(_as_dt, dates) if d is not None), default=None)
 
 
 @dataclass(frozen=True)
@@ -3485,8 +3545,15 @@ async def _find_related_observations(
 def _build_observations_for_llm(
     observations: "list[MemoryFact]",
     source_facts: "dict[str, MemoryFact]",
+    newest_input_fact: "datetime | None" = None,
 ) -> list[dict[str, Any]]:
-    """Serialize MemoryFact observations into dicts for the consolidation LLM prompt."""
+    """Serialize MemoryFact observations into dicts for the consolidation LLM prompt.
+
+    An observation last true after every input fact gets ``newer_than_input_facts: true``: the batch
+    is then older news for it, and the prompt's TIME section says it keeps its current value. The
+    model is told the comparison instead of making it: gemini-3.1-flash-lite read 09:48 as later than
+    10:48, or let a fact worded "was updated" win over the times it had just compared (#5938).
+    """
     obs_list = []
     for obs in observations:
         # Rows written before #4799 may repeat an id thousands of times; show each source once.
@@ -3496,26 +3563,24 @@ def _build_observations_for_llm(
             "text": obs.text,
             "proof_count": len(unique_ids) or 1,
         }
-        if obs.occurred_start:
-            obs_data["occurred_start"] = obs.occurred_start
-        if obs.occurred_end:
-            obs_data["occurred_end"] = obs.occurred_end
-        if obs.mentioned_at:
-            obs_data["mentioned_at"] = obs.mentioned_at
+        for key in ("occurred_start", "occurred_end", "mentioned_at"):
+            if shown := _prompt_time(getattr(obs, key)):
+                obs_data[key] = shown
+        obs_time = _latest_time(obs.occurred_start, obs.occurred_end, obs.mentioned_at)
+        if newest_input_fact and obs_time and obs_time > newest_input_fact:
+            obs_data["newer_than_input_facts"] = True
         source_memories = []
         for sid in unique_ids:
             sf = source_facts.get(sid)
             if sf is None:
                 continue
+            # No ``context``: in a bank whose documents share one retain context it repeated the
+            # same sentence on every source memory, ~11% of the prompt, and the observation's own
+            # text already says what the fact means (#5996). The new facts carry none either.
             sf_data: dict[str, Any] = {"text": sf.text}
-            if sf.context:
-                sf_data["context"] = truncate_context_for_prompt(sf.context)
-            if sf.occurred_start:
-                sf_data["occurred_start"] = sf.occurred_start
-            if sf.occurred_end:
-                sf_data["occurred_end"] = sf.occurred_end
-            if sf.mentioned_at:
-                sf_data["mentioned_at"] = sf.mentioned_at
+            for key in ("occurred_start", "occurred_end", "mentioned_at"):
+                if shown := _prompt_time(getattr(sf, key)):
+                    sf_data[key] = shown
             source_memories.append(sf_data)
         if source_memories:
             obs_data["source_memories"] = source_memories
@@ -3637,7 +3702,10 @@ async def _consolidate_batch_with_llm(
     if config is None:
         raise ValueError("config is required for _consolidate_batch_with_llm")
     if union_observations:
-        obs_list = _build_observations_for_llm(union_observations, union_source_facts)
+        newest_input_fact = _latest_time(
+            *(m.get(key) for m in memories for key in ("occurred_start", "occurred_end", "mentioned_at"))
+        )
+        obs_list = _build_observations_for_llm(union_observations, union_source_facts, newest_input_fact)
         # One observation per line, no indentation: the pool is nearly all of a batch's
         # uncached input, and `indent=2` spent a fifth of it on whitespace.
         observations_text = "[\n" + ",\n".join(json.dumps(o, ensure_ascii=False) for o in obs_list) + "\n]"
@@ -3646,13 +3714,11 @@ async def _consolidate_batch_with_llm(
 
     def _fact_line(m: dict[str, Any]) -> str:
         text = f"[{m['id']}] {m['text']}"
-        temporal_parts = []
-        if m.get("occurred_start"):
-            temporal_parts.append(f"occurred_start={m['occurred_start']}")
-        if m.get("occurred_end"):
-            temporal_parts.append(f"occurred_end={m['occurred_end']}")
-        if m.get("mentioned_at"):
-            temporal_parts.append(f"mentioned_at={m['mentioned_at']}")
+        temporal_parts = [
+            f"{key}={shown}"
+            for key in ("occurred_start", "occurred_end", "mentioned_at")
+            if (shown := _prompt_time(m.get(key)))
+        ]
         if temporal_parts:
             text += f" ({', '.join(temporal_parts)})"
         return text

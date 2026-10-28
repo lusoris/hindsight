@@ -35,7 +35,8 @@ from ..document_history import (
     append_operation_events,
     track_observation_changes,
 )
-from ..memory_engine import count_tokens, fq_table
+from ..memory_engine import count_tokens
+from ..schema import fq_table
 
 if TYPE_CHECKING:
     from .attachment_store import RetainAttachmentLoader
@@ -1230,10 +1231,13 @@ async def _delta_store_owned_write(
         logger.info("\n" + "\n".join(log_buffer) + "\n")
         return False, []
 
-    # Deterministic chunk ids for the new/changed chunks, after the delta remap, so a fact's
-    # chunk_id matches the chunk that carries it.
+    # Deterministic chunk ids for the new/changed chunks, keyed by DOCUMENT position so a fact's
+    # chunk_id matches the chunk that carries it. `cm.chunk_index` is the position inside the delta;
+    # keyed by that, any changed chunk but the first wrote its facts with no chunk id, which the
+    # next re-send could not replace (#5919).
     chunk_id_by_index = {
-        cm.chunk_index: build_chunk_id(bank_id, effective_doc_id, cm.chunk_index) for cm in (new_chunk_metadata or [])
+        (idx := delta_chunk_map.get(cm.chunk_index, cm.chunk_index)): build_chunk_id(bank_id, effective_doc_id, idx)
+        for cm in (new_chunk_metadata or [])
     }
     for ef, pf in zip(extracted_facts, processed_facts):
         pf.document_id = effective_doc_id
@@ -3634,8 +3638,11 @@ async def _streaming_retain_batch(
                     await outbox_callback(conn)
             outbox_fired[0] = True
 
-        # Mark facts as committed in operation metadata (crash recovery checkpoint)
-        if operation_id and all_unit_ids:
+        # Mark facts as committed in operation metadata (crash recovery checkpoint). Not for a
+        # retain session: it may buffer until `commit()`, so its facts are not durable here, and a
+        # retry trusting the checkpoint would skip a document whose facts were never written
+        # (#6099). The session commits once for the whole retain, so there is nothing to resume.
+        if operation_id and all_unit_ids and retain_session is None:
             try:
                 async with acquire_with_retry(pool) as conn:
                     await _persist_facts_committed_checkpoint(
