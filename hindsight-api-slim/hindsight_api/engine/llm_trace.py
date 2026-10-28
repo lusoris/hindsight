@@ -44,6 +44,7 @@ from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel
 
+from ..schema_context import get_current_bank_id
 from ..tracing import get_span_recorder
 from .background_writes import PendingWrites
 from .db_utils import acquire_with_retry
@@ -166,10 +167,14 @@ class ProviderInputTokens:
 _input_tokens_ctx: ContextVar[ProviderInputTokens | None] = ContextVar("hindsight_input_tokens_ctx", default=None)
 
 
-def add_provider_input_tokens(count: int) -> None:
-    """Report billed input tokens for the traced call in flight. No-op outside one."""
+def add_provider_input_tokens(count: int | None) -> None:
+    """Report billed input tokens for the traced call in flight. No-op outside one.
+
+    ``None`` (a provider that did not report the count) adds nothing: a trace must
+    never fail the call it traces (#5941).
+    """
     sink = _input_tokens_ctx.get()
-    if sink is not None:
+    if sink is not None and count:
         sink.count += count
 
 
@@ -387,13 +392,6 @@ def record_source_memory_ids(ids: Iterable[str]) -> None:
     ctx = _trace_ctx.get()
     if ctx is not None:
         ctx.source_memory_ids.extend(str(i) for i in ids)
-
-
-def _current_bank_id() -> str | None:
-    # Lazy: memory_engine imports this module.
-    from .memory_engine import get_current_bank_id
-
-    return get_current_bank_id()
 
 
 # ── serialization helpers ─────────────────────────────────────────────────────
@@ -768,7 +766,7 @@ class LLMTraceRecorder:
             ended_at=ended_at,
             # Outside any operation run (a call no operation binds one for) the bank still
             # comes from the bank-scoped engine call that is running.
-            bank_id=(ctx.bank_id if ctx else None) or _current_bank_id(),
+            bank_id=(ctx.bank_id if ctx else None) or get_current_bank_id(),
             operation=ctx.operation if ctx else None,
             # OTel-style hierarchy: all calls of one operation invocation share
             # the context's trace_id and point at its operation span; this call
