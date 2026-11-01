@@ -1,0 +1,35 @@
+# Dated exceptions for open dependency advisories that have no reachable fix.
+# Schema: https://google.github.io/osv-scanner/configuration/ ([[IgnoredVulns]]).
+# Each entry names its category (D = 120-day rectification interval, entered
+# 2026-11-02) and the trigger that ends it. An entry past ignoreUntil excuses
+# nothing; renew it only with a fresh check of the trigger.
+
+[[IgnoredVulns]]
+# filelock UnixFileLock truncates a file renamed or hard-linked onto the lock path; Dependabot #400, root uv.lock.
+id = "GHSA-69hj-f68j-2879"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: fixed in filelock 4.2.1, but every litellm release through 1.106.6 requires filelock<4.0, so the fix means downgrading litellm to 1.103.10; the lock moves to 3.32.7 meanwhile. Trigger: a litellm release that allows filelock>=4.2.1."
+
+[[IgnoredVulns]]
+# filelock WindowsFileLock ignores the requested mode; Dependabot #401, root uv.lock.
+id = "GHSA-8mx5-7m5m-r77g"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: same litellm filelock<4.0 cap as GHSA-69hj-f68j-2879, and the flaw is Windows-only. Trigger: a litellm release that allows filelock>=4.2.1."
+
+[[IgnoredVulns]]
+# diskcache pickle deserialization (CVE-2025-69872); Dependabot #327, root uv.lock, via llama-cpp-python (local-llm extra).
+id = "GHSA-w8v5-vhqr-4h9v"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: no patched diskcache release exists (last release 5.6.3, 2023); hindsight starts llama_cpp.server with --cache_type ram (engine/providers/llamacpp_llm.py), so the disk backend that unpickles entries is never selected. Trigger: a patched diskcache release, or llama-cpp-python dropping it."
+
+[[IgnoredVulns]]
+# deepmerge mergeObject prototype poisoning; Dependabot #387, root package-lock.json, dev tooling only (jest-config, @svgr/plugin-svgo).
+id = "GHSA-gcqx-w48m-w2h4"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: no patched deepmerge release exists for >=4.2.0 <=4.3.1; reached only through jest and the docs build, which merge trusted local configuration. Trigger: a patched deepmerge release."
+
+[[IgnoredVulns]]
+# elliptic risky primitive; Dependabot #125, hindsight-integrations/eliza/package-lock.json, via @elizaos/core -> crypto-browserify.
+id = "GHSA-848j-6mx2-7j84"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: no patched elliptic release exists (<=6.6.1 affected); pulled by @elizaos/core 1.7.2 (latest) through the crypto-browserify polyfill, which the integration does not call. Trigger: a patched elliptic release or an @elizaos/core release without crypto-browserify."
