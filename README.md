@@ -10,6 +10,8 @@
 [![NPM Downloads](https://img.shields.io/npm/dm/%40vectorize-io%2Fhindsight-client?logo=npm&logoColor=white&label=NPM&color=blue)](https://www.npmjs.com/package/@vectorize-io/hindsight-client)
 [![Slack Community](https://img.shields.io/badge/Slack-Join%20Community-4A154B?logo=slack)](https://vectorize.io/slack)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![CodeRabbit reviews](https://img.shields.io/coderabbit/prs/github/lusoris/hindsight)](https://coderabbit.ai)
+[![Codacy grade](https://app.codacy.com/project/badge/Grade/ffaa9e1bf9c84ba09b8ec7a28fb295a9)](https://app.codacy.com/gh/lusoris/hindsight/dashboard)
 <br/>
 <p align="center">
  <a href="https://www.star-history.com/vectorize-io/hindsight"><img src="https://api.star-history.com/badge?repo=vectorize-io/hindsight&type=rank" alt="Star History Rank" /> <img src="https://api.star-history.com/badge?repo=vectorize-io/hindsight&type=trending" alt="GitHub Trending Repository of the Day" /></a>
