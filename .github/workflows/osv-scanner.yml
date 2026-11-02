@@ -1,0 +1,31 @@
+# Scans every lockfile in the repository with the repository-wide exception
+# list. osv-scanner applies a config file only to lockfiles in its own
+# directory unless --config is given, so the flag is what makes the root
+# osv-scanner.toml cover the integration and client lockfiles.
+name: OSV-Scanner
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      # Exits non-zero on any finding the config does not except, and on a
+      # failed scan.
+      - name: Scan lockfiles
+        uses: google/osv-scanner-action/osv-scanner-action@0a65f82af05cd58cf587827b0bb0489548c18346 # v2.7.0
+        with:
+          scan-args: |-
+            --config=osv-scanner.toml
+            --recursive
+            ./

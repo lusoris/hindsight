@@ -1,3 +1,7 @@
+# Repository-wide osv-scanner configuration. Every scan invocation must pass
+# `--config osv-scanner.toml` (or `--config <path>/osv-scanner.toml`) so this
+# central exception list is respected across all lockfiles and ecosystems.
+#
 # Dated exceptions for open dependency advisories that have no reachable fix.
 # Schema: https://google.github.io/osv-scanner/configuration/ ([[IgnoredVulns]]).
 # Each entry names its category (D = 120-day rectification interval, entered
@@ -105,3 +109,10 @@ reason = "category D, entered 2026-11-02 (Dependabot alert opened that day): fix
 id = "GHSA-6627-m3xw-93mp"
 ignoreUntil = 2027-03-02
 reason = "category D, entered 2026-11-02 (Dependabot alert opened that day): fixed only in filelock 4.x, and litellm 1.106.6 (latest, checked 2026-11-02) still requires filelock<4.0, same cap as GHSA-69hj-f68j-2879; hindsight code imports no filelock (the direct requirement is a floor only), the users are litellm, huggingface-hub and torch on local cache paths. Trigger: a litellm release that allows filelock>=4.2.1."
+
+[[IgnoredVulns]]
+# unsafe-libyaml unmaintained (RUSTSEC-2024-0449); hindsight-clients/rust/Cargo.lock, build-dependency only via progenitor -> serde_yaml.
+id = "RUSTSEC-2024-0449"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: unsafe-libyaml 0.2.11 is unmaintained (repository archived 2024-03-25), with no fixed version; pulled only as a build-dependency in hindsight-clients/rust via progenitor 0.11.2 -> progenitor-macro -> serde_yaml 0.9.34+deprecated for compile-time OpenAPI client generation, and not linked into the runtime client binary or library. Trigger: progenitor releasing a version that migrates away from serde_yaml, or moving to a maintained YAML parser fork."
+
