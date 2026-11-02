@@ -40,6 +40,7 @@ def _captured_popen(monkeypatch, tmp_path, **kwargs) -> _PopenCall:
     calls: list[_PopenCall] = []
 
     def _fake_popen(cmd, *args, **popen_kwargs):
+        """Record the argv and env instead of spawning, and return a live-looking process."""
         calls.append(_PopenCall(cmd=cmd, env=popen_kwargs.get("env")))
         proc = MagicMock()
         proc.poll.return_value = None
@@ -59,6 +60,7 @@ def _captured_popen(monkeypatch, tmp_path, **kwargs) -> _PopenCall:
 
 
 def _captured_cmd(monkeypatch, tmp_path, **kwargs) -> list[str]:
+    """Start a stubbed server and return only its argv."""
     return _captured_popen(monkeypatch, tmp_path, **kwargs).cmd
 
 
@@ -86,6 +88,7 @@ def test_cache_type_is_passed_explicitly(monkeypatch, tmp_path):
 
 
 def test_cache_type_is_ram_not_disk(monkeypatch, tmp_path):
+    """Without extra args the backend is `ram` and `disk` appears nowhere in argv."""
     cmd = _captured_cmd(monkeypatch, tmp_path)
     value = cmd[cmd.index("--cache_type") + 1]
     assert value == "ram", f"prompt cache backend is {value!r}, must be 'ram'"
@@ -111,11 +114,13 @@ def test_extra_args_refuse_config_file(monkeypatch, tmp_path, extra):
 
 
 def test_inherited_config_file_env_is_dropped(monkeypatch, tmp_path):
+    """CONFIG_FILE in the parent environment would replace argv; the child must not inherit it."""
     monkeypatch.setenv("CONFIG_FILE", "/x.json")
     env = _captured_popen(monkeypatch, tmp_path).env
     assert env is not None and "CONFIG_FILE" not in env
 
 
 def test_other_extra_args_pass_through(monkeypatch, tmp_path):
+    """Unrelated extra args still reach llama_cpp.server, in order, before the forced RAM flag."""
     cmd = _captured_cmd(monkeypatch, tmp_path, extra_args="--type_k 1 --n_threads 8")
     assert cmd[-6:] == ["--type_k", "1", "--n_threads", "8", "--cache_type", "ram"]
