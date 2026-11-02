@@ -7,6 +7,7 @@ leaves the other install path able to resolve the vulnerable version.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import TypeAlias
 
@@ -20,6 +21,10 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
 ROOT = Path(__file__).resolve().parent.parent
+
+# requirements-file syntax: a comment starts at a # that opens the line or follows
+# whitespace, so a URL fragment such as #sha256=... stays part of the declaration.
+COMMENT = re.compile(r"(?:^|\s)#.*$")
 
 # name, extras, specifier, marker, url: every field a declaration can carry.
 RequirementKey: TypeAlias = tuple[str, tuple[str, ...], str, str, str]
@@ -41,7 +46,7 @@ def _normalized(reqs: list[Requirement]) -> list[RequirementKey]:
 
 def _requirements_txt() -> list[RequirementKey]:
     lines = (ROOT / "requirements.txt").read_text().splitlines()
-    reqs = [Requirement(line) for line in (raw.split("#", 1)[0].strip() for raw in lines) if line]
+    reqs = [Requirement(line) for line in (COMMENT.sub("", raw).strip() for raw in lines) if line]
     return _normalized(reqs)
 
 
