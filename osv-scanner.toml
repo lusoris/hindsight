@@ -20,7 +20,7 @@ reason = "category D, entered 2026-11-02: same litellm filelock<4.0 cap as GHSA-
 # diskcache pickle deserialization (CVE-2025-69872); Dependabot #327, root uv.lock, via llama-cpp-python (local-llm extra).
 id = "GHSA-w8v5-vhqr-4h9v"
 ignoreUntil = 2027-03-02
-reason = "category D, entered 2026-11-02: no patched diskcache release exists (last release 5.6.3, 2023); hindsight starts llama_cpp.server with --cache_type ram (engine/providers/llamacpp_llm.py), so the disk backend that unpickles entries is never selected. Trigger: a patched diskcache release, or llama-cpp-python dropping it."
+reason = "category D, entered 2026-11-02: no patched diskcache release exists (last release 5.6.3, 2023); hindsight starts llama_cpp.server with --cache_type ram as the last argument, so HINDSIGHT_API_LLAMACPP_EXTRA_ARGS cannot override it (argparse keeps the last value), refuses a --config_file in those args and drops an inherited CONFIG_FILE (engine/providers/llamacpp_llm.py, tests/test_llamacpp_cache_type.py); the disk backend that unpickles entries cannot be selected through hindsight. Trigger: a patched diskcache release, or llama-cpp-python dropping it."
 
 [[IgnoredVulns]]
 # deepmerge mergeObject prototype poisoning; Dependabot #387, root package-lock.json, dev tooling only (jest-config, @svgr/plugin-svgo).

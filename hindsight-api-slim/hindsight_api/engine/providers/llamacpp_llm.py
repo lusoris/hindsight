@@ -137,6 +137,26 @@ def _resolve_model_path(model_path: str | None) -> Path:
     return _download_default_model()
 
 
+def _checked_extra_args(extra_args: str) -> list[str]:
+    """Split the user's extra llama_cpp.server args, refusing a config file.
+
+    A config file (`--config_file`, or any argparse abbreviation of it such as
+    `--config`) makes llama_cpp.server ignore argv entirely, so it would undo the
+    forced `--cache_type ram`. No other llama_cpp.server option starts with
+    `--co`, so every prefix of `--config_file` from `--co` on names it.
+    """
+    args = extra_args.split()
+    for arg in args:
+        name = arg.split("=", 1)[0]
+        if len(name) >= len("--co") and "--config_file".startswith(name):
+            raise ValueError(
+                f"HINDSIGHT_API_LLAMACPP_EXTRA_ARGS may not contain {name!r}: a llama_cpp.server "
+                "config file replaces every argument, including the RAM-only prompt cache "
+                "(the disk cache is exposed to CVE-2025-69872)."
+            )
+    return args
+
+
 class LlamaCppServer:
     """Manages a llama-cpp-python OpenAI-compatible server as a subprocess."""
 
@@ -184,24 +204,27 @@ class LlamaCppServer:
             # Prompt cache: reuse KV cache for repeated system prompts
             "--cache",
             "true",
-            # Keep the prompt cache in RAM. llama_cpp.server's other option,
-            # `disk`, is backed by diskcache, which pickles cache entries
-            # (CVE-2025-69872): anyone able to write to the cache directory
-            # gets code execution in this process when an entry is read back.
-            # diskcache has had no release since 5.6.3 in 2023 and no fixed
-            # version exists, so the exposure is permanent if the disk backend
-            # is ever selected. `ram` is already llama_cpp.server's default;
-            # stating it here means a future edit has to opt into the risk
-            # deliberately rather than inherit it by changing a default.
-            "--cache_type",
-            "ram",
         ]
         # Only pass chat_format if explicitly set (most GGUF models have it embedded)
         if self.chat_format:
             cmd.extend(["--chat_format", self.chat_format])
         # User-provided extra args (e.g. "--type_k 1 --type_v 1 --n_threads 8")
         if self.extra_args:
-            cmd.extend(self.extra_args.split())
+            cmd.extend(_checked_extra_args(self.extra_args))
+        # Keep the prompt cache in RAM. llama_cpp.server's other option,
+        # `disk`, is backed by diskcache, which pickles cache entries
+        # (CVE-2025-69872): anyone able to write to the cache directory
+        # gets code execution in this process when an entry is read back.
+        # diskcache has had no release since 5.6.3 in 2023 and no fixed
+        # version exists, so the exposure is permanent if the disk backend
+        # is ever selected. `ram` is already llama_cpp.server's default;
+        # stating it here means a future edit has to opt into the risk
+        # deliberately rather than inherit it by changing a default.
+        # It goes after the extra args on purpose: llama_cpp.server parses
+        # argv with argparse, where the last value wins, so an extra
+        # `--cache_type disk` (or an abbreviation of it) cannot override it.
+        # Previously it sat before the extra args and was overridable.
+        cmd.extend(["--cache_type", "ram"])
 
         logger.info(f"Starting llama.cpp server: {' '.join(cmd)}")
 
@@ -210,8 +233,13 @@ class LlamaCppServer:
         self._log_path = MODELS_DIR / "llamacpp_server.log"
         self._log_file = open(self._log_path, "w")
 
+        # llama_cpp.server reads a CONFIG_FILE environment variable that, like
+        # --config_file, replaces every argv setting (the RAM cache included);
+        # drop it so an inherited value cannot select the disk cache.
+        env = {k: v for k, v in os.environ.items() if k != "CONFIG_FILE"}
         self._process = subprocess.Popen(
             cmd,
+            env=env,
             stdout=subprocess.DEVNULL,
             stderr=self._log_file,
             # Ensure the subprocess is killed when the parent exits
