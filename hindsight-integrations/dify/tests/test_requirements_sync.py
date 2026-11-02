@@ -7,10 +7,15 @@ leaves the other install path able to resolve the vulnerable version.
 
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
 from typing import TypeAlias
 
+# isort: split
+# tomllib is stdlib from 3.11 on; the split keeps the block sorted for linters
+# that assume an older target and would file it under third-party.
+import tomllib
+
+# isort: split
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
