@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
+from typing import TypeAlias
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
@@ -16,7 +17,7 @@ from packaging.utils import canonicalize_name
 ROOT = Path(__file__).resolve().parent.parent
 
 # name, extras, specifier, marker, url: every field a declaration can carry.
-type RequirementKey = tuple[str, tuple[str, ...], str, str, str]
+RequirementKey: TypeAlias = tuple[str, tuple[str, ...], str, str, str]
 
 
 def _normalized(reqs: list[Requirement]) -> list[RequirementKey]:
