@@ -105,3 +105,28 @@ reason = "category D, entered 2026-11-02 (Dependabot alert opened that day): fix
 id = "GHSA-6627-m3xw-93mp"
 ignoreUntil = 2027-03-02
 reason = "category D, entered 2026-11-02 (Dependabot alert opened that day): fixed only in filelock 4.x, and litellm 1.106.6 (latest, checked 2026-11-02) still requires filelock<4.0, same cap as GHSA-69hj-f68j-2879; hindsight code imports no filelock (the direct requirement is a floor only), the users are litellm, huggingface-hub and torch on local cache paths. Trigger: a litellm release that allows filelock>=4.2.1."
+
+[[IgnoredVulns]]
+# chromadb: arbitrary tenant collection access in multi-tenant mode; hindsight-integrations/crewai/uv.lock.
+id = "GHSA-2wm9-hf6c-p5cr"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: no patched chromadb release exists on PyPI (latest 1.5.9 is affected, last_affected 1.5.9); crewai 1.6.1 also caps chromadb to ~=1.1.0; pulled as crewai default storage dependency; hindsight-crewai code does not import or call chromadb (custom storage routes memories to Hindsight API). Trigger: a patched chromadb release, or crewai dropping or upgrading chromadb."
+
+[[IgnoredVulns]]
+# chromadb: code injection vulnerability; hindsight-integrations/crewai/uv.lock.
+id = "GHSA-36p7-vc44-83pf"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: no patched chromadb release exists on PyPI (latest 1.5.9 is affected, last_affected 1.5.9); crewai 1.6.1 also caps chromadb to ~=1.1.0; pulled as crewai default storage dependency; hindsight-crewai code does not import or call chromadb (custom storage routes memories to Hindsight API). Trigger: a patched chromadb release, or crewai dropping or upgrading chromadb."
+
+[[IgnoredVulns]]
+# chromadb: pre-authentication code injection; hindsight-integrations/crewai/uv.lock.
+id = "GHSA-f4j7-r4q5-qw2c"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: no patched chromadb release exists on PyPI (latest 1.5.9 is affected, last_affected 1.5.9); crewai 1.6.1 also caps chromadb to ~=1.1.0; pulled as crewai default storage dependency; hindsight-crewai code does not import or call chromadb (custom storage routes memories to Hindsight API). Trigger: a patched chromadb release, or crewai dropping or upgrading chromadb."
+
+[[IgnoredVulns]]
+# chromadb: SimpleRBACAuthorizationProvider authorization bypass; hindsight-integrations/crewai/uv.lock.
+id = "GHSA-xph7-9rjv-w5fr"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: no patched chromadb release exists on PyPI (latest 1.5.9 is affected, last_affected 1.5.9); crewai 1.6.1 also caps chromadb to ~=1.1.0; pulled as crewai default storage dependency; hindsight-crewai code does not import or call chromadb (custom storage routes memories to Hindsight API). Trigger: a patched chromadb release, or crewai dropping or upgrading chromadb."
+
