@@ -11,6 +11,8 @@ trace, and the retained text is embedded under the retain.
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from hindsight_client_api.api.llm_traces_api import LLMTracesApi
@@ -29,15 +31,22 @@ async def test_embedding_and_rerank_calls_are_in_request_history(client, llm, ba
     await client.arecall(bank_id=bank_id, query="Where does Alice live?")
 
     traces = LLMTracesApi(client._api_client)
-    # Rows are buffered and written in batches; poll the public read endpoint.
-    for _ in range(50):
+    # Rows are buffered and written in batches; poll the public read endpoint until
+    # every row the assertions below pick is there. Waiting only for the scopes was a
+    # race: an embedding_query row written before the recall's own (from another
+    # operation of the bank) ended the poll and next() below raised StopIteration.
+    deadline = asyncio.get_running_loop().time() + 10
+    while True:
         embedding = (await traces.list_llm_requests(bank_id, call_type="embedding", limit=500)).items
         rerank = (await traces.list_llm_requests(bank_id, call_type="rerank", limit=500)).items
-        if {"embedding_document", "embedding_query"} <= {r.scope for r in embedding} and rerank:
+        if _recall_traces_ready(embedding, rerank):
             break
+        if asyncio.get_running_loop().time() > deadline:
+            raise AssertionError(
+                f"missing traces: embedding={[(r.scope, r.operation) for r in embedding]} "
+                f"rerank={[(r.operation, r.trace_id) for r in rerank]}"
+            )
         await asyncio.sleep(0.1)
-    else:
-        raise AssertionError(f"missing traces: embedding={[r.scope for r in embedding]} rerank={len(rerank)}")
 
     query = next(r for r in embedding if r.scope == "embedding_query" and r.operation == "recall")
     assert query.provider == "openai" and query.status == "success"
@@ -61,6 +70,28 @@ async def test_embedding_and_rerank_calls_are_in_request_history(client, llm, ba
 
     stats = await traces.llm_request_stats(bank_id, call_type="embedding", period="1d")
     assert sum(bucket.total for bucket in stats.buckets) == len(embedding)
+
+
+def _recall_traces_ready(embedding: list[Any], rerank: list[Any]) -> bool:
+    """Whether the rows the trace assertions pick have all been written: the recall's
+    query embedding, a rerank in the same trace, and the retain's document embedding."""
+    queries = [r for r in embedding if r.scope == "embedding_query" and r.operation == "recall"]
+    return any(r.trace_id == q.trace_id for q in queries for r in rerank) and any(
+        r.scope == "embedding_document" and r.operation == "retain" for r in embedding
+    )
+
+
+async def test_trace_poll_waits_for_the_recall_rows():
+    """Planted ordering from the flaky run: an embedding_query row from another
+    operation and a rerank arrive before the recall's own query embedding."""
+    early = [
+        SimpleNamespace(scope="embedding_document", operation="retain", trace_id="t1"),
+        SimpleNamespace(scope="embedding_query", operation="consolidation", trace_id="t2"),
+    ]
+    rerank = [SimpleNamespace(operation="recall", trace_id="t3")]
+    assert not _recall_traces_ready(early, rerank)
+    late = [*early, SimpleNamespace(scope="embedding_query", operation="recall", trace_id="t3")]
+    assert _recall_traces_ready(late, rerank)
 
 
 async def test_deleting_a_bank_deletes_its_request_history(client, llm, bank_id, settled):
