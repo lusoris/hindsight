@@ -1,12 +1,12 @@
-# Repository-wide osv-scanner configuration. Every scan invocation must pass
-# `--config osv-scanner.toml` (or `--config <path>/osv-scanner.toml`) so this
-# central exception list is respected across all lockfiles and ecosystems.
-#
-# Dated exceptions for open dependency advisories that have no reachable fix.
+# Dated exceptions for open advisories in the lockfiles in this directory
+# (uv.lock, package-lock.json).
 # Schema: https://google.github.io/osv-scanner/configuration/ ([[IgnoredVulns]]).
-# Each entry names its category (D = 120-day rectification interval, entered
-# 2026-11-02) and the trigger that ends it. An entry past ignoreUntil excuses
-# nothing; renew it only with a fresh check of the trigger.
+# osv-scanner applies a config file only to lockfiles in its own directory, and
+# the gate passes no --config, so each lockfile directory with an exception keeps
+# its own osv-scanner.toml and no entry here hides an advisory in another
+# lockfile. Each entry names its category (D = 120-day rectification interval,
+# entered 2026-11-02) and the trigger that ends it. An entry past ignoreUntil
+# excuses nothing; renew it only with a fresh check of the trigger.
 
 [[IgnoredVulns]]
 # filelock UnixFileLock truncates a file renamed or hard-linked onto the lock path; Dependabot #400, root uv.lock.
@@ -31,12 +31,6 @@ reason = "category D, entered 2026-11-02: no patched diskcache release exists (l
 id = "GHSA-gcqx-w48m-w2h4"
 ignoreUntil = 2027-03-02
 reason = "category D, entered 2026-11-02: no patched deepmerge release exists for >=4.2.0 <=4.3.1; reached only through jest and the docs build, which merge trusted local configuration. Trigger: a patched deepmerge release."
-
-[[IgnoredVulns]]
-# elliptic risky primitive; Dependabot #125, hindsight-integrations/eliza/package-lock.json, via @elizaos/core -> crypto-browserify.
-id = "GHSA-848j-6mx2-7j84"
-ignoreUntil = 2027-03-02
-reason = "category D, entered 2026-11-02: no patched elliptic release exists (<=6.6.1 affected); pulled by @elizaos/core 1.7.2 (latest) through the crypto-browserify polyfill, which the integration does not call. Trigger: a patched elliptic release or an @elizaos/core release without crypto-browserify."
 
 [[IgnoredVulns]]
 # minimatch globparts amplification denial of service; Dependabot #404, #406, #421, #427 (coding-agents, eliza, zapier and root package-lock.json).
@@ -109,21 +103,3 @@ reason = "category D, entered 2026-11-02 (Dependabot alert opened that day): fix
 id = "GHSA-6627-m3xw-93mp"
 ignoreUntil = 2027-03-02
 reason = "category D, entered 2026-11-02 (Dependabot alert opened that day): fixed only in filelock 4.x, and litellm 1.106.6 (latest, checked 2026-11-02) still requires filelock<4.0, same cap as GHSA-69hj-f68j-2879; hindsight code imports no filelock (the direct requirement is a floor only), the users are litellm, huggingface-hub and torch on local cache paths. Trigger: a litellm release that allows filelock>=4.2.1."
-
-[[IgnoredVulns]]
-# unsafe-libyaml unmaintained (RUSTSEC-2024-0449); hindsight-clients/rust/Cargo.lock, build-dependency only via progenitor -> serde_yaml.
-id = "RUSTSEC-2024-0449"
-ignoreUntil = 2027-03-02
-reason = "category D, entered 2026-11-02: unsafe-libyaml 0.2.11 is unmaintained (repository archived 2024-03-25), with no fixed version; pulled only as a build-dependency in hindsight-clients/rust via progenitor 0.11.2 -> progenitor-macro -> serde_yaml 0.9.34+deprecated for compile-time OpenAPI client generation, and not linked into the runtime client binary or library. Trigger: progenitor releasing a version that migrates away from serde_yaml, or moving to a maintained YAML parser fork."
-
-[[IgnoredVulns]]
-# glob AbortSignal cancellation bypass allows filesystem traversal after cancellation (OSV summary); hindsight-integrations/{coding-agents,eliza,zapier}/package-lock.json, via @opencode/util, @elizaos/core, archiver-utils, mocha, cacache, @npmcli/map-workspaces, @npmcli/package-json, rimraf.
-id = "GHSA-3g3m-2fjr-6pw4"
-ignoreUntil = 2027-03-02
-reason = "category D, entered 2026-11-02: fixed only in glob 14.0.2, but every parent across coding-agents, eliza and zapier lockfiles declares glob 8, 10 or 13 (@opencode/util declares 13.0.5, @elizaos/core declares ^13.0.0, archiver-utils declares ^10.0.0, mocha declares ^8.1.0 in lock and ^13.0.0 at latest, cacache, @npmcli/map-workspaces, @npmcli/package-json declare ^13.0.0, rimraf declares ^10.3.7 in lock and ^13.0.3 at latest; checked via npm view <parent>@latest dependencies) with no same-major parent release allowing 14. Trigger: parent releases that accept glob>=14.0.2."
-
-[[IgnoredVulns]]
-# zod can exhaust memory while validating oversized constrained collections (OSV summary); hindsight-integrations/n8n/package-lock.json, via n8n-workflow -> @n8n/expression-runtime.
-id = "GHSA-mrhx-c7xc-m3w5"
-ignoreUntil = 2027-03-02
-reason = "category D, entered 2026-11-02: fixed only in zod 4.6.6+, but n8n-workflow 2.6.1 and @n8n/expression-runtime 0.18.0 declare zod 3.x (zod 3.25.67 and 3.25.76; checked via npm view n8n-workflow@latest dependencies and npm view @n8n/expression-runtime@latest dependencies) with neither parent release accepting zod 4, so an override would cross major boundaries and break n8n workflow typing; dev tooling only for building community nodes (peerDependency supplied by n8n host runtime). Trigger: an n8n-workflow or @n8n/expression-runtime release that accepts zod>=4.6.6."

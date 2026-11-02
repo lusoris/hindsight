@@ -61,6 +61,9 @@ run_task "ruff-embed-check" "$REPO_ROOT/hindsight-embed" "uv run --frozen ruff c
 run_task "ruff-embed-format" "$REPO_ROOT/hindsight-embed" "uv run --frozen ruff format ."
 run_task "ty-embed" "$REPO_ROOT/hindsight-embed" "uv run --frozen ty check hindsight_embed"
 
+# osv-scanner exception files (osv-scanner skips an unparseable one silently)
+run_task "osv-config" "$REPO_ROOT" "python3 scripts/check-osv-config.py"
+
 # Integrations: lint packages with modifications vs HEAD locally; lint all in CI.
 # Python integrations use shared ruff.toml; Node integrations use shared .prettierrc.json.
 INTEGRATIONS_DIR="$REPO_ROOT/hindsight-integrations"
