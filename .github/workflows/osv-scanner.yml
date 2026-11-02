@@ -1,0 +1,40 @@
+# Scans every lockfile in the repository. osv-scanner applies an
+# osv-scanner.toml only to lockfiles in its own directory; no --config is
+# passed, so an exception is scoped to the lockfile directory that holds it.
+name: OSV-Scanner
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # Advisories published after the last push still reach unchanged lockfiles.
+  schedule:
+    - cron: "23 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      # osv-scanner skips a config it cannot parse and only logs it, which
+      # would drop every exception in that directory; fail on it instead.
+      - name: Check exception files
+        run: scripts/check-osv-config.sh
+      # The scan reads the pull request's own exception files. Who may
+      # change them is checked by osv-exception-approval.yml, which runs from
+      # the base branch so a pull request cannot rewrite that check.
+      # Exits non-zero on any finding the config does not except, and on a
+      # failed scan.
+      - name: Scan lockfiles
+        uses: google/osv-scanner-action/osv-scanner-action@0a65f82af05cd58cf587827b0bb0489548c18346 # v2.7.0
+        with:
+          scan-args: |-
+            --recursive
+            ./
