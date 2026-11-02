@@ -25,6 +25,7 @@ pytestmark = pytest.mark.asyncio
 
 
 async def test_embedding_and_rerank_calls_are_in_request_history(client, llm, bank_id, settled):
+    """Retain then recall: each embedding and rerank call is in the history, in its run."""
     llm.on_step("extract_facts").returns(extracted(fact("Alice lives in Lisbon")))
     llm.on_step("consolidate").returns(consolidation())
 
