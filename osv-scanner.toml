@@ -39,3 +39,69 @@ reason = "category D, entered 2026-11-02: no patched elliptic release exists (<=
 id = "GHSA-g3hv-75wg-m249"
 ignoreUntil = 2027-03-02
 reason = "category D, entered 2026-11-02: the only fixed release is minimatch 11.0.1, and every copy in the four locks sits under a parent that declares minimatch 3, 5, 9 or 10 (glob 7/8/10/13, eslint 9, typescript-estree 8, @redocly/openapi-core 1, @opencode/util 2.0.3, mocha 10, @oclif/core 4, yeoman, serve-handler) with no same-major parent release allowing 11; patterns come from trusted local config and build tooling, not request input. Trigger: parent releases that accept minimatch>=11.0.1."
+
+[[IgnoredVulns]]
+# filelock: ReadWriteLock SQLite reopens the lock database by name (planted symlink or journal); Dependabot #429, root uv.lock.
+id = "GHSA-v4x8-3wr5-3wq8"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: published 2026-11-02, fixed only in filelock 4.x, and litellm 1.106.6 (latest, checked 2026-11-02) still requires filelock<4.0, same cap as GHSA-69hj-f68j-2879; hindsight code imports no filelock (the direct requirement is a floor only), the users are litellm, huggingface-hub and torch on local cache paths. Trigger: a litellm release that allows filelock>=4.2.1."
+
+[[IgnoredVulns]]
+# filelock: Windows oplock on a soft lock marker holds acquire past its timeout; Dependabot #430, root uv.lock.
+id = "GHSA-567q-5qvw-pf92"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: published 2026-11-02, fixed only in filelock 4.x, and litellm 1.106.6 (latest, checked 2026-11-02) still requires filelock<4.0, same cap as GHSA-69hj-f68j-2879; hindsight code imports no filelock (the direct requirement is a floor only), the users are litellm, huggingface-hub and torch on local cache paths. Trigger: a litellm release that allows filelock>=4.2.1."
+
+[[IgnoredVulns]]
+# filelock: ReadWriteLock on Windows acts on SQLite side files placed by another local user; Dependabot #431, root uv.lock.
+id = "GHSA-9vhv-jxww-xfm5"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: published 2026-11-02, fixed only in filelock 4.x, and litellm 1.106.6 (latest, checked 2026-11-02) still requires filelock<4.0, same cap as GHSA-69hj-f68j-2879; hindsight code imports no filelock (the direct requirement is a floor only), the users are litellm, huggingface-hub and torch on local cache paths. Trigger: a litellm release that allows filelock>=4.2.1."
+
+[[IgnoredVulns]]
+# filelock: SoftFileLock stale-lock break removes a live lock file on a reused inode; Dependabot #432, root uv.lock.
+id = "GHSA-fq56-3cx3-fjxp"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: published 2026-11-02, fixed only in filelock 4.x, and litellm 1.106.6 (latest, checked 2026-11-02) still requires filelock<4.0, same cap as GHSA-69hj-f68j-2879; hindsight code imports no filelock (the direct requirement is a floor only), the users are litellm, huggingface-hub and torch on local cache paths. Trigger: a litellm release that allows filelock>=4.2.1."
+
+[[IgnoredVulns]]
+# filelock: StrictSoftFileLock follows a symlink swapped in at <path>.filelock; Dependabot #433, root uv.lock.
+id = "GHSA-m462-7rxw-wvpg"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: published 2026-11-02, fixed only in filelock 4.x, and litellm 1.106.6 (latest, checked 2026-11-02) still requires filelock<4.0, same cap as GHSA-69hj-f68j-2879; hindsight code imports no filelock (the direct requirement is a floor only), the users are litellm, huggingface-hub and torch on local cache paths. Trigger: a litellm release that allows filelock>=4.2.1."
+
+[[IgnoredVulns]]
+# filelock: ReadWriteLock follows a symlink at the lock path into SQLite (fixed in 4.0.9); Dependabot #434, root uv.lock.
+id = "GHSA-j8f7-rjxc-mr56"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: published 2026-11-02, fixed only in filelock 4.x, and litellm 1.106.6 (latest, checked 2026-11-02) still requires filelock<4.0, same cap as GHSA-69hj-f68j-2879; hindsight code imports no filelock (the direct requirement is a floor only), the users are litellm, huggingface-hub and torch on local cache paths. Trigger: a litellm release that allows filelock>=4.2.1."
+
+[[IgnoredVulns]]
+# filelock: symlink swap during the SoftFileLock writability check leaks path existence; Dependabot #435, root uv.lock.
+id = "GHSA-9j6q-wvj5-jgjg"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: published 2026-11-02, fixed only in filelock 4.x, and litellm 1.106.6 (latest, checked 2026-11-02) still requires filelock<4.0, same cap as GHSA-69hj-f68j-2879; hindsight code imports no filelock (the direct requirement is a floor only), the users are litellm, huggingface-hub and torch on local cache paths. Trigger: a litellm release that allows filelock>=4.2.1."
+
+[[IgnoredVulns]]
+# filelock: SoftFileLock removes a live holder's marker on a forged PID; Dependabot #436, root uv.lock.
+id = "GHSA-rfpc-qcw5-3pc4"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: published 2026-11-02, fixed only in filelock 4.x, and litellm 1.106.6 (latest, checked 2026-11-02) still requires filelock<4.0, same cap as GHSA-69hj-f68j-2879; hindsight code imports no filelock (the direct requirement is a floor only), the users are litellm, huggingface-hub and torch on local cache paths. Trigger: a litellm release that allows filelock>=4.2.1."
+
+[[IgnoredVulns]]
+# filelock: crafted ReadWriteLock database stalls every acquire; Dependabot #437, root uv.lock.
+id = "GHSA-cwqr-hh33-gh44"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: published 2026-11-02, fixed only in filelock 4.x, and litellm 1.106.6 (latest, checked 2026-11-02) still requires filelock<4.0, same cap as GHSA-69hj-f68j-2879; hindsight code imports no filelock (the direct requirement is a floor only), the users are litellm, huggingface-hub and torch on local cache paths. Trigger: a litellm release that allows filelock>=4.2.1."
+
+[[IgnoredVulns]]
+# filelock: StrictSoftFileLock and SoftReadWriteLock adopt a protocol directory another user created; Dependabot #438, root uv.lock.
+id = "GHSA-9c4x-gm8v-wgc4"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: published 2026-11-02, fixed only in filelock 4.x, and litellm 1.106.6 (latest, checked 2026-11-02) still requires filelock<4.0, same cap as GHSA-69hj-f68j-2879; hindsight code imports no filelock (the direct requirement is a floor only), the users are litellm, huggingface-hub and torch on local cache paths. Trigger: a litellm release that allows filelock>=4.2.1."
+
+[[IgnoredVulns]]
+# filelock: StrictSoftFileLock creates claim directories without the lock mode; Dependabot #439, root uv.lock.
+id = "GHSA-6627-m3xw-93mp"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: published 2026-11-02, fixed only in filelock 4.x, and litellm 1.106.6 (latest, checked 2026-11-02) still requires filelock<4.0, same cap as GHSA-69hj-f68j-2879; hindsight code imports no filelock (the direct requirement is a floor only), the users are litellm, huggingface-hub and torch on local cache paths. Trigger: a litellm release that allows filelock>=4.2.1."
