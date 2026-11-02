@@ -2,8 +2,10 @@
 # Feed check-osv-config.py the osv-scanner.toml files git knows about.
 #
 #   check-osv-config.sh            check every tracked exception file
-#   check-osv-config.sh BASE       fail on gated paths changed since BASE,
-#                                  unless OSV_EXCEPTION_APPROVED=1 (the
+#   check-osv-config.sh BASE [HEAD]
+#                                  fail on gated paths HEAD (default: the
+#                                  checkout) changed since its merge base with
+#                                  BASE, unless OSV_EXCEPTION_APPROVED=1 (the
 #                                  osv-exception-approval workflow runs the
 #                                  same check from the base branch in CI)
 set -euo pipefail
@@ -22,5 +24,7 @@ if [[ $# -eq 0 ]]; then
     # fails when it is given no file.
     git ls-files -z -- osv-scanner.toml '**/osv-scanner.toml' | xargs -0 "$python" scripts/check-osv-config.py
 else
-    git diff --name-only "$1" HEAD | "$python" scripts/check-osv-config.py --changed
+    # --no-renames lists a renamed file under both names. pipefail turns a
+    # failed diff into a failed check instead of an empty, passing list.
+    git diff --no-renames --name-only "$1...${2:-HEAD}" | "$python" scripts/check-osv-config.py --changed
 fi

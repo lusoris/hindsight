@@ -4,8 +4,10 @@
 #
 # pull_request_target runs this workflow, and the checker it checks out, from
 # the base branch, so a pull request cannot change the check that judges it.
-# No pull request code is checked out or run: the changed paths come from the
-# API and are only matched against a pattern. The token is read-only.
+# No pull request code is checked out or run: the pull request's commits are
+# only fetched as objects, and the paths git diff lists are matched against a
+# pattern. git diff has no listing limit (the pull request files API stops at
+# 3000 files), and any failure fails the job. The token is read-only.
 name: OSV exception approval
 
 on:
@@ -15,7 +17,6 @@ on:
 
 permissions:
   contents: read
-  pull-requests: read
 
 jobs:
   approval:
@@ -25,13 +26,16 @@ jobs:
         with:
           # The base branch: trusted code. Never the pull request head.
           ref: ${{ github.event.pull_request.base.sha }}
+          # Full history, so git diff can find the merge base.
+          fetch-depth: 0
           persist-credentials: false
       - name: Gated changes need the osv-exception label
         env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           OSV_EXCEPTION_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'osv-exception') && '1' || '0' }}
         run: |
-          gh api --paginate "repos/$REPO/pulls/$PR/files" --jq '.[] | .filename, (.previous_filename // empty)' \
-            | python3 scripts/check-osv-config.py --changed
+          set -euo pipefail
+          # Objects only; nothing from the pull request is checked out.
+          git fetch --no-tags origin "$HEAD_SHA"
+          scripts/check-osv-config.sh "$BASE_SHA" "$HEAD_SHA"
