@@ -8,8 +8,6 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-    # labeled/unlabeled re-run the exception gate when osv-exception changes.
-    types: [opened, synchronize, reopened, labeled, unlabeled]
   # Advisories published after the last push still reach unchanged lockfiles.
   schedule:
     - cron: "23 4 * * *"
@@ -29,18 +27,9 @@ jobs:
       # would drop every exception in that directory; fail on it instead.
       - name: Check exception files
         run: scripts/check-osv-config.sh
-      # The scan reads the pull request's own exception files, so its author
-      # could except an advisory their change brings in. A changed
-      # osv-scanner.toml needs the osv-exception label, which only accounts
-      # with triage or write access can apply.
-      - name: Exception changes need the osv-exception label
-        if: github.event_name == 'pull_request'
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          OSV_EXCEPTION_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'osv-exception') && '1' || '0' }}
-        run: |
-          git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          scripts/check-osv-config.sh "$BASE_SHA"
+      # The scan reads the pull request's own exception files. Who may
+      # change them is checked by osv-exception-approval.yml, which runs from
+      # the base branch so a pull request cannot rewrite that check.
       # Exits non-zero on any finding the config does not except, and on a
       # failed scan.
       - name: Scan lockfiles

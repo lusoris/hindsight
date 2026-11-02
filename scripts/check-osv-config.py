@@ -14,16 +14,19 @@ requires:
 - a lockfile next to it, since osv-scanner applies the file only to lockfiles in
   its own directory (the gate passes no --config).
 
-With --changed it instead fails on any file it is given, unless
-OSV_EXCEPTION_APPROVED=1. The gate sets that only when the pull request carries
-the osv-exception label, which needs triage or write access to apply, so the
-author of a pull request cannot add an exception for an advisory their own
-change brings in.
+With --changed it instead reads the paths a pull request changes from stdin,
+one per line, and fails when any of them is an exception file or part of this
+gate, unless OSV_EXCEPTION_APPROVED=1. The osv-exception-approval workflow sets
+that only when the pull request carries the osv-exception label, which needs
+triage or write access to apply, so the author of a pull request cannot add an
+exception for an advisory their own change brings in, nor weaken the check.
+That workflow runs from the base branch (pull_request_target) and executes no
+pull request code, so the pull request cannot change the copy that judges it.
 
-The file lists come from git; scripts/check-osv-config.sh builds them.
+scripts/check-osv-config.sh builds the file lists from git.
 
 usage: check-osv-config.py FILE...
-       check-osv-config.py --changed [FILE...]
+       git diff --name-only BASE HEAD | check-osv-config.py --changed
 """
 
 from __future__ import annotations
@@ -31,13 +34,17 @@ from __future__ import annotations
 import argparse
 import datetime
 import os
+import re
 import sys
 from pathlib import Path
 
 # isort: split
 # tomllib is stdlib from 3.11 on; the split keeps the block sorted for linters
 # that assume an older target and would file it under third-party.
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    sys.exit("check-osv-config: needs Python 3.11 or newer (tomllib)")
 
 TOP_KEYS = {"IgnoredVulns"}
 ENTRY_KEYS = {"id", "ignoreUntil", "reason"}
@@ -52,16 +59,25 @@ LOCKFILES = {
     "yarn.lock",
 }
 
+# Paths whose change needs the osv-exception label: every exception file, and
+# the files that make up this gate.
+GATED = re.compile(
+    r"(?:^|/)osv-scanner\.toml$"
+    r"|^scripts/check-osv-config\.(?:py|sh)$"
+    r"|^\.github/workflows/osv-(?:scanner|exception-approval)\.yml$"
+)
 
-def check_changed(changed: list[Path]) -> int:
-    if not changed:
-        print("check-osv-config: no exception file changed")
+
+def check_changed(paths: list[str]) -> int:
+    gated = [p for p in paths if GATED.search(p)]
+    if not gated:
+        print(f"check-osv-config: {len(paths)} paths changed, none gated")
         return 0
     if os.environ.get("OSV_EXCEPTION_APPROVED") == "1":
-        print(f"check-osv-config: {len(changed)} exception files changed, approved by label")
+        print(f"check-osv-config: {len(gated)} gated paths changed, approved by label")
         return 0
-    for p in changed:
-        print(f"{p}: exception file changed without the osv-exception label", file=sys.stderr)
+    for p in gated:
+        print(f"{p}: changed without the osv-exception label", file=sys.stderr)
     return 1
 
 
@@ -96,11 +112,13 @@ def check_file(path: Path) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("files", nargs="*", type=Path)
-    parser.add_argument("--changed", action="store_true", help="fail on any given file unless approved")
+    parser.add_argument("--changed", action="store_true", help="gate paths read from stdin")
     args = parser.parse_args()
     configs: list[Path] = args.files
     if args.changed:
-        return check_changed(configs)
+        if configs:
+            parser.error("--changed reads paths from stdin, not arguments")
+        return check_changed([line for line in sys.stdin.read().splitlines() if line])
     if not configs:
         print("check-osv-config: no osv-scanner.toml given", file=sys.stderr)
         return 1
