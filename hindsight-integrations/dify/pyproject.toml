@@ -11,6 +11,11 @@ dependencies = [
     "dify_plugin>=0.6.0",
     "hindsight-client>=0.4.0",
     "requests>=2.31.0",
+    # Security floors, kept in step with requirements.txt (the packaged plugin).
+    "aiohttp>=3.14.4",
+    "anyio>=4.14.2",
+    "certifi>=2026.10.18",
+    "idna>=3.15",
 ]
 
 [project.urls]
@@ -19,6 +24,7 @@ Repository = "https://github.com/vectorize-io/hindsight"
 
 [dependency-groups]
 dev = [
+    "packaging>=24.0",
     "pytest>=8.0",
     "pytest-mock>=3.12",
     "ruff>=0.8.0",
