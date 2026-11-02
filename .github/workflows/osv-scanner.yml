@@ -28,7 +28,7 @@ jobs:
       # osv-scanner skips a config it cannot parse and only logs it, which
       # would drop every exception in that directory; fail on it instead.
       - name: Check exception files
-        run: python3 scripts/check-osv-config.py
+        run: scripts/check-osv-config.sh
       # The scan reads the pull request's own exception files, so its author
       # could except an advisory their change brings in. A changed
       # osv-scanner.toml needs the osv-exception label, which only accounts
@@ -40,7 +40,7 @@ jobs:
           OSV_EXCEPTION_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'osv-exception') && '1' || '0' }}
         run: |
           git fetch --no-tags --depth=1 origin "$BASE_SHA"
-          python3 scripts/check-osv-config.py --changed-since "$BASE_SHA"
+          scripts/check-osv-config.sh "$BASE_SHA"
       # Exits non-zero on any finding the config does not except, and on a
       # failed scan.
       - name: Scan lockfiles

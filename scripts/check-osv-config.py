@@ -3,7 +3,7 @@
 
 osv-scanner logs "Ignored invalid config file" and carries on when a config does
 not parse, so a broken exception file silently drops every exception in its
-directory. This check fails instead. For each tracked osv-scanner.toml it
+directory. This check fails instead. For each osv-scanner.toml it is given it
 requires:
 
 - a strict TOML parse (duplicate keys refused);
@@ -14,14 +14,16 @@ requires:
 - a lockfile next to it, since osv-scanner applies the file only to lockfiles in
   its own directory (the gate passes no --config).
 
-With --changed-since BASE it instead fails when any osv-scanner.toml differs
-between BASE and HEAD, unless OSV_EXCEPTION_APPROVED=1. The gate sets that only
-when the pull request carries the osv-exception label, which needs triage or
-write access to apply, so the author of a pull request cannot add an exception
-for an advisory their own change brings in.
+With --changed it instead fails on any file it is given, unless
+OSV_EXCEPTION_APPROVED=1. The gate sets that only when the pull request carries
+the osv-exception label, which needs triage or write access to apply, so the
+author of a pull request cannot add an exception for an advisory their own
+change brings in.
 
-usage: check-osv-config.py [ROOT]
-       check-osv-config.py --changed-since BASE [ROOT]
+The file lists come from git; scripts/check-osv-config.sh builds them.
+
+usage: check-osv-config.py FILE...
+       check-osv-config.py --changed [FILE...]
 """
 
 from __future__ import annotations
@@ -29,10 +31,13 @@ from __future__ import annotations
 import argparse
 import datetime
 import os
-import subprocess
 import sys
-import tomllib
 from pathlib import Path
+
+# isort: split
+# tomllib is stdlib from 3.11 on; the split keeps the block sorted for linters
+# that assume an older target and would file it under third-party.
+import tomllib
 
 TOP_KEYS = {"IgnoredVulns"}
 ENTRY_KEYS = {"id", "ignoreUntil", "reason"}
@@ -48,20 +53,7 @@ LOCKFILES = {
 }
 
 
-PATHSPEC = ["--", "osv-scanner.toml", "**/osv-scanner.toml"]
-
-
-def _git(root: Path, *args: str) -> list[str]:
-    out = subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True, text=True).stdout
-    return [p for p in out.split("\0") if p]
-
-
-def _tracked_configs(root: Path) -> list[Path]:
-    return [root / p for p in _git(root, "ls-files", "-z", *PATHSPEC)]
-
-
-def check_changed(root: Path, base: str) -> int:
-    changed = _git(root, "diff", "-z", "--name-only", base, "HEAD", *PATHSPEC)
+def check_changed(changed: list[Path]) -> int:
     if not changed:
         print("check-osv-config: no exception file changed")
         return 0
@@ -103,15 +95,14 @@ def check_file(path: Path) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("root", nargs="?", type=Path, default=Path(__file__).resolve().parent.parent)
-    parser.add_argument("--changed-since", metavar="BASE")
+    parser.add_argument("files", nargs="*", type=Path)
+    parser.add_argument("--changed", action="store_true", help="fail on any given file unless approved")
     args = parser.parse_args()
-    root: Path = args.root
-    if args.changed_since:
-        return check_changed(root, args.changed_since)
-    configs = _tracked_configs(root)
+    configs: list[Path] = args.files
+    if args.changed:
+        return check_changed(configs)
     if not configs:
-        print("check-osv-config: no osv-scanner.toml tracked", file=sys.stderr)
+        print("check-osv-config: no osv-scanner.toml given", file=sys.stderr)
         return 1
     errors = [e for p in configs for e in check_file(p)]
     for e in errors:
