@@ -105,3 +105,15 @@ reason = "category D, entered 2026-11-02 (Dependabot alert opened that day): fix
 id = "GHSA-6627-m3xw-93mp"
 ignoreUntil = 2027-03-02
 reason = "category D, entered 2026-11-02 (Dependabot alert opened that day): fixed only in filelock 4.x, and litellm 1.106.6 (latest, checked 2026-11-02) still requires filelock<4.0, same cap as GHSA-69hj-f68j-2879; hindsight code imports no filelock (the direct requirement is a floor only), the users are litellm, huggingface-hub and torch on local cache paths. Trigger: a litellm release that allows filelock>=4.2.1."
+
+[[IgnoredVulns]]
+# glob AbortSignal cancellation bypass allows filesystem traversal after cancellation (OSV summary); hindsight-integrations/{coding-agents,eliza,zapier}/package-lock.json, via @opencode/util, @elizaos/core, archiver-utils, mocha, cacache, @npmcli/map-workspaces, @npmcli/package-json, rimraf.
+id = "GHSA-3g3m-2fjr-6pw4"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: fixed only in glob 14.0.2, but every parent across coding-agents, eliza and zapier lockfiles declares glob 8, 10 or 13 (@opencode/util declares 13.0.5, @elizaos/core declares ^13.0.0, archiver-utils declares ^10.0.0, mocha declares ^8.1.0 in lock and ^13.0.0 at latest, cacache, @npmcli/map-workspaces, @npmcli/package-json declare ^13.0.0, rimraf declares ^10.3.7 in lock and ^13.0.3 at latest; checked via npm view <parent>@latest dependencies) with no same-major parent release allowing 14. Trigger: parent releases that accept glob>=14.0.2."
+
+[[IgnoredVulns]]
+# zod can exhaust memory while validating oversized constrained collections (OSV summary); hindsight-integrations/n8n/package-lock.json, via n8n-workflow -> @n8n/expression-runtime.
+id = "GHSA-mrhx-c7xc-m3w5"
+ignoreUntil = 2027-03-02
+reason = "category D, entered 2026-11-02: fixed only in zod 4.6.6+, but n8n-workflow 2.6.1 and @n8n/expression-runtime 0.18.0 declare zod 3.x (zod 3.25.67 and 3.25.76; checked via npm view n8n-workflow@latest dependencies and npm view @n8n/expression-runtime@latest dependencies) with neither parent release accepting zod 4, so an override would cross major boundaries and break n8n workflow typing; dev tooling only for building community nodes (peerDependency supplied by n8n host runtime). Trigger: an n8n-workflow or @n8n/expression-runtime release that accepts zod>=4.6.6."
