@@ -1,40 +1,25 @@
 import { NextResponse } from "next/server";
-import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
+import type { CreateBankRequest } from "@vectorize-io/hindsight-client";
 import { sdk, lowLevelClient } from "@/lib/hindsight-client";
+import { parseJsonBody, validateBankId } from "@/lib/route-validation";
 import { respondWithSdk } from "@/lib/sdk-response";
 
 export async function PUT(request: Request, { params }: { params: Promise<{ bankId: string }> }) {
   const { bankId } = await params;
-  let body;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "Invalid JSON body",
-        errorKey: "api.errors.auth.invalidRequestBody",
-      }),
-      { status: 400 }
-    );
-  }
+  const bankIdError = validateBankId(request, bankId);
+  if (bankIdError) return bankIdError;
 
-  if (!bankId) {
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "bank_id is required",
-        errorKey: "api.errors.validation.bankIdRequired",
-      }),
-      { status: 400 }
-    );
-  }
+  const bodyOrError = await parseJsonBody(request);
+  if (bodyOrError instanceof NextResponse) return bodyOrError;
+  const body = bodyOrError;
 
   const response = await sdk.createOrUpdateBank({
     client: lowLevelClient,
     path: { bank_id: bankId },
     body: {
-      name: body.name,
-      mission: body.mission,
-      disposition: body.disposition,
+      name: body.name as string,
+      mission: body.mission as string,
+      disposition: body.disposition as CreateBankRequest["disposition"],
     },
   });
   return respondWithSdk(response, "Failed to update bank", { request });
@@ -42,36 +27,20 @@ export async function PUT(request: Request, { params }: { params: Promise<{ bank
 
 export async function PATCH(request: Request, { params }: { params: Promise<{ bankId: string }> }) {
   const { bankId } = await params;
-  let body;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "Invalid JSON body",
-        errorKey: "api.errors.auth.invalidRequestBody",
-      }),
-      { status: 400 }
-    );
-  }
+  const bankIdError = validateBankId(request, bankId);
+  if (bankIdError) return bankIdError;
 
-  if (!bankId) {
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "bank_id is required",
-        errorKey: "api.errors.validation.bankIdRequired",
-      }),
-      { status: 400 }
-    );
-  }
+  const bodyOrError = await parseJsonBody(request);
+  if (bodyOrError instanceof NextResponse) return bodyOrError;
+  const body = bodyOrError;
 
   const response = await sdk.updateBank({
     client: lowLevelClient,
     path: { bank_id: bankId },
     body: {
-      name: body.name,
-      mission: body.mission,
-      disposition: body.disposition,
+      name: body.name as string,
+      mission: body.mission as string,
+      disposition: body.disposition as CreateBankRequest["disposition"],
     },
   });
   return respondWithSdk(response, "Failed to update bank", { request });
@@ -83,15 +52,8 @@ export async function DELETE(
 ) {
   const { bankId } = await params;
 
-  if (!bankId) {
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "bank_id is required",
-        errorKey: "api.errors.validation.bankIdRequired",
-      }),
-      { status: 400 }
-    );
-  }
+  const bankIdError = validateBankId(request, bankId);
+  if (bankIdError) return bankIdError;
 
   const response = await sdk.deleteBank({
     client: lowLevelClient,
