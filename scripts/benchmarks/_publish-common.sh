@@ -89,9 +89,9 @@ publish_index_update() {
   fi
   mkdir -p "$target_dir"
 
-  if [ -n "${ENRICHED_TMP:-}" ] && [ -f "$ENRICHED_TMP" ] && [ -n "${DATA_FILE:-}" ]; then
-    cp "$ENRICHED_TMP" "$WORK/$DATA_FILE"
-  fi
+  : "${ENRICHED_TMP:?ENRICHED_TMP must be set before publish_index_update}"
+  : "${DATA_FILE:?DATA_FILE must be set before publish_index_update}"
+  cp "$ENRICHED_TMP" "$WORK/$DATA_FILE"
 
   local index_file
   if [[ "$index_filename" == data/* ]]; then
