@@ -1,5 +1,7 @@
 ---
 # category D: OpenAPI Generator output, regenerated from the API spec
 # entry 2026-11-07, expiry 2027-03-07
-exclude_paths:
-  - "hindsight-clients/python/hindsight_client_api/**"
+engines:
+  duplication:
+    exclude_paths:
+      - "hindsight-clients/python/hindsight_client_api/**"
