@@ -10926,7 +10926,17 @@ class MemoryEngine(MemoryEngineInterface):
                                 conn=sf_conn, fq_table=fq_table, bank_id=bank_id, unit_ids=source_ids_ordered
                             )
 
+                            now_for_source_facts = datetime.now(timezone.utc)
+
                             def _make_source_fact(sid: str, r: "StoredMemory") -> MemoryFact:
+                                record_status = getattr(r, "record_status", "active") or "active"
+                                ttl_seconds = getattr(r, "ttl_seconds", None)
+                                fetched_at = getattr(r, "fetched_at", None)
+                                is_stale = (record_status == "stale") or (
+                                    ttl_seconds is not None
+                                    and fetched_at is not None
+                                    and (now_for_source_facts - fetched_at).total_seconds() > ttl_seconds
+                                )
                                 return MemoryFact(
                                     id=sid,
                                     text=r.text,
@@ -10939,6 +10949,7 @@ class MemoryEngine(MemoryEngineInterface):
                                     metadata=r.metadata,
                                     chunk_id=str(r.chunk_id) if r.chunk_id else None,
                                     tags=r.tags or None,
+                                    is_stale=is_stale,
                                 )
 
                             selection = select_source_facts_within_budget(
@@ -11027,6 +11038,7 @@ class MemoryEngine(MemoryEngineInterface):
                 for sr in top_scored
             }
 
+            now = datetime.now(timezone.utc)
             memory_facts = []
             for result_dict in top_results_dicts:
                 result_id = str(result_dict.get("id"))
@@ -11034,6 +11046,15 @@ class MemoryEngine(MemoryEngineInterface):
                 entity_names = None
                 if include_entities and result_id in fact_entity_map:
                     entity_names = [e["canonical_name"] for e in fact_entity_map[result_id]]
+
+                record_status = result_dict.get("record_status") or "active"
+                ttl_seconds = result_dict.get("ttl_seconds")
+                fetched_at = result_dict.get("fetched_at")
+                is_stale = (record_status == "stale") or (
+                    ttl_seconds is not None
+                    and fetched_at is not None
+                    and (now - fetched_at).total_seconds() > ttl_seconds
+                )
 
                 memory_facts.append(
                     MemoryFact(
@@ -11051,6 +11072,7 @@ class MemoryEngine(MemoryEngineInterface):
                         tags=result_dict.get("tags"),
                         source_fact_ids=source_fact_ids_by_obs.get(result_id) if include_source_facts else None,
                         scores=scores_by_id.get(result_id),
+                        is_stale=is_stale,
                         attachment_ids=result_dict.get("attachment_ids"),
                     )
                 )

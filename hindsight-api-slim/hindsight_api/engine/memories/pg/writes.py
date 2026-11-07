@@ -73,6 +73,14 @@ async def insert_facts(
     observation_scopes_list = []
     text_signals_list = []
     attachment_ids_list = []
+    provenance_classes = []
+    write_authorities = []
+    observed_ats = []
+    fetched_ats = []
+    ttl_seconds_list = []
+    scopes = []
+    reset_conditions = []
+    record_statuses = []
 
     for fact in facts:
         fact_texts.append(_sanitize_text(fact.fact_text))
@@ -116,6 +124,14 @@ async def insert_facts(
         # attributed them. Empty for a fact stated in the prose — which is most of
         # them, and the reason this is per fact rather than per chunk.
         attachment_ids_list.append(json.dumps(list(dict.fromkeys(fact.attachment_ids))))
+        provenance_classes.append(getattr(fact, "provenance_class", None) or "inferred")
+        write_authorities.append(getattr(fact, "write_authority", None))
+        observed_ats.append(getattr(fact, "observed_at", None))
+        fetched_ats.append(getattr(fact, "fetched_at", None))
+        ttl_seconds_list.append(getattr(fact, "ttl_seconds", None))
+        scopes.append(getattr(fact, "scope", None))
+        reset_conditions.append(getattr(fact, "reset_condition", None))
+        record_statuses.append(getattr(fact, "record_status", None) or "active")
 
     # Batch insert all facts — delegates to DataAccessOps which handles
     # unnest (PG) vs row-by-row (Oracle) transparently.
@@ -140,6 +156,14 @@ async def insert_facts(
         text_signals_list,
         attachment_ids_list,
         text_search_extension=config.text_search_extension,
+        provenance_classes=provenance_classes,
+        write_authorities=write_authorities,
+        observed_ats=observed_ats,
+        fetched_ats=fetched_ats,
+        ttl_seconds_list=ttl_seconds_list,
+        scopes=scopes,
+        reset_conditions=reset_conditions,
+        record_statuses=record_statuses,
     )
 
 

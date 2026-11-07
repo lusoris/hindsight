@@ -307,6 +307,32 @@ class CausalEdgeRecord:
     weight: float = 1.0
 
 
+VALID_PROVENANCE_CLASSES: tuple[str, ...] = ("tool-run", "file-read", "recalled", "inferred")
+VALID_RECORD_STATUSES: tuple[str, ...] = ("active", "stale", "disputed", "tombstoned")
+
+
+def _validate_record_contract(provenance_class: str, record_status: str) -> None:
+    if provenance_class not in VALID_PROVENANCE_CLASSES:
+        raise ValueError(f"Invalid provenance_class {provenance_class!r}; must be one of {VALID_PROVENANCE_CLASSES}")
+    if record_status not in VALID_RECORD_STATUSES:
+        raise ValueError(f"Invalid record_status {record_status!r}; must be one of {VALID_RECORD_STATUSES}")
+
+
+def compute_is_stale(
+    record_status: str | None = "active",
+    ttl_seconds: int | None = None,
+    fetched_at: datetime | None = None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Compute whether a memory record is stale from its record_status or TTL."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    return (record_status == "stale") or (
+        ttl_seconds is not None and fetched_at is not None and (now - fetched_at).total_seconds() > ttl_seconds
+    )
+
+
 @dataclass
 class StoredMemory:
     """A memory read by address rather than by ranking.
@@ -355,6 +381,25 @@ class StoredMemory:
     # Short ids of the attachments this fact was drawn from (see META_ATTACHMENT_IDS).
     # Carried so the list and detail views resolve them from this read alone.
     attachment_ids: list[str] = field(default_factory=list)
+    provenance_class: str = "inferred"
+    write_authority: str | None = None
+    observed_at: datetime | None = None
+    fetched_at: datetime | None = None
+    ttl_seconds: int | None = None
+    scope: str | None = None
+    reset_condition: str | None = None
+    record_status: str = "active"
+
+    def __post_init__(self) -> None:
+        _validate_record_contract(self.provenance_class, self.record_status)
+
+    def is_stale(self, *, now: datetime | None = None) -> bool:
+        return compute_is_stale(
+            self.record_status,
+            self.ttl_seconds,
+            self.fetched_at,
+            now=now,
+        )
 
 
 @dataclass
@@ -607,6 +652,25 @@ class FactRecord:
     # Short ids of the attachments this fact was drawn from — what Postgres keeps in
     # `memory_units.attachment_ids`. Empty for a fact stated in plain text.
     attachment_ids: list[str] = field(default_factory=list)
+    provenance_class: str = "inferred"
+    write_authority: str | None = None
+    observed_at: datetime | None = None
+    fetched_at: datetime | None = None
+    ttl_seconds: int | None = None
+    scope: str | None = None
+    reset_condition: str | None = None
+    record_status: str = "active"
+
+    def __post_init__(self) -> None:
+        _validate_record_contract(self.provenance_class, self.record_status)
+
+    def is_stale(self, *, now: datetime | None = None) -> bool:
+        return compute_is_stale(
+            self.record_status,
+            self.ttl_seconds,
+            self.fetched_at,
+            now=now,
+        )
 
     def metadata_bag(self) -> dict[str, str]:
         """Render the non-modelled columns as an opaque str→str bag."""
@@ -729,6 +793,14 @@ def build_fact_records(
                 entity_ids=entity_ids,
                 causal_edges=causal_edges,
                 attachment_ids=list(getattr(fact, "attachment_ids", None) or []),
+                provenance_class=getattr(fact, "provenance_class", None) or "inferred",
+                write_authority=getattr(fact, "write_authority", None),
+                observed_at=getattr(fact, "observed_at", None),
+                fetched_at=getattr(fact, "fetched_at", None),
+                ttl_seconds=getattr(fact, "ttl_seconds", None),
+                scope=getattr(fact, "scope", None),
+                reset_condition=getattr(fact, "reset_condition", None),
+                record_status=getattr(fact, "record_status", None) or "active",
             )
         )
     return records

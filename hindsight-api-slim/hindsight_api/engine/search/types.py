@@ -98,6 +98,9 @@ class RetrievalResult:
     # empty — means the backend returned them on the row, so the read surface resolves
     # them without asking the store again.
     attachment_ids: list[str] | None = None
+    record_status: str = "active"
+    ttl_seconds: int | None = None
+    fetched_at: datetime | None = None
 
     # Retrieval-specific scores (only one will be set depending on retrieval method)
     similarity: float | None = None  # Semantic retrieval
@@ -123,6 +126,9 @@ class RetrievalResult:
             tags=row.get("tags"),
             metadata=row.get("metadata"),
             proof_count=row.get("proof_count"),
+            record_status=row.get("record_status") or "active",
+            ttl_seconds=row.get("ttl_seconds"),
+            fetched_at=row.get("fetched_at"),
             similarity=row.get("similarity"),
             bm25_score=row.get("bm25_score"),
             activation=row.get("activation"),
@@ -224,6 +230,9 @@ class ScoredResult:
             "tags": self.retrieval.tags,
             "metadata": self.retrieval.metadata,
             "attachment_ids": self.retrieval.attachment_ids,
+            "record_status": self.retrieval.record_status,
+            "ttl_seconds": self.retrieval.ttl_seconds,
+            "fetched_at": self.retrieval.fetched_at,
             "semantic_similarity": self.retrieval.similarity,
             "bm25_score": self.retrieval.bm25_score,
         }

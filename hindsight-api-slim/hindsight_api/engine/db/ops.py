@@ -421,6 +421,14 @@ class DataAccessOps(ABC):
         text_signals_list: list,
         attachment_ids_list: list,
         text_search_extension: str = "native",
+        provenance_classes: list[str] | None = None,
+        write_authorities: list[str | None] | None = None,
+        observed_ats: list | None = None,
+        fetched_ats: list | None = None,
+        ttl_seconds_list: list[int | None] | None = None,
+        scopes: list[str | None] | None = None,
+        reset_conditions: list[str | None] | None = None,
+        record_statuses: list[str] | None = None,
     ) -> list[str]:
         """Batch-insert facts, returning IDs.
 

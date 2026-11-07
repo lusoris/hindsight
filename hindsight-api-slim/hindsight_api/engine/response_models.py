@@ -467,6 +467,10 @@ class MemoryFact(BaseModel):
         None,
         description="Recall scores from each pipeline stage (final/reranker/semantic/keyword). Not returned for source facts.",
     )
+    is_stale: bool = Field(
+        default=False,
+        description="Whether this memory fact is stale (record_status == 'stale' or TTL expired).",
+    )
     # Internal, never serialised: the short ids of the attachments this fact was drawn
     # from, when the memories store returned them on the row. ``None`` means "not
     # carried", and the HTTP layer then reads them from `memory_units` instead; a list

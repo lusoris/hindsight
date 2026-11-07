@@ -198,11 +198,36 @@ class PostgreSQLOps(DataAccessOps):
         text_signals_list: list,
         attachment_ids_list: list,
         text_search_extension: str = "native",
+        provenance_classes: list[str] | None = None,
+        write_authorities: list[str | None] | None = None,
+        observed_ats: list | None = None,
+        fetched_ats: list | None = None,
+        ttl_seconds_list: list[int | None] | None = None,
+        scopes: list[str | None] | None = None,
+        reset_conditions: list[str | None] | None = None,
+        record_statuses: list[str] | None = None,
     ) -> list[str]:
         from ...config import get_config
 
         config = get_config()
         table = self._get_mu_table()
+        n = len(fact_texts)
+        if provenance_classes is None:
+            provenance_classes = ["inferred"] * n
+        if write_authorities is None:
+            write_authorities = [None] * n
+        if observed_ats is None:
+            observed_ats = [None] * n
+        if fetched_ats is None:
+            fetched_ats = [None] * n
+        if ttl_seconds_list is None:
+            ttl_seconds_list = [None] * n
+        if scopes is None:
+            scopes = [None] * n
+        if reset_conditions is None:
+            reset_conditions = [None] * n
+        if record_statuses is None:
+            record_statuses = ["active"] * n
 
         # search_vector is populated inline for backends that store a real vector
         # (native tsvector, vchord bm25vector). pgroonga / pg_textsearch / pg_search
@@ -217,14 +242,19 @@ class PostgreSQLOps(DataAccessOps):
                 SELECT * FROM unnest(
                     $2::text[], $3::vector[], $4::timestamptz[], $5::timestamptz[], $6::timestamptz[], $7::timestamptz[],
                     $8::text[], $9::text[], $10::jsonb[], $11::text[], $12::text[], $13::jsonb[], $14::jsonb[], $15::text[],
-                    $16::jsonb[]
+                    $16::jsonb[], $17::varchar[], $18::text[], $19::timestamptz[], $20::timestamptz[],
+                    $21::integer[], $22::text[], $23::text[], $24::varchar[]
                 ) AS t(text, embedding, event_date, occurred_start, occurred_end, mentioned_at,
                        context, fact_type, metadata, chunk_id, document_id, tags_json,
-                       observation_scopes_json, text_signals, attachment_ids_json)
+                       observation_scopes_json, text_signals, attachment_ids_json,
+                       provenance_class, write_authority, observed_at, fetched_at,
+                       ttl_seconds, scope, reset_condition, record_status)
             )
             INSERT INTO {table} (bank_id, text, embedding, event_date, occurred_start, occurred_end, mentioned_at,
                                  context, fact_type, metadata, chunk_id, document_id, tags,
-                                 observation_scopes, text_signals, attachment_ids{sv_insert_col})
+                                 observation_scopes, text_signals, attachment_ids,
+                                 provenance_class, write_authority, observed_at, fetched_at,
+                                 ttl_seconds, scope, reset_condition, record_status{sv_insert_col})
             SELECT
                 $1,
                 text, embedding, event_date, occurred_start, occurred_end, mentioned_at,
@@ -241,7 +271,9 @@ class PostgreSQLOps(DataAccessOps):
                 COALESCE(
                     (SELECT array_agg(elem) FROM jsonb_array_elements_text(attachment_ids_json) AS elem),
                     '{{}}'::text[]
-                ){sv_select_val}
+                ),
+                provenance_class, write_authority, observed_at, fetched_at,
+                ttl_seconds, scope, reset_condition, record_status{sv_select_val}
             FROM input_data
             RETURNING id
         """
@@ -264,6 +296,14 @@ class PostgreSQLOps(DataAccessOps):
             observation_scopes_list,
             text_signals_list,
             attachment_ids_list,
+            provenance_classes,
+            write_authorities,
+            observed_ats,
+            fetched_ats,
+            ttl_seconds_list,
+            scopes,
+            reset_conditions,
+            record_statuses,
         )
         return [str(row["id"]) for row in results]
 

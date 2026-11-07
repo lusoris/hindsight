@@ -680,6 +680,7 @@ class RecallResult(BaseModel):
         None  # IDs of source facts (observation type only, when source_facts is enabled)
     )
     scores: RecallScores | None = None  # Per-stage recall scores (final/reranker/semantic/text)
+    is_stale: bool = False
     attachments: list["ChunkAttachment"] | None = Field(
         default=None,
         description=(
@@ -5455,6 +5456,7 @@ def _register_routes(app: FastAPI):
                     tags=fact.tags,
                     source_fact_ids=fact.source_fact_ids,
                     scores=fact.scores,
+                    is_stale=fact.is_stale,
                 )
 
             recall_results = [_fact_to_result(fact) for fact in core_result.results]

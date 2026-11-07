@@ -151,13 +151,38 @@ class OracleOps(DataAccessOps):
         text_signals_list: list,
         attachment_ids_list: list,
         text_search_extension: str = "native",
+        provenance_classes: list[str] | None = None,
+        write_authorities: list[str | None] | None = None,
+        observed_ats: list | None = None,
+        fetched_ats: list | None = None,
+        ttl_seconds_list: list[int | None] | None = None,
+        scopes: list[str | None] | None = None,
+        reset_conditions: list[str | None] | None = None,
+        record_statuses: list[str] | None = None,
     ) -> list[str]:
         table = self._get_mu_table()
+        n = len(fact_texts)
+        if provenance_classes is None:
+            provenance_classes = ["inferred"] * n
+        if write_authorities is None:
+            write_authorities = [None] * n
+        if observed_ats is None:
+            observed_ats = [None] * n
+        if fetched_ats is None:
+            fetched_ats = [None] * n
+        if ttl_seconds_list is None:
+            ttl_seconds_list = [None] * n
+        if scopes is None:
+            scopes = [None] * n
+        if reset_conditions is None:
+            reset_conditions = [None] * n
+        if record_statuses is None:
+            record_statuses = ["active"] * n
         # Generate UUIDs client-side so we can use executemany (single network
         # round-trip) instead of N individual INSERT+RETURNING calls.
-        unit_ids = [str(uuid_mod.uuid4()) for _ in range(len(fact_texts))]
+        unit_ids = [str(uuid_mod.uuid4()) for _ in range(n)]
         rows_data = []
-        for i in range(len(fact_texts)):
+        for i in range(n):
             tags_value = json.loads(tags_list[i]) if tags_list[i] else []
             rows_data.append(
                 (
@@ -182,14 +207,25 @@ class OracleOps(DataAccessOps):
                     # check wants exactly that — pass it through rather than
                     # encoding it twice.
                     attachment_ids_list[i] or "[]",
+                    provenance_classes[i],
+                    write_authorities[i],
+                    observed_ats[i],
+                    fetched_ats[i],
+                    ttl_seconds_list[i],
+                    scopes[i],
+                    reset_conditions[i],
+                    record_statuses[i],
                 )
             )
         await conn.executemany(
             f"""
             INSERT INTO {table} (id, bank_id, text, embedding, event_date, occurred_start,
                 occurred_end, mentioned_at, context, fact_type, metadata, chunk_id, document_id,
-                tags, observation_scopes, text_signals, attachment_ids)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+                tags, observation_scopes, text_signals, attachment_ids,
+                provenance_class, write_authority, observed_at, fetched_at,
+                ttl_seconds, scope, reset_condition, record_status)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17,
+                $18, $19, $20, $21, $22, $23, $24, $25)
             """,
             rows_data,
         )
