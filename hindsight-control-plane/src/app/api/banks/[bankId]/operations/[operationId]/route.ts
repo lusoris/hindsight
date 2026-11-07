@@ -1,3 +1,4 @@
+import { NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { sdk, lowLevelClient, dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { validateBankId, validateOperationId } from "@/lib/route-validation";

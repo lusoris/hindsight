@@ -27,7 +27,7 @@ export async function PATCH(
   const response = await sdk.updateBankConfig({
     client: lowLevelClient,
     path: { bank_id: bankId },
-    body: { updates },
+    body: { updates: updates as Record<string, unknown> },
   });
   return respondWithSdk(response, "Failed to update bank config", { request });
 }
