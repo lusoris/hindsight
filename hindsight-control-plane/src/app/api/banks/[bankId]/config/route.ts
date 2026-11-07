@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { lowLevelClient, sdk } from "@/lib/hindsight-client";
-import { parseJsonBody } from "@/lib/route-validation";
+import { parseJsonBody, validateBankId } from "@/lib/route-validation";
 import { respondWithSdk } from "@/lib/sdk-response";
 
 export async function GET(
@@ -8,6 +8,8 @@ export async function GET(
   { params }: { params: Promise<{ bankId: string }> }
 ) {
   const { bankId } = await params;
+  const bankIdError = validateBankId(request, bankId);
+  if (bankIdError) return bankIdError;
   const response = await sdk.getBankConfig({
     client: lowLevelClient,
     path: { bank_id: bankId },
@@ -20,6 +22,8 @@ export async function PATCH(
   { params }: { params: Promise<{ bankId: string }> }
 ) {
   const { bankId } = await params;
+  const bankIdError = validateBankId(request, bankId);
+  if (bankIdError) return bankIdError;
   const bodyOrError = await parseJsonBody(request);
   if (bodyOrError instanceof NextResponse) return bodyOrError;
   const { updates } = bodyOrError;
@@ -37,6 +41,8 @@ export async function DELETE(
   { params }: { params: Promise<{ bankId: string }> }
 ) {
   const { bankId } = await params;
+  const bankIdError = validateBankId(request, bankId);
+  if (bankIdError) return bankIdError;
   const response = await sdk.resetBankConfig({
     client: lowLevelClient,
     path: { bank_id: bankId },
