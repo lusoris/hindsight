@@ -11,9 +11,3 @@
 id = "RUSTSEC-2024-0449"
 ignoreUntil = 2027-03-02
 reason = "category D, entered 2026-11-02: unsafe-libyaml 0.2.11 is unmaintained (repository archived 2024-03-25), with no fixed version; pulled only as a build-dependency in hindsight-clients/rust via progenitor 0.11.2 -> progenitor-macro -> serde_yaml 0.9.34+deprecated for compile-time OpenAPI client generation, and not linked into the runtime client binary or library. Trigger: progenitor releasing a version that migrates away from serde_yaml, or moving to a maintained YAML parser fork."
-
-[[IgnoredVulns]]
-# pin-utils unmaintained (RUSTSEC-2026-0441); hindsight-clients/rust/Cargo.lock, runtime dependency via futures-util.
-id = "RUSTSEC-2026-0441"
-ignoreUntil = 2027-03-07
-reason = "category D, entered 2026-11-07: pin-utils 0.1.0 is unmaintained, with no fixed version or maintained fork; pulled by futures-util 0.3.x (latest 0.3.34 still depends on it) through the core async ecosystem (hyper-util, reqwest, tower), so it cannot be removed without dropping the HTTP client. The crate is a small macro wrapper (pin_mut!) with no known exploitable flaw beyond the unmaintained status. Trigger: futures-util releasing a version that drops pin-utils, or a maintained fork."
