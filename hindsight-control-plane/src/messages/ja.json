@@ -2062,7 +2062,8 @@
         "missingRequestData": "リクエストデータが不足しています",
         "missingBankId": "bank_id がありません",
         "fileRequired": "ファイルが必要です",
-        "targetBankIdRequired": "target_bank_id は必須です"
+        "targetBankIdRequired": "target_bank_id は必須です",
+        "attachmentIdRequired": "有効な添付ファイルIDが必要です"
       },
       "generic": {
         "failed": "失敗しました",

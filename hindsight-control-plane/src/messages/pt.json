@@ -2062,7 +2062,8 @@
         "missingRequestData": "Dados da solicitação ausentes",
         "missingBankId": "bank_id ausente",
         "fileRequired": "É necessário um arquivo",
-        "targetBankIdRequired": "target_bank_id é obrigatório"
+        "targetBankIdRequired": "target_bank_id é obrigatório",
+        "attachmentIdRequired": "É necessário um ID de anexo válido"
       },
       "generic": {
         "failed": "Falha",
