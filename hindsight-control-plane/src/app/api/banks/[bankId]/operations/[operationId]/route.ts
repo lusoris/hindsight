@@ -1,6 +1,6 @@
-import { NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { sdk, lowLevelClient, dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { validateBankId, validateOperationId } from "@/lib/route-validation";
 import { respondWithSdk } from "@/lib/sdk-response";
 
 export async function GET(
@@ -8,26 +8,10 @@ export async function GET(
   { params }: { params: Promise<{ bankId: string; operationId: string }> }
 ) {
   const { bankId, operationId } = await params;
-
-  if (!bankId) {
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "bank_id is required",
-        errorKey: "api.errors.validation.bankIdRequired",
-      }),
-      { status: 400 }
-    );
-  }
-
-  if (!operationId) {
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "operation_id is required",
-        errorKey: "api.errors.validation.operationIdRequired",
-      }),
-      { status: 400 }
-    );
-  }
+  const bankIdError = validateBankId(request, bankId);
+  if (bankIdError) return bankIdError;
+  const opIdError = validateOperationId(request, operationId);
+  if (opIdError) return opIdError;
 
   const url = new URL(request.url);
   const includePayload = url.searchParams.get("include_payload") === "true";
@@ -46,26 +30,10 @@ export async function POST(
 ) {
   try {
     const { bankId, operationId } = await params;
-
-    if (!bankId) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "bank_id is required",
-          errorKey: "api.errors.validation.bankIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
-
-    if (!operationId) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "operation_id is required",
-          errorKey: "api.errors.validation.operationIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
+    const bankIdError = validateBankId(request, bankId);
+    if (bankIdError) return bankIdError;
+    const opIdError = validateOperationId(request, operationId);
+    if (opIdError) return opIdError;
 
     const url = dataplaneBankUrl(bankId, `/operations/${encodeURIComponent(operationId)}/retry`);
     const response = await fetch(url, {
@@ -104,26 +72,10 @@ export async function DELETE(
 ) {
   try {
     const { bankId, operationId } = await params;
-
-    if (!bankId) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "bank_id is required",
-          errorKey: "api.errors.validation.bankIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
-
-    if (!operationId) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "operation_id is required",
-          errorKey: "api.errors.validation.operationIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
+    const bankIdError = validateBankId(request, bankId);
+    if (bankIdError) return bankIdError;
+    const opIdError = validateOperationId(request, operationId);
+    if (opIdError) return opIdError;
 
     const response = await sdk.deleteOperation({
       client: lowLevelClient,

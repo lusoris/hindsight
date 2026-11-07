@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { lowLevelClient, sdk } from "@/lib/hindsight-client";
+import { parseJsonBody } from "@/lib/route-validation";
 import { respondWithSdk } from "@/lib/sdk-response";
 
 export async function GET(
@@ -20,19 +20,9 @@ export async function PATCH(
   { params }: { params: Promise<{ bankId: string }> }
 ) {
   const { bankId } = await params;
-  let body;
-  try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "Invalid JSON body",
-        errorKey: "api.errors.auth.invalidRequestBody",
-      }),
-      { status: 400 }
-    );
-  }
-  const { updates } = body;
+  const bodyOrError = await parseJsonBody(request);
+  if (bodyOrError instanceof NextResponse) return bodyOrError;
+  const { updates } = bodyOrError;
 
   const response = await sdk.updateBankConfig({
     client: lowLevelClient,

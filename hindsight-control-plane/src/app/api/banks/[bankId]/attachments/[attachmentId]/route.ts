@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { DATAPLANE_URL, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { validateBankId } from "@/lib/route-validation";
 
 /**
  * Serve an attachment retained as inline content, by bank and short id.
@@ -21,14 +22,13 @@ export async function GET(
 ) {
   try {
     const { bankId, attachmentId } = await params;
+    const bankIdError = validateBankId(request, bankId);
+    if (bankIdError) return bankIdError;
 
-    // The id is a hex prefix of the attachment's sha256 and nothing else.
-    // Validating it here keeps a caller from steering the proxied path anywhere
-    // but the attachment endpoint.
-    if (!bankId || !/^[0-9a-f]{12}$/.test(attachmentId)) {
+    if (!/^[0-9a-f]{12}$/.test(attachmentId)) {
       return NextResponse.json(
         localizeApiErrorPayload(request, {
-          error: "A bank id and a valid attachment id are required",
+          error: "A valid attachment id is required",
           errorKey: "api.errors.validation.bankIdRequired",
         }),
         { status: 400 }

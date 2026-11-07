@@ -1,25 +1,19 @@
 import { NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { validateBankId } from "@/lib/route-validation";
 
 export async function GET(request: Request, { params }: { params: Promise<{ bankId: string }> }) {
   try {
     const { bankId } = await params;
+    const bankIdError = validateBankId(request, bankId);
+    if (bankIdError) return bankIdError;
+
     const { searchParams } = new URL(request.url);
     const tags = searchParams.getAll("tags");
     const tagsMatch = searchParams.get("tags_match");
     const limit = searchParams.get("limit");
     const offset = searchParams.get("offset");
-
-    if (!bankId) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "bank_id is required",
-          errorKey: "api.errors.validation.bankIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
 
     const queryParams = new URLSearchParams();
     if (tags.length > 0) {
@@ -70,16 +64,8 @@ export async function GET(request: Request, { params }: { params: Promise<{ bank
 export async function POST(request: Request, { params }: { params: Promise<{ bankId: string }> }) {
   try {
     const { bankId } = await params;
-
-    if (!bankId) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "bank_id is required",
-          errorKey: "api.errors.validation.bankIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
+    const bankIdError = validateBankId(request, bankId);
+    if (bankIdError) return bankIdError;
 
     const body = await request.json();
 
