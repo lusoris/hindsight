@@ -15,47 +15,15 @@
 # Usage:
 #   ./scripts/benchmarks/publish-obs-results.sh path/to/obs-results.json
 
-set -euo pipefail
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=scripts/benchmarks/_publish-common.sh
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/_publish-common.sh"
 
-INPUT_JSON="${1:?usage: $0 <obs-results.json>}"
-DASHBOARD_REPO="${DASHBOARD_REPO:-vectorize-io/hindsight-continuous-performance-monitor}"
-HINDSIGHT_REPO="${HINDSIGHT_REPO:-vectorize-io/hindsight}"
+publish_init "${1:-}" "<obs-results.json>"
 
-if [ ! -f "$INPUT_JSON" ]; then
-  echo "Input JSON not found: $INPUT_JSON" >&2
-  exit 1
-fi
-: "${PERF_DASHBOARD_TOKEN:?PERF_DASHBOARD_TOKEN must be set}"
-
-# ─────────────────────────────────────────────────────────────────────────
-# Capture commit + workflow metadata
-# ─────────────────────────────────────────────────────────────────────────
-SHA=$(git rev-parse HEAD)
-SHORT_SHA=$(git rev-parse --short=8 HEAD)
-SUBJECT=$(git log -1 --pretty=%s)
-AUTHOR=$(git log -1 --pretty=%an)
-AUTHOR_DATE=$(git log -1 --pretty=%aI)
-COMMIT_URL="https://github.com/${HINDSIGHT_REPO}/commit/${SHA}"
-
-PR_NUMBER=""
-PR_URL=""
-if command -v gh >/dev/null 2>&1; then
-  PR_NUMBER=$(gh api "repos/${HINDSIGHT_REPO}/commits/${SHA}/pulls" \
-    --jq '.[0].number // empty' 2>/dev/null || true)
-  if [ -n "$PR_NUMBER" ]; then
-    PR_URL="https://github.com/${HINDSIGHT_REPO}/pull/${PR_NUMBER}"
-  fi
-fi
-
-RUN_ID="${GITHUB_RUN_ID:-}"
-RUN_URL=""
-if [ -n "$RUN_ID" ]; then
-  RUN_REPO="${GITHUB_REPOSITORY:-$HINDSIGHT_REPO}"
-  RUN_URL="https://github.com/${RUN_REPO}/actions/runs/${RUN_ID}"
-fi
-
-TIMESTAMP_FILE=$(date -u +%Y%m%dT%H%M%SZ)
-DATA_FILE="data/obs/${TIMESTAMP_FILE}-${SHORT_SHA}.json"
+DATA_SUBDIR="obs"
+publish_git_metadata "$DATA_SUBDIR"
 
 echo "Publishing obs run for ${SHORT_SHA} → ${DATA_FILE}"
 
@@ -63,7 +31,6 @@ echo "Publishing obs run for ${SHORT_SHA} → ${DATA_FILE}"
 # Enrich the input JSON (the benchmark already carries timestamp + metrics)
 # ─────────────────────────────────────────────────────────────────────────
 ENRICHED_TMP=$(mktemp)
-trap 'rm -f "$ENRICHED_TMP"' EXIT
 
 jq \
   --arg sha "$SHA" \
@@ -97,15 +64,7 @@ TOTAL_OBS=$(jq -r '.total_observations // 0' "$ENRICHED_TMP")
 # ─────────────────────────────────────────────────────────────────────────
 # Clone dashboard repo's gh-pages branch
 # ─────────────────────────────────────────────────────────────────────────
-WORK=$(mktemp -d)
-trap 'rm -f "$ENRICHED_TMP"; rm -rf "$WORK"' EXIT
-
-git clone --quiet --depth 1 --branch gh-pages \
-  "https://x-access-token:${PERF_DASHBOARD_TOKEN}@github.com/${DASHBOARD_REPO}.git" \
-  "$WORK"
-
-mkdir -p "$WORK/data/obs"
-cp "$ENRICHED_TMP" "$WORK/$DATA_FILE"
+publish_clone
 
 # ─────────────────────────────────────────────────────────────────────────
 # Update manifest (data/obs-index.json)
@@ -138,34 +97,9 @@ NEW_ENTRY=$(jq -n \
     total_observations: $total_obs
   }')
 
-INDEX_FILE="$WORK/data/obs-index.json"
-if [ ! -f "$INDEX_FILE" ]; then
-  echo '{"runs": []}' > "$INDEX_FILE"
-fi
-
-UPDATED_INDEX=$(jq \
-  --argjson entry "$NEW_ENTRY" \
-  '.runs = ([$entry] + (.runs // [])) | .updated_at = (now | todateiso8601)' \
-  "$INDEX_FILE")
-echo "$UPDATED_INDEX" > "$INDEX_FILE"
+publish_index_update "$NEW_ENTRY" "$DATA_SUBDIR" "obs-index.json"
 
 # ─────────────────────────────────────────────────────────────────────────
 # Commit and push
 # ─────────────────────────────────────────────────────────────────────────
-cd "$WORK"
-git config user.name 'hindsight-perf-bot'
-git config user.email 'hindsight-perf-bot@users.noreply.github.com'
-git add data/
-if git diff --cached --quiet; then
-  echo "No changes to commit (this shouldn't happen — skipping push)" >&2
-  exit 0
-fi
-git commit --quiet -m "obs: add results for ${SHORT_SHA}"
-
-if ! git push --quiet origin gh-pages; then
-  echo "Push rejected, pulling and retrying..." >&2
-  git pull --quiet --rebase origin gh-pages
-  git push --quiet origin gh-pages
-fi
-
-echo "Published ${DATA_FILE} to ${DASHBOARD_REPO} gh-pages"
+publish_push "obs"
