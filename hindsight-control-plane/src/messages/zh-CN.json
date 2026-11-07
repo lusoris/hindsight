@@ -2062,7 +2062,8 @@
         "missingRequestData": "缺少请求数据",
         "missingBankId": "缺少 bank_id",
         "fileRequired": "需要文件",
-        "targetBankIdRequired": "必须提供 target_bank_id"
+        "targetBankIdRequired": "必须提供 target_bank_id",
+        "attachmentIdRequired": "需要有效的附件 ID"
       },
       "generic": {
         "failed": "失败",

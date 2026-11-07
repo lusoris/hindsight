@@ -2062,7 +2062,8 @@
         "missingRequestData": "요청 데이터가 누락되었습니다",
         "missingBankId": "bank_id가 누락되었습니다",
         "fileRequired": "파일이 필요합니다",
-        "targetBankIdRequired": "target_bank_id는 필수입니다"
+        "targetBankIdRequired": "target_bank_id는 필수입니다",
+        "attachmentIdRequired": "유효한 첨부 파일 ID가 필요합니다"
       },
       "generic": {
         "failed": "실패했습니다",
