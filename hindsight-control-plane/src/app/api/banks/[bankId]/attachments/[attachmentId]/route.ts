@@ -29,7 +29,7 @@ export async function GET(
       return NextResponse.json(
         localizeApiErrorPayload(request, {
           error: "A valid attachment id is required",
-          errorKey: "api.errors.validation.bankIdRequired",
+          errorKey: "api.errors.validation.attachmentIdRequired",
         }),
         { status: 400 }
       );
