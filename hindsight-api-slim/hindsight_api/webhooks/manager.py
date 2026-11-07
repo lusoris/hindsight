@@ -73,6 +73,74 @@ class WebhookManager:
         mac = hmac.new(secret.encode(), signed, hashlib.sha256).hexdigest()
         return f"t={timestamp},v1={mac}"
 
+    async def _queue_deliveries(self, event: WebhookEvent, conn: Any, schema: str | None) -> int:
+        """Fetch matching webhooks and insert delivery tasks on *conn*.
+
+        Returns the number of deliveries queued.
+        """
+        webhook_table = _fq_table("webhooks", schema)
+        ops_table = _fq_table("async_operations", schema)
+        now = datetime.now(timezone.utc)
+        payload_str = event.model_dump_json(exclude_none=True)
+
+        rows = await self._backend.ops.get_webhooks_for_dispatch(
+            conn,
+            webhook_table,
+            event.bank_id,
+        )
+
+        db_webhooks = [
+            WebhookConfig(
+                id=str(row["id"]),
+                bank_id=row["bank_id"],
+                url=row["url"],
+                secret=row["secret"],
+                event_types=list(row["event_types"]) if row["event_types"] else [],
+                enabled=row["enabled"],
+                http_config=_parse_http_config(row["http_config"]),
+            )
+            for row in rows
+        ]
+
+        all_webhooks = self._global_webhooks + db_webhooks
+        matched = 0
+
+        for webhook in all_webhooks:
+            if not webhook.enabled:
+                continue
+            if event.event.value not in webhook.event_types:
+                continue
+
+            operation_id = uuid.uuid4()
+            webhook_id = webhook.id if webhook.id else None
+
+            task_payload = json.dumps(
+                {
+                    "type": "webhook_delivery",
+                    "operation_id": str(operation_id),
+                    "event_id": event.event_id,
+                    "bank_id": event.bank_id,
+                    "url": webhook.url,
+                    "secret": webhook.secret,
+                    "event_type": event.event.value,
+                    "payload": payload_str,
+                    "webhook_id": webhook_id,
+                    "http_config": webhook.http_config.model_dump(),
+                }
+            )
+
+            await self._backend.ops.insert_webhook_delivery_task(
+                conn,
+                ops_table,
+                operation_id,
+                event.bank_id,
+                task_payload,
+                now,
+            )
+            matched += 1
+
+        return matched
+
     async def fire_event(self, event: WebhookEvent, schema: str | None = None) -> None:
         """
         Queue webhook deliveries for an event as async_operations tasks.
@@ -85,74 +153,10 @@ class WebhookManager:
             event: The event to deliver.
             schema: Database schema (for multi-tenant). None = default schema.
         """
-        webhook_table = _fq_table("webhooks", schema)
-        ops_table = _fq_table("async_operations", schema)
-        now = datetime.now(timezone.utc)
-        # Drop null fields so receivers don't see promised-but-unfilled keys.
-        # OSS leaves SIEM-enrichment fields (severity, api_key_name, etc.) None
-        # because it doesn't have the data; cloud populates them when it does.
-        payload_str = event.model_dump_json(exclude_none=True)
-
         try:
             async with self._backend.acquire() as conn:
-                rows = await self._backend.ops.get_webhooks_for_dispatch(
-                    conn,
-                    webhook_table,
-                    event.bank_id,
-                )
-
-                db_webhooks = [
-                    WebhookConfig(
-                        id=str(row["id"]),
-                        bank_id=row["bank_id"],
-                        url=row["url"],
-                        secret=row["secret"],
-                        event_types=list(row["event_types"]) if row["event_types"] else [],
-                        enabled=row["enabled"],
-                        http_config=_parse_http_config(row["http_config"]),
-                    )
-                    for row in rows
-                ]
-
-                all_webhooks = self._global_webhooks + db_webhooks
-                matched = 0
-
-                for webhook in all_webhooks:
-                    if not webhook.enabled:
-                        continue
-                    if event.event.value not in webhook.event_types:
-                        continue
-
-                    operation_id = uuid.uuid4()
-                    webhook_id = webhook.id if webhook.id else None
-
-                    task_payload = json.dumps(
-                        {
-                            "type": "webhook_delivery",
-                            "operation_id": str(operation_id),
-                            "event_id": event.event_id,
-                            "bank_id": event.bank_id,
-                            "url": webhook.url,
-                            "secret": webhook.secret,
-                            "event_type": event.event.value,
-                            "payload": payload_str,
-                            "webhook_id": webhook_id,
-                            "http_config": webhook.http_config.model_dump(),
-                        }
-                    )
-
-                    await self._backend.ops.insert_webhook_delivery_task(
-                        conn,
-                        ops_table,
-                        operation_id,
-                        event.bank_id,
-                        task_payload,
-                        now,
-                    )
-                    matched += 1
-
+                matched = await self._queue_deliveries(event, conn, schema)
             logger.debug(f"Fired webhook event {event.event} for bank {event.bank_id}: {matched} delivery(ies) queued")
-
         except Exception as e:
             logger.error(f"Failed to queue webhook deliveries for event {event.event}: {e}")
 
@@ -169,75 +173,11 @@ class WebhookManager:
             conn: Existing database connection (may be inside an active transaction).
             schema: Database schema (for multi-tenant). None = default schema.
         """
-        webhook_table = _fq_table("webhooks", schema)
-        ops_table = _fq_table("async_operations", schema)
-        now = datetime.now(timezone.utc)
-        # Drop null fields so receivers don't see promised-but-unfilled keys.
-        # OSS leaves SIEM-enrichment fields (severity, api_key_name, etc.) None
-        # because it doesn't have the data; cloud populates them when it does.
-        payload_str = event.model_dump_json(exclude_none=True)
-
         try:
-            rows = await self._backend.ops.get_webhooks_for_dispatch(
-                conn,
-                webhook_table,
-                event.bank_id,
-            )
-
-            db_webhooks = [
-                WebhookConfig(
-                    id=str(row["id"]),
-                    bank_id=row["bank_id"],
-                    url=row["url"],
-                    secret=row["secret"],
-                    event_types=list(row["event_types"]) if row["event_types"] else [],
-                    enabled=row["enabled"],
-                    http_config=_parse_http_config(row["http_config"]),
-                )
-                for row in rows
-            ]
-
-            all_webhooks = self._global_webhooks + db_webhooks
-            matched = 0
-
-            for webhook in all_webhooks:
-                if not webhook.enabled:
-                    continue
-                if event.event.value not in webhook.event_types:
-                    continue
-
-                operation_id = uuid.uuid4()
-                webhook_id = webhook.id if webhook.id else None
-
-                task_payload = json.dumps(
-                    {
-                        "type": "webhook_delivery",
-                        "operation_id": str(operation_id),
-                        "event_id": event.event_id,
-                        "bank_id": event.bank_id,
-                        "url": webhook.url,
-                        "secret": webhook.secret,
-                        "event_type": event.event.value,
-                        "payload": payload_str,
-                        "webhook_id": webhook_id,
-                        "http_config": webhook.http_config.model_dump(),
-                    }
-                )
-
-                await self._backend.ops.insert_webhook_delivery_task(
-                    conn,
-                    ops_table,
-                    operation_id,
-                    event.bank_id,
-                    task_payload,
-                    now,
-                )
-                matched += 1
-
+            matched = await self._queue_deliveries(event, conn, schema)
             logger.debug(
                 f"Fired webhook event {event.event} for bank {event.bank_id}: {matched} delivery(ies) queued (in-transaction)"
             )
-
         except Exception as e:
             logger.error(
                 f"Failed to queue webhook deliveries (in-transaction) for event {event.event}: {e}. "
