@@ -37,6 +37,7 @@ describe("createKnowledgeBaseNode", () => {
     consoleErrorSpy.mockRestore();
   });
 
+  /** Builds the POST the route handler receives; the defaults are a valid create body and URL. */
   function postRequest(
     body: string = JSON.stringify({ name: "x" }),
     url: string = REQUEST_URL
@@ -44,10 +45,12 @@ describe("createKnowledgeBaseNode", () => {
     return new NextRequest(url, { method: "POST", body });
   }
 
+  /** Makes the next dataplane fetch answer with this body and status, once. */
   function upstreamReturns(body: string, init: ResponseInit): void {
     fetchSpy.mockResolvedValueOnce(new Response(body, init));
   }
 
+  /** Asserts the proxy logged UNTRANSLATED_FAILURE's error text together with the thrown error. */
   function expectLoggedFailure(): void {
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       "%s:",
