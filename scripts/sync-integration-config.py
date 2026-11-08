@@ -42,6 +42,7 @@ def render(source_text: str) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Sync shared user config into integration targets, or verify with ``--check`` that all match."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0] if __doc__ else None)
     parser.add_argument("--check", action="store_true", help="exit 1 if any target is missing or drifts")
     parser.add_argument(

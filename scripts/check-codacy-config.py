@@ -47,6 +47,7 @@ class _Section:
 
 
 def _enter_key(section: _Section, indent: int, key: str) -> None:
+    """Update ``section`` for a key line at ``indent``."""
     if indent == 0:
         section.in_engines = key == "engines"
         section.engine = None
@@ -55,6 +56,7 @@ def _enter_key(section: _Section, indent: int, key: str) -> None:
 
 
 def _date_problems(category: str, entry_str: str, expiry_str: str, today: datetime.date) -> list[str]:
+    """Problems with the entry and expiry dates for ``category`` as of ``today``."""
     try:
         entry = datetime.date.fromisoformat(entry_str)
         expiry = datetime.date.fromisoformat(expiry_str)
@@ -112,6 +114,7 @@ def check_text(text: str, root: Path, today: datetime.date) -> list[str]:
 
 
 def main(argv: list[str] | None = None, today: datetime.date | None = None) -> int:
+    """Parse arguments, check ``.codacy.yml`` under ``root``, print each problem to stderr, and return 1 if any."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0] if __doc__ else None)
     parser.add_argument(
         "--root",

@@ -63,3 +63,12 @@ def test_non_object_json_falls_back(tmp_path):
     cfg = load_config(config_file=p, env={})
     assert cfg.hindsight_api_url == DEFAULT_HINDSIGHT_API_URL
     assert cfg.global_bank == DEFAULT_GLOBAL_BANK
+
+
+def test_non_utf8_file_falls_back(tmp_path):
+    """A settings file that is not UTF-8 falls back to the defaults instead of raising."""
+    p = tmp_path / "devin-desktop.json"
+    p.write_bytes(b'\xff\xfe{"bankId": "from-file"}')
+    cfg = load_config(config_file=p, env={})
+    assert cfg.hindsight_api_url == DEFAULT_HINDSIGHT_API_URL
+    assert cfg.global_bank == DEFAULT_GLOBAL_BANK

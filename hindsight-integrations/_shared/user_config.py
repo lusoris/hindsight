@@ -26,7 +26,7 @@ def read_user_config(config_file: Path | None, default_file: Path) -> dict[str, 
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
         return {}
     # Before this module each package indexed the parsed value directly, so a
     # top-level JSON list or string raised (AttributeError/TypeError) in load_config.
