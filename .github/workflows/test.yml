@@ -295,6 +295,9 @@ jobs:
           dev:
             - 'hindsight-dev/**'
             - 'scripts/dev/**'
+            # test-dev checks the root ruff.toml `src` list against the packages
+            # (hindsight-dev/tests/test_root_ruff_src.py).
+            - 'ruff.toml'
           ci:
             - '.github/**'
 

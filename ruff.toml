@@ -1,5 +1,33 @@
 line-length = 120
 target-version = "py311"
+# Source roots for isort's first-party detection when ruff runs from the repository root
+# with this file (Codacy runs `ruff check --config ruff.toml <files>` from the root). With
+# the default `[".", "src"]` every package's own modules (hindsight_api, tests, ...) count
+# as third-party there, so an import block that `scripts/hooks/lint.sh` sorts correctly
+# per package is reported as I001. lint.sh passes `--config` from each integration's own
+# directory, where these relative paths resolve under that directory and match nothing,
+# so its results do not change.
+#
+# The list names package directories instead of globbing `hindsight-*`: that glob would
+# also make `hindsight-integrations/` a source root, whose children are named after the
+# frameworks they wrap (litellm, crewai, ...), turning `import litellm` first-party.
+# hindsight-clients/python is left out because the integrations import hindsight_client
+# as a dependency and sort it with the third-party block.
+src = [
+    ".",
+    "src",
+    "hindsight-all",
+    "hindsight-all-slim",
+    "hindsight-api",
+    "hindsight-api-slim",
+    "hindsight-dev",
+    "hindsight-embed",
+    "hindsight-integration-tests",
+    "hindsight-system-evals",
+    "hindsight-system-tests",
+    "hindsight-extensions/*",
+    "hindsight-integrations/*",
+]
 exclude = [
     "**/.venv/",
     "**/dist/",
