@@ -1,6 +1,7 @@
 """The root ruff.toml must list every Python package as an isort source root.
 
-Codacy runs `ruff check --config ruff.toml <files>` from the repository root. isort decides
+Codacy runs `ruff check --config <root config> <files>` from the repository root, and the root
+pyproject.toml extends ruff.toml, so that config is ruff.toml. isort decides
 what is first-party from the config's `src` roots, so a package missing from that list has its
 own modules (hindsight_api, tests, ...) treated as third-party there. An import block that
 `scripts/hooks/lint.sh` sorted correctly from the package's own directory is then reported as
@@ -97,3 +98,16 @@ def test_every_src_entry_matches_a_directory() -> None:
     # with a src layout; there is no src/ at the root.
     stale = sorted(entry for entry in _src_entries() if entry != "src" and not _expand(entry))
     assert not stale, f"ruff.toml `src` names directories that do not exist: {stale}"
+
+
+def test_root_pyproject_extends_ruff_toml() -> None:
+    # Codacy's runner takes the first root config it lists (pyproject.toml, ruff.toml or
+    # .ruff.toml) as `--config`. Measured on Codacy, that was not ruff.toml: its I001 on
+    # hindsight_api/admin/cli.py follows ruff's default line length of 88, and it put
+    # tomllib outside the standard library. Extending ruff.toml, and setting nothing
+    # else here, keeps one source for every root entry point.
+    ruff_table = tomllib.loads((REPO_ROOT / "pyproject.toml").read_text()).get("tool", {}).get("ruff")
+    assert ruff_table == {"extend": "ruff.toml"}, (
+        f"The root pyproject.toml [tool.ruff] is {ruff_table!r}. It must be exactly "
+        '`extend = "ruff.toml"`, or Codacy can lint with ruff defaults instead of ruff.toml.'
+    )
