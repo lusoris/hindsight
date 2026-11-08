@@ -16,6 +16,7 @@ from uuid import UUID
 
 import numpy as np
 
+from ..memories.base import _validate_record_contract
 from ..metadata_utils import drop_null_values
 from ..response_models import TokenUsage
 
@@ -420,6 +421,9 @@ class ProcessedFact:
     scope: str | None = None
     reset_condition: str | None = None
     record_status: str = "active"
+
+    def __post_init__(self) -> None:
+        _validate_record_contract(self.provenance_class, self.record_status)
 
     @staticmethod
     def _is_degenerate_text(text: str) -> bool:

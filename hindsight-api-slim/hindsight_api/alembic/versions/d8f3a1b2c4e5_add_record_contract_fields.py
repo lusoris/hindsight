@@ -24,11 +24,46 @@ depends_on: str | Sequence[str] | None = None
 
 _TABLES = ("memory_units", "invalidated_memory_units")
 
+_ORACLE_COLUMNS: tuple[tuple[str, str], ...] = (
+    (
+        "provenance_class",
+        "VARCHAR2(32) DEFAULT 'inferred' NOT NULL"
+        " CONSTRAINT chk_{prefix}_provenance_class"
+        " CHECK (provenance_class IN ('tool-run', 'file-read', 'recalled', 'inferred'))",
+    ),
+    ("write_authority", "CLOB"),
+    ("observed_at", "TIMESTAMP WITH TIME ZONE"),
+    ("fetched_at", "TIMESTAMP WITH TIME ZONE"),
+    ("ttl_seconds", "NUMBER(10)"),
+    ("scope", "CLOB"),
+    ("reset_condition", "CLOB"),
+    (
+        "record_status",
+        "VARCHAR2(16) DEFAULT 'active' NOT NULL"
+        " CONSTRAINT chk_{prefix}_record_status"
+        " CHECK (record_status IN ('active', 'stale', 'disputed', 'tombstoned'))",
+    ),
+)
+
+_ORACLE_INDEXES: tuple[tuple[str, str], ...] = (
+    (
+        "ix_memory_units_record_status",
+        "CREATE INDEX ix_memory_units_record_status ON memory_units (bank_id, record_status)",
+    ),
+    (
+        "ix_memory_units_provenance_class",
+        "CREATE INDEX ix_memory_units_provenance_class ON memory_units (bank_id, provenance_class)",
+    ),
+)
+
 
 def _pg_schema_prefix() -> str:
     """Schema-qualifier for raw SQL on PG (multi-tenant search_path)."""
     schema = context.config.get_main_option("target_schema")
-    return f'"{schema}".' if schema else ""
+    if not schema:
+        return ""
+    safe_schema = schema.replace('"', '""')
+    return f'"{safe_schema}".'
 
 
 def _pg_upgrade() -> None:
@@ -80,28 +115,50 @@ def _pg_downgrade() -> None:
 
 
 def _oracle_upgrade() -> None:
+    # Oracle has no ADD COLUMN IF NOT EXISTS or CREATE INDEX IF NOT EXISTS;
+    # guard on the data dictionary (user_tab_columns / user_indexes) so re-runs
+    # are idempotent and do not fail with ORA-01430 or ORA-00955.
+    bind = op.get_bind()
     for table, prefix in (("memory_units", "mu"), ("invalidated_memory_units", "imu")):
-        op.execute(
-            f"""
-            ALTER TABLE {table} ADD (
-                provenance_class VARCHAR2(32) DEFAULT 'inferred' NOT NULL
-                    CONSTRAINT chk_{prefix}_provenance_class
-                    CHECK (provenance_class IN ('tool-run', 'file-read', 'recalled', 'inferred')),
-                write_authority CLOB,
-                observed_at TIMESTAMP WITH TIME ZONE,
-                fetched_at TIMESTAMP WITH TIME ZONE,
-                ttl_seconds NUMBER(10),
-                scope CLOB,
-                reset_condition CLOB,
-                record_status VARCHAR2(16) DEFAULT 'active' NOT NULL
-                    CONSTRAINT chk_{prefix}_record_status
-                    CHECK (record_status IN ('active', 'stale', 'disputed', 'tombstoned'))
+        table_upper = table.upper()
+        for col_name, col_template in _ORACLE_COLUMNS:
+            col_def = col_template.format(prefix=prefix)
+            alter_sql = f"ALTER TABLE {table} ADD ({col_name} {col_def})"
+            escaped_alter = alter_sql.replace("'", "''")
+            col_upper = col_name.upper()
+            bind.exec_driver_sql(
+                f"""
+                DECLARE
+                    n NUMBER;
+                BEGIN
+                    SELECT COUNT(*) INTO n FROM user_tab_columns
+                    WHERE table_name = '{table_upper}'
+                      AND column_name = '{col_upper}';
+                    IF n = 0 THEN
+                        EXECUTE IMMEDIATE
+                            '{escaped_alter}';
+                    END IF;
+                END;
+                """
             )
+
+    for index_name, index_ddl in _ORACLE_INDEXES:
+        index_upper = index_name.upper()
+        escaped_index_ddl = index_ddl.replace("'", "''")
+        bind.exec_driver_sql(
+            f"""
+            DECLARE
+                n NUMBER;
+            BEGIN
+                SELECT COUNT(*) INTO n FROM user_indexes
+                WHERE index_name = '{index_upper}';
+                IF n = 0 THEN
+                    EXECUTE IMMEDIATE
+                        '{escaped_index_ddl}';
+                END IF;
+            END;
             """
         )
-
-    op.execute("CREATE INDEX ix_memory_units_record_status ON memory_units (bank_id, record_status)")
-    op.execute("CREATE INDEX ix_memory_units_provenance_class ON memory_units (bank_id, provenance_class)")
 
 
 def _oracle_downgrade() -> None:

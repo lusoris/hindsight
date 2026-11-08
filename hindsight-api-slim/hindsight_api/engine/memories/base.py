@@ -318,6 +318,18 @@ def _validate_record_contract(provenance_class: str, record_status: str) -> None
         raise ValueError(f"Invalid record_status {record_status!r}; must be one of {VALID_RECORD_STATUSES}")
 
 
+def _normalize_utc(dt: datetime) -> datetime:
+    """``dt`` as an aware UTC datetime: a naive value is read as UTC, an aware one keeps its instant.
+
+    A row read back through the Oracle connection can carry a naive ``fetched_at``,
+    and subtracting it from an aware ``now`` raises ``TypeError``. Naive is read as
+    UTC because that is what the Oracle row conversion already assumes for the
+    ``*_at`` columns it parses (``engine/db/oracle.py``)."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def compute_is_stale(
     record_status: str | None = "active",
     ttl_seconds: int | None = None,
@@ -326,11 +338,13 @@ def compute_is_stale(
     now: datetime | None = None,
 ) -> bool:
     """Compute whether a memory record is stale from its record_status or TTL."""
+    if record_status == "stale":
+        return True
+    if ttl_seconds is None or fetched_at is None:
+        return False
     if now is None:
         now = datetime.now(timezone.utc)
-    return (record_status == "stale") or (
-        ttl_seconds is not None and fetched_at is not None and (now - fetched_at).total_seconds() > ttl_seconds
-    )
+    return (_normalize_utc(now) - _normalize_utc(fetched_at)).total_seconds() > ttl_seconds
 
 
 @dataclass
@@ -2977,8 +2991,10 @@ class MemoriesExtension(Extension, ABC):
     ) -> dict[str, StoredMemory]:
         """The source facts recall shows under its observations, keyed by unit id.
 
-        Only the display fields need be set (text, fact_type, context, the three content times,
-        document_id, chunk_id, tags, metadata). Default: :meth:`get_memories`. Postgres selects
+        Display fields must be set (text, fact_type, context, the three content times,
+        document_id, chunk_id, tags, metadata), along with record contract fields
+        (record_status, ttl_seconds, fetched_at) so recall can compute staleness
+        for every source fact. Default: :meth:`get_memories`. Postgres selects
         just those columns."""
         return {
             m.unit_id: m

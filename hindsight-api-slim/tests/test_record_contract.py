@@ -100,6 +100,54 @@ def test_invalid_record_status_raises() -> None:
         )
 
 
+def test_processed_fact_record_contract_validation() -> None:
+    from array import array
+
+    from hindsight_api.engine.retain.types import ProcessedFact
+
+    # Defaults construct fine
+    fact = ProcessedFact(
+        fact_text="Ada shipped the parser",
+        fact_type="world",
+        embedding=array("f", [0.01, 0.02]),
+        occurred_start=None,
+        occurred_end=None,
+        mentioned_at=None,
+        context="standup notes",
+        metadata={},
+    )
+    assert fact.provenance_class == "inferred"
+    assert fact.record_status == "active"
+
+    # provenance_class="bogus" raises ValueError
+    with pytest.raises(ValueError, match="provenance_class"):
+        ProcessedFact(
+            fact_text="Ada shipped the parser",
+            fact_type="world",
+            embedding=array("f", [0.01, 0.02]),
+            occurred_start=None,
+            occurred_end=None,
+            mentioned_at=None,
+            context="standup notes",
+            metadata={},
+            provenance_class="bogus",
+        )
+
+    # record_status="bogus" raises ValueError
+    with pytest.raises(ValueError, match="record_status"):
+        ProcessedFact(
+            fact_text="Ada shipped the parser",
+            fact_type="world",
+            embedding=array("f", [0.01, 0.02]),
+            occurred_start=None,
+            occurred_end=None,
+            mentioned_at=None,
+            context="standup notes",
+            metadata={},
+            record_status="bogus",
+        )
+
+
 def test_ttl_expired_is_stale() -> None:
     now = datetime.now(timezone.utc)
     fetched_at = now - timedelta(hours=2)
@@ -158,6 +206,22 @@ def test_record_status_stale_ignores_ttl() -> None:
     assert fact.is_stale is True
     result = RecallResult(id=fact.id, text=fact.text, type=fact.fact_type, is_stale=fact.is_stale)
     assert result.is_stale is True
+
+
+def test_compute_is_stale_normalizes_naive_fetched_at() -> None:
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    fetched_fresh = datetime(2026, 1, 1, 11, 59, 30)  # 30s ago, naive
+    fetched_stale = datetime(2026, 1, 1, 11, 58, 30)  # 90s ago, naive
+    assert compute_is_stale("active", ttl_seconds=60, fetched_at=fetched_fresh, now=now) is False
+    assert compute_is_stale("active", ttl_seconds=60, fetched_at=fetched_stale, now=now) is True
+
+
+def test_compute_is_stale_normalizes_aware_offset_fetched_at() -> None:
+    now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    tz_plus_5 = timezone(timedelta(hours=5))
+    fetched_aware = (now - timedelta(seconds=30)).astimezone(tz_plus_5)
+    assert compute_is_stale("active", ttl_seconds=60, fetched_at=fetched_aware, now=now) is False
+    assert compute_is_stale("active", ttl_seconds=10, fetched_at=fetched_aware, now=now) is True
 
 
 async def _seed(memory: MemoryEngine, conn, bank_id: str, text: str, **contract: object) -> str:
@@ -276,5 +340,39 @@ async def test_invalidated_memory_keeps_its_record_contract(
         assert archived.scope == "host:build"
         assert archived.reset_condition == "on toolchain upgrade"
         assert archived.record_status == "disputed"
+    finally:
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+async def test_recall_source_facts_carries_record_contract_fields(
+    memory: MemoryEngine, request_context: RequestContext
+) -> None:
+    """The store's recall_source_facts implementation must return record_status, ttl_seconds, and fetched_at."""
+    bank_id = f"test-recall-source-facts-{uuid.uuid4().hex[:8]}"
+    await memory.ensure_bank_profile(bank_id=bank_id, request_context=request_context)
+    now = datetime.now(timezone.utc)
+    try:
+        pool = await memory._get_pool()
+        async with pool.acquire() as conn:
+            unit_id = await _seed(
+                memory,
+                conn,
+                bank_id,
+                "The primary database runs Postgres 16.",
+                provenance_class="tool-run",
+                write_authority="psql --version",
+                fetched_at=now,
+                ttl_seconds=1800,
+                record_status="active",
+            )
+            store = get_memories()
+            sources = await store.recall_source_facts(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[unit_id])
+            assert unit_id in sources
+            fact = sources[unit_id]
+            assert fact.record_status == "active"
+            assert fact.ttl_seconds == 1800
+            assert fact.fetched_at is not None
+            assert abs((fact.fetched_at - now).total_seconds()) < 1.0
     finally:
         await memory.delete_bank(bank_id, request_context=request_context)
