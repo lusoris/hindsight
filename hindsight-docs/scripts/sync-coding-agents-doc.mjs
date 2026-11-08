@@ -69,6 +69,12 @@ const FIGURES = {
 /** Sections that only make sense inside the repo (contributor-facing), dropped from the doc page. */
 const DROP_SECTIONS = ['Layout', 'Ingestion internals (no CLI)', 'Companion skill (generated)'];
 
+/**
+ * Build the docs page from the README: drop the H1 and repo-only sections, strip the skill region
+ * markers, expand `<!-- figure: -->` markers to their JSX, then apply the site-body rewrites.
+ *
+ * @returns {string} The generated page, frontmatter and imports included.
+ */
 function build() {
   const src = readFileSync(readme, 'utf8');
   const body = siteBody(

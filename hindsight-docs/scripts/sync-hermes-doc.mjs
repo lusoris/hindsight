@@ -62,6 +62,12 @@ to switch over while keeping the same memory bank.
 :::
 `;
 
+/**
+ * Build the docs page from the README: drop the H1 and repo-only sections, apply the site-body
+ * rewrites, and prepend the frontmatter and site-only intro.
+ *
+ * @returns {string} The generated page.
+ */
 function build() {
   const src = readFileSync(readme, 'utf8');
   return `${FRONTMATTER}\n${SITE_ONLY_INTRO}\n${siteBody(dropSections(src, DROP_SECTIONS))}\n`;
