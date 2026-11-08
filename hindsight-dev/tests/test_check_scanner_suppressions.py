@@ -99,6 +99,7 @@ def test_13_category_a_far_expiry_passes() -> None:
 
 
 def test_14_comment_only_marker_binding() -> None:
+    """A comment-only marker before a blank line, a comment, or the end of the file binds to nothing."""
     blank_after = "// nosemgrep: rule-x -- reason category C, expires 2026-11-18\n\nconst x = 1;\n"
     last_line = "// nosemgrep: rule-x -- reason category C, expires 2026-11-18\n"
     comment_after = "// nosemgrep: rule-x -- reason category C, expires 2026-11-18\n// comment\nconst x = 1;\n"

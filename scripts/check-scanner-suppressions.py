@@ -83,6 +83,7 @@ def _binding_problem(lines: list[str], line_idx: int) -> str | None:
 
 
 def _strip_comment_close(reason: str) -> str:
+    """``reason`` without a trailing block-comment closer (``*/`` or ``-->``), stripped."""
     reason = reason.strip()
     for closer in ("*/", "-->"):
         if reason.endswith(closer):
@@ -91,6 +92,7 @@ def _strip_comment_close(reason: str) -> str:
 
 
 def _category_problem(reason: str) -> str | None:
+    """Why ``reason`` names no valid exception category, or ``None`` when it names one of A-D."""
     cat_match = CATEGORY_RE.search(reason)
     if not cat_match:
         return "suppression reason missing category (must contain 'category X' with X in A, B, C, D)"
@@ -100,6 +102,10 @@ def _category_problem(reason: str) -> str | None:
 
 
 def _expiry_problem(reason: str, today: datetime.date) -> str | None:
+    """Why the expiry in ``reason`` is missing, invalid, past, or beyond its category's window from ``today``.
+
+    ``None`` when the expiry is valid.
+    """
     exp_match = EXPIRES_RE.search(reason)
     if not exp_match:
         return "suppression reason missing expiry (must contain 'expires YYYY-MM-DD')"
@@ -136,6 +142,7 @@ def _marker_problems(line: str, today: datetime.date) -> list[str]:
 
 
 def check_text(path: str, text: str, today: datetime.date) -> list[Problem]:
+    """Problems with every scanner suppression marker in ``text``, reported against ``path``."""
     problems: list[Problem] = []
     lines = text.splitlines()
 
@@ -161,6 +168,7 @@ def check_text(path: str, text: str, today: datetime.date) -> list[Problem]:
 
 
 def main(argv: list[str] | None = None, today: datetime.date | None = None) -> int:
+    """Check the files in ``argv``, print each problem to stderr, and return 1 if there were any."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0] if __doc__ else None)
     parser.add_argument("files", nargs="*", help="files to scan for scanner suppressions")
     args = parser.parse_args(argv)
