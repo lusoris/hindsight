@@ -23,6 +23,7 @@ const UNTRANSLATED_FAILURE = {
   errorKey: "test.directives.update",
 };
 
+/** GET options for the directive item, with `overrides` applied. */
 function options(overrides: Partial<DataplaneProxyOptions> = {}): DataplaneProxyOptions {
   return {
     required: ["bank-1", "dir-1"],
@@ -52,6 +53,7 @@ const DELETE_OPTIONS: Partial<DataplaneProxyOptions> = {
   successBody: { success: true },
 };
 
+/** A PATCH request carrying `body` as JSON. */
 function patchRequest(body: string): Request {
   return new Request(URL, {
     method: "PATCH",
@@ -112,7 +114,7 @@ describe("proxyDataplane", () => {
 
     expect(response.status).toBe(HTTP_NOT_FOUND);
     expect(await response.json()).toEqual({ error: failure.error });
-    expect(consoleErrorSpy).toHaveBeenCalledWith("API error getting directive:", "Not Found");
+    expect(consoleErrorSpy).toHaveBeenCalledWith("API error %s:", "getting directive", "Not Found");
   });
 
   it("PATCH forwards the JSON body with a JSON Content-Type", async () => {
@@ -144,7 +146,11 @@ describe("proxyDataplane", () => {
 
     expect(response.status).toBe(HTTP_BAD_REQUEST);
     expect(await response.json()).toEqual({ error: expected });
-    expect(consoleErrorSpy).toHaveBeenCalledWith("API error updating directive:", upstreamText);
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "API error %s:",
+      "updating directive",
+      upstreamText
+    );
   });
 
   it("PATCH with an invalid JSON body returns the failure at 500 without calling upstream", async () => {
@@ -153,7 +159,11 @@ describe("proxyDataplane", () => {
     expect(response.status).toBe(HTTP_INTERNAL_ERROR);
     expect(await response.json()).toEqual({ error: UNTRANSLATED_FAILURE.error });
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(consoleErrorSpy).toHaveBeenCalledWith("Error updating directive:", expect.any(Error));
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "Error %s:",
+      "updating directive",
+      expect.any(Error)
+    );
   });
 
   it("DELETE returns successBody at 200 without reading the upstream body", async () => {
@@ -186,6 +196,10 @@ describe("proxyDataplane", () => {
 
     expect(response.status).toBe(HTTP_INTERNAL_ERROR);
     expect(await response.json()).toEqual({ error: "Failed to delete directive" });
-    expect(consoleErrorSpy).toHaveBeenCalledWith("Error deleting directive:", expect.any(Error));
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "Error %s:",
+      "deleting directive",
+      expect.any(Error)
+    );
   });
 });

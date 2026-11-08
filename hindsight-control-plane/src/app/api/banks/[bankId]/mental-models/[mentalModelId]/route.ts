@@ -7,8 +7,10 @@ const MISSING_PAYLOAD: ApiFailure = {
 
 type HandlerContext = { params: Promise<{ bankId: string; mentalModelId: string }> };
 
-// GET, PATCH and DELETE differ only in the call options, so the params and the
-// path live here once instead of in each handler.
+/**
+ * Resolves the ids and the dataplane path once for GET, PATCH and DELETE, which differ
+ * only in the call options.
+ */
 async function proxyMentalModel(request: Request, { params }: HandlerContext, call: DataplaneCall) {
   const { bankId, mentalModelId } = await params;
   return proxyDataplane(request, {
@@ -20,6 +22,7 @@ async function proxyMentalModel(request: Request, { params }: HandlerContext, ca
   });
 }
 
+/** Proxies one mental model from the dataplane. */
 export async function GET(request: Request, context: HandlerContext) {
   return proxyMentalModel(request, context, {
     method: "GET",
@@ -28,6 +31,7 @@ export async function GET(request: Request, context: HandlerContext) {
   });
 }
 
+/** Forwards a mental model update to the dataplane. */
 export async function PATCH(request: Request, context: HandlerContext) {
   return proxyMentalModel(request, context, {
     method: "PATCH",
@@ -38,6 +42,7 @@ export async function PATCH(request: Request, context: HandlerContext) {
   });
 }
 
+/** Deletes one mental model on the dataplane. */
 export async function DELETE(request: Request, context: HandlerContext) {
   return proxyMentalModel(request, context, {
     method: "DELETE",

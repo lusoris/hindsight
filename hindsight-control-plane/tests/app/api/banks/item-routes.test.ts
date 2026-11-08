@@ -12,6 +12,7 @@ import * as mentalModelRoute from "@/app/api/banks/[bankId]/mental-models/[menta
 
 type Method = "GET" | "PATCH" | "DELETE";
 type Handler = (request: Request, context: { params: Promise<never> }) => Promise<unknown>;
+type RouteModule = { GET: unknown; PATCH: unknown; DELETE: unknown };
 
 // The handlers only differ in the options they hand to proxyDataplane, so this
 // table is the whole contract: the dataplane path, the messages and keys the old
@@ -45,14 +46,24 @@ const ROUTES = [
 
 const METHODS: {
   method: Method;
+  /** Selects the handler by name, not by indexing the module with `method`. */
+  pick: (module: RouteModule) => Handler;
   verb: string;
   participle: string;
   key: string;
   flags: Partial<DataplaneProxyOptions>;
 }[] = [
-  { method: "GET", verb: "get", participle: "getting", key: "fetch", flags: {} },
+  {
+    method: "GET",
+    pick: (module) => module.GET as Handler,
+    verb: "get",
+    participle: "getting",
+    key: "fetch",
+    flags: {},
+  },
   {
     method: "PATCH",
+    pick: (module) => module.PATCH as Handler,
     verb: "update",
     participle: "updating",
     key: "update",
@@ -60,6 +71,7 @@ const METHODS: {
   },
   {
     method: "DELETE",
+    pick: (module) => module.DELETE as Handler,
     verb: "delete",
     participle: "deleting",
     key: "delete",
@@ -76,7 +88,7 @@ describe("bank item routes", () => {
   });
 
   it.each(CASES)("$method $name hands proxyDataplane its options", async (testCase) => {
-    const handler = testCase.module[testCase.method] as Handler;
+    const handler = testCase.pick(testCase.module);
     const request = new Request("http://localhost/api/test", { method: testCase.method });
     const ids = Object.values(testCase.params);
 

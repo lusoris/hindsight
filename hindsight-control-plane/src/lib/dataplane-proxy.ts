@@ -30,6 +30,10 @@ export type DataplaneCall = Omit<
   "required" | "missing" | "bankId" | "suffix"
 >;
 
+/**
+ * Proxies one bank-scoped dataplane call: 400 with `missing` when an id is absent, the upstream
+ * JSON (or `successBody`) at 200, `failure` at the upstream status or at 500 when anything throws.
+ */
 export async function proxyDataplane(
   request: Request,
   options: DataplaneProxyOptions
@@ -60,7 +64,9 @@ export async function proxyDataplane(
 
     if (!response.ok) {
       const errorText = await response.text();
-      console.error(`API error ${action}:`, errorText);
+      // Constant format string: `action` goes in as a %s argument, so a `%` in it cannot
+      // act as a format specifier. The printed line is the same as the old interpolation.
+      console.error("API error %s:", action, errorText);
       return NextResponse.json(
         localizeApiErrorPayload(request, {
           error: options.upstreamTextAsError ? errorText || failure.error : failure.error,
@@ -73,7 +79,7 @@ export async function proxyDataplane(
     const data = options.successBody !== undefined ? options.successBody : await response.json();
     return NextResponse.json(data, { status: 200 });
   } catch (error) {
-    console.error(`Error ${action}:`, error);
+    console.error("Error %s:", action, error);
     return NextResponse.json(localizeApiErrorPayload(request, failure), {
       status: 500,
     });
