@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -58,7 +59,11 @@ def _make_adapter(**kwargs) -> tuple[HindsightRuntimeAdapter, MagicMock]:
 
 
 class _BaseAdapterTest:
-    configure_kwargs: dict[str, object] = {}
+    """Resets the global config around each test and applies the class's `configure_kwargs`."""
+
+    # Shared per test class, never mutated per instance: subclasses override it to change
+    # the configuration every test in the class runs under.
+    configure_kwargs: ClassVar[dict[str, object]] = {}
 
     def setup_method(self) -> None:
         reset_config()
@@ -142,7 +147,7 @@ class TestBeforeTurn(_BaseAdapterTest):
 
 
 class TestAfterTurn(_BaseAdapterTest):
-    configure_kwargs = {"retain_async": False}
+    configure_kwargs: ClassVar[dict[str, object]] = {"retain_async": False}
 
     @pytest.mark.asyncio
     async def test_empty_result_does_not_retain(self):
@@ -199,7 +204,7 @@ class TestAfterTurn(_BaseAdapterTest):
 class TestRetainAsync(_BaseAdapterTest):
     """retain_async=True schedules a fire-and-forget task that completes."""
 
-    configure_kwargs = {"retain_async": True}
+    configure_kwargs: ClassVar[dict[str, object]] = {"retain_async": True}
 
     @pytest.mark.asyncio
     async def test_pending_task_tracked_and_completes(self):
@@ -221,10 +226,11 @@ class TestRetainAsync(_BaseAdapterTest):
 
 
 class TestRunTurn(_BaseAdapterTest):
-    configure_kwargs = {"retain_async": False}
+    configure_kwargs: ClassVar[dict[str, object]] = {"retain_async": False}
 
-    def _make_adapter(self):
-        adapter, mock_client = _make_adapter()
+    def _make_adapter(self, **kwargs) -> tuple[HindsightRuntimeAdapter, MagicMock]:
+        """The base adapter with a recall response that carries prior context."""
+        adapter, mock_client = _make_adapter(**kwargs)
         mock_client.arecall.return_value = _make_recall_response("Prior invoice issue resolved")
         return adapter, mock_client
 

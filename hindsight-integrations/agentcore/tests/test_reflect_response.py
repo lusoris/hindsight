@@ -32,6 +32,7 @@ async def test_before_turn_accepts_sdk_reflect_response(text: str) -> None:
 
 @pytest.mark.asyncio
 async def test_before_turn_reflects_through_actual_sdk(httpserver: HTTPServer) -> None:
+    """A reflect-mode recall policy reaches the real SDK client as one reflect request with its budget and max_tokens."""
     httpserver.expect_request(
         "/v1/default/banks/user:user:agent:agent/reflect",
         method="POST",

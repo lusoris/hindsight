@@ -8,6 +8,7 @@ from hindsight_agno.tools import _USER_AGENT
 
 
 def test_integration_identity_reaches_sdk_request(httpserver: HTTPServer) -> None:
+    """The recall tool sends the integration User-Agent on the request the SDK makes."""
     httpserver.expect_request(
         "/v1/default/banks/test/memories/recall",
         method="POST",

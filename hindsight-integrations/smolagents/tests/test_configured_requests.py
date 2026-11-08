@@ -19,6 +19,7 @@ class CapturedRequest:
 
 @pytest.mark.parametrize("explicit", [False, True])
 def test_factory_configuration_reaches_api(httpserver: HTTPServer, explicit: bool) -> None:
+    """Global configure() values reach recall and reflect requests, and explicit factory arguments override them."""
     httpserver.expect_request(
         "/v1/default/banks/test/memories/recall",
         method="POST",
