@@ -296,6 +296,12 @@ jobs:
             - 'hindsight-dev/**'
             - 'scripts/dev/**'
             - 'scripts/check-scanner-suppressions.*'
+            # test-dev checks the root ruff config against the packages
+            # (hindsight-dev/tests/test_root_ruff_src.py): ruff.toml, the root
+            # pyproject.toml that extends it, and every added, removed or moved package.
+            - 'ruff.toml'
+            - 'pyproject.toml'
+            - added|deleted|renamed|copied: '**/pyproject.toml'
           ci:
             - '.github/**'
 
