@@ -209,21 +209,27 @@ describe("proxyDataplane", () => {
     );
   });
 
-  it("notFound returns the notFound payload at 404 without reading upstream text or logging", async () => {
-    const upstream = new Response("upstream 404 body", { status: HTTP_NOT_FOUND });
-    const textSpy = vi.spyOn(upstream, "text");
-    fetchSpy.mockResolvedValueOnce(upstream);
+  it.each([
+    { label: "alone", extra: {} },
+    { label: "with nonOkAsServerError", extra: { nonOkAsServerError: true } },
+  ])(
+    "notFound ($label) returns the notFound payload at 404 without reading upstream text or logging",
+    async ({ extra }) => {
+      const upstream = new Response("upstream 404 body", { status: HTTP_NOT_FOUND });
+      const textSpy = vi.spyOn(upstream, "text");
+      fetchSpy.mockResolvedValueOnce(upstream);
 
-    const response = await proxyDataplane(
-      new Request(URL),
-      options({ notFound: NOT_FOUND_FAILURE })
-    );
+      const response = await proxyDataplane(
+        new Request(URL),
+        options({ notFound: NOT_FOUND_FAILURE, ...extra })
+      );
 
-    expect(response.status).toBe(HTTP_NOT_FOUND);
-    expect(await response.json()).toEqual({ error: NOT_FOUND_FAILURE.error });
-    expect(textSpy).not.toHaveBeenCalled();
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
-  });
+      expect(response.status).toBe(HTTP_NOT_FOUND);
+      expect(await response.json()).toEqual({ error: NOT_FOUND_FAILURE.error });
+      expect(textSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    }
+  );
 
   it("notFound on upstream 500 without nonOkAsServerError retains non-OK behavior", async () => {
     fetchSpy.mockResolvedValueOnce(new Response("Upstream Error", { status: HTTP_INTERNAL_ERROR }));
@@ -261,21 +267,5 @@ describe("proxyDataplane", () => {
       "getting directive",
       expect.any(Error)
     );
-  });
-
-  it("notFound wins over nonOkAsServerError on upstream 404", async () => {
-    const upstream = new Response("upstream 404 body", { status: HTTP_NOT_FOUND });
-    const textSpy = vi.spyOn(upstream, "text");
-    fetchSpy.mockResolvedValueOnce(upstream);
-
-    const response = await proxyDataplane(
-      new Request(URL),
-      options({ notFound: NOT_FOUND_FAILURE, nonOkAsServerError: true })
-    );
-
-    expect(response.status).toBe(HTTP_NOT_FOUND);
-    expect(await response.json()).toEqual({ error: NOT_FOUND_FAILURE.error });
-    expect(textSpy).not.toHaveBeenCalled();
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
   });
 });
