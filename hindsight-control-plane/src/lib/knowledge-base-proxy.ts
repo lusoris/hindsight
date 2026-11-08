@@ -15,6 +15,7 @@ export async function createKnowledgeBaseNode(
     if (bankId instanceof NextResponse) return bankId;
 
     const body = await request.json();
+    // nosemgrep: rules_lgpl_javascript_ssrf_rule-node-ssrf -- host is the server-set DATAPLANE_URL; the bank id is one encodeURIComponent path segment (tests/lib/knowledge-base-proxy.test.ts); category C, expires 2026-11-18
     const response = await fetch(dataplaneBankUrl(bankId, `/knowledge-base/${kind}`), {
       method: "POST",
       headers: getDataplaneHeaders({ "Content-Type": "application/json" }),
