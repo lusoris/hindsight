@@ -25,9 +25,11 @@
  * Run: node hindsight-docs/scripts/sync-coding-agents-doc.mjs [--check]
  * `--check` fails when the doc page is out of date instead of writing it (for CI).
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import { dropSections, siteBody, writeOrCheck } from './lib/readme-doc.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const readme = join(here, '..', '..', 'hindsight-integrations', 'coding-agents', 'README.md');
@@ -69,50 +71,22 @@ const DROP_SECTIONS = ['Layout', 'Ingestion internals (no CLI)', 'Companion skil
 
 function build() {
   const src = readFileSync(readme, 'utf8');
-  const lines = src.split('\n');
-  const out = [];
-  let dropping = false;
-  for (const line of lines) {
-    const heading = /^(#{1,6})\s+(.*)$/.exec(line);
-    if (heading) {
-      const [, hashes, text] = heading;
-      if (hashes.length === 1) continue; // the H1 becomes frontmatter `title`
-      // Only an H2 opens or closes a dropped section. Recomputing on every heading would let an
-      // H3 *inside* a dropped section switch dropping back off and leak the rest of it.
-      if (hashes.length === 2) {
-        dropping = DROP_SECTIONS.includes(text.trim());
-        if (dropping) continue;
-      } else if (dropping) {
-        continue;
-      }
-    }
-    if (!dropping) out.push(line);
-  }
-  const body = out
-    .join('\n')
-    // Region markers for the companion-skill generator — invalid syntax in MDX, and meaningless
-    // to a reader of the docs site either way.
-    .replace(/^<!--\s*skill:(?:begin|end)[^>]*-->\n?/gm, '')
-    .replace(/^<!--\s*figure: ([a-z0-9-]+)\s*-->$/gm, (line, name) => {
-      // Loud, rather than leaving the comment in place: MDX has no HTML comments, so a typo'd
-      // marker would otherwise surface as an unrelated parse error in the docs build.
-      if (!FIGURES[name]) {
-        throw new Error(
-          `[coding-agents] unknown figure "${name}" in the README — add it to FIGURES or fix the marker.`,
-        );
-      }
-      return FIGURES[name].jsx;
-    })
-    // Repo-relative links 404 on the docs site; keep the label, drop the link.
-    .replace(/\[([^\]]+)\]\((?!https?:|\/)[^)]+\)/g, '$1')
-    // Our own absolute URLs -> site-relative. Assets so the page uses THIS build's static
-    // files rather than whatever is live in production; doc links so they resolve within the
-    // site (and so the docs-skill generator can turn them into file-relative paths, which it
-    // cannot do with an absolute URL). The README keeps them absolute because it also renders
-    // on GitHub, where site-relative would 404.
-    .replace(/https:\/\/hindsight\.vectorize\.io\/([^\s"')]+)/g, '/$1')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+  const body = siteBody(
+    dropSections(src, DROP_SECTIONS)
+      // Region markers for the companion-skill generator — invalid syntax in MDX, and meaningless
+      // to a reader of the docs site either way.
+      .replace(/^<!--\s*skill:(?:begin|end)[^>]*-->\n?/gm, '')
+      .replace(/^<!--\s*figure: ([a-z0-9-]+)\s*-->$/gm, (line, name) => {
+        // Loud, rather than leaving the comment in place: MDX has no HTML comments, so a typo'd
+        // marker would otherwise surface as an unrelated parse error in the docs build.
+        if (!FIGURES[name]) {
+          throw new Error(
+            `[coding-agents] unknown figure "${name}" in the README — add it to FIGURES or fix the marker.`,
+          );
+        }
+        return FIGURES[name].jsx;
+      }),
+  );
   const imports = Object.values(FIGURES)
     .filter((f) => body.includes(f.jsx))
     .flatMap((f) => f.imports)
@@ -120,18 +94,9 @@ function build() {
   return `${FRONTMATTER}\n${imports ? `${imports}\n\n` : ''}${body}\n`;
 }
 
-const generated = build();
-if (process.argv.includes('--check')) {
-  const current = readFileSync(page, 'utf8');
-  if (current !== generated) {
-    console.error(
-      '[coding-agents] ❌ docs page is out of date with the README.\n' +
-        '  Run: node hindsight-docs/scripts/sync-coding-agents-doc.mjs',
-    );
-    process.exit(1);
-  }
-  console.log('[coding-agents] ✅ docs page matches the README.');
-} else {
-  writeFileSync(page, generated);
-  console.log(`[coding-agents] wrote ${page} from the README.`);
-}
+writeOrCheck({
+  label: 'coding-agents',
+  page,
+  generated: build(),
+  script: 'hindsight-docs/scripts/sync-coding-agents-doc.mjs',
+});
