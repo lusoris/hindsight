@@ -50,20 +50,28 @@ def _make_mock_client() -> MagicMock:
     return client
 
 
-class TestBeforeTurn:
-    def setup_method(self):
+def _make_adapter(**kwargs) -> tuple[HindsightRuntimeAdapter, MagicMock]:
+    adapter = HindsightRuntimeAdapter(**kwargs)
+    mock_client = _make_mock_client()
+    adapter._client = mock_client
+    return adapter, mock_client
+
+
+class _BaseAdapterTest:
+    configure_kwargs: dict[str, object] = {}
+
+    def setup_method(self) -> None:
         reset_config()
-        configure(hindsight_api_url="http://fake:9077")
+        configure(hindsight_api_url="http://fake:9077", **self.configure_kwargs)
 
-    def teardown_method(self):
+    def teardown_method(self) -> None:
         reset_config()
 
-    def _make_adapter(self, **kwargs):
-        adapter = HindsightRuntimeAdapter(**kwargs)
-        mock_client = _make_mock_client()
-        adapter._client = mock_client
-        return adapter, mock_client
+    def _make_adapter(self, **kwargs) -> tuple[HindsightRuntimeAdapter, MagicMock]:
+        return _make_adapter(**kwargs)
 
+
+class TestBeforeTurn(_BaseAdapterTest):
     @pytest.mark.asyncio
     async def test_empty_query_returns_empty_string(self):
         adapter, mock_client = self._make_adapter()
@@ -133,19 +141,8 @@ class TestBeforeTurn:
         assert "Synthesized context" in result
 
 
-class TestAfterTurn:
-    def setup_method(self):
-        reset_config()
-        configure(hindsight_api_url="http://fake:9077", retain_async=False)
-
-    def teardown_method(self):
-        reset_config()
-
-    def _make_adapter(self, **kwargs):
-        adapter = HindsightRuntimeAdapter(**kwargs)
-        mock_client = _make_mock_client()
-        adapter._client = mock_client
-        return adapter, mock_client
+class TestAfterTurn(_BaseAdapterTest):
+    configure_kwargs = {"retain_async": False}
 
     @pytest.mark.asyncio
     async def test_empty_result_does_not_retain(self):
@@ -199,15 +196,10 @@ class TestAfterTurn:
         assert "project:payments" in call_kwargs["tags"]
 
 
-class TestRetainAsync:
+class TestRetainAsync(_BaseAdapterTest):
     """retain_async=True schedules a fire-and-forget task that completes."""
 
-    def setup_method(self):
-        reset_config()
-        configure(hindsight_api_url="http://fake:9077", retain_async=True)
-
-    def teardown_method(self):
-        reset_config()
+    configure_kwargs = {"retain_async": True}
 
     @pytest.mark.asyncio
     async def test_pending_task_tracked_and_completes(self):
@@ -228,19 +220,12 @@ class TestRetainAsync:
         mock_client.aretain.assert_called_once()
 
 
-class TestRunTurn:
-    def setup_method(self):
-        reset_config()
-        configure(hindsight_api_url="http://fake:9077", retain_async=False)
-
-    def teardown_method(self):
-        reset_config()
+class TestRunTurn(_BaseAdapterTest):
+    configure_kwargs = {"retain_async": False}
 
     def _make_adapter(self):
-        adapter = HindsightRuntimeAdapter()
-        mock_client = _make_mock_client()
+        adapter, mock_client = _make_adapter()
         mock_client.arecall.return_value = _make_recall_response("Prior invoice issue resolved")
-        adapter._client = mock_client
         return adapter, mock_client
 
     @pytest.mark.asyncio
