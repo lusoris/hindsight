@@ -329,6 +329,10 @@ jobs:
   # there, or one that expires while nothing else changes, still fails CI. The
   # checker needs only git and a stdlib Python, so it has no needs: and no
   # filter: it takes seconds and stays a defence independent of detect-changes.
+  # A failure blocks through this job's own check run, which turns the PR's
+  # merge state from CLEAN to UNSTABLE, and the merge train lands only CLEAN.
+  # It is also listed in report-pr-status's needs like every other check, but
+  # that reporter does not run today (see the comment on it).
   check-scanner-suppressions:
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -5619,6 +5623,9 @@ jobs:
   # Report CI status back to the PR for pull_request_review events.
   # GitHub does not automatically link pull_request_review check runs to the PR,
   # so we create a commit status on the PR head SHA and post a comment.
+  # The workflow no longer triggers on pull_request_review (removed upstream in
+  # #1446, d9da3f262), so this job is skipped on every run and gates nothing;
+  # each job's own check run is what blocks a PR.
   report-pr-status:
     if: github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && always()
     needs:
