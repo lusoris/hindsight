@@ -295,6 +295,7 @@ jobs:
           dev:
             - 'hindsight-dev/**'
             - 'scripts/dev/**'
+            - 'scripts/check-scanner-suppressions.*'
           ci:
             - '.github/**'
 

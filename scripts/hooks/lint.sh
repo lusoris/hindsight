@@ -64,6 +64,9 @@ run_task "ty-embed" "$REPO_ROOT/hindsight-embed" "uv run --frozen ty check hinds
 # osv-scanner exception files (osv-scanner skips an unparseable one silently)
 run_task "osv-config" "$REPO_ROOT" "scripts/check-osv-config.sh"
 
+# Inline semgrep suppressions name the rule, a reason, a category and an unexpired date
+run_task "scanner-suppressions" "$REPO_ROOT" "scripts/check-scanner-suppressions.sh"
+
 # Integrations: lint packages with modifications vs HEAD locally; lint all in CI.
 # Python integrations use shared ruff.toml; Node integrations use shared .prettierrc.json.
 INTEGRATIONS_DIR="$REPO_ROOT/hindsight-integrations"
