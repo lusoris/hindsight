@@ -11,8 +11,11 @@ A new package directory gets added without anyone thinking of ruff.toml, so asse
 pyproject.toml below the root instead of trusting the list to be kept up to date by hand.
 """
 
+import os
 import tomllib
 from pathlib import Path
+
+import yaml
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -28,6 +31,7 @@ CONTAINER_DIRS = {"hindsight-integrations", "hindsight-clients", "hindsight-exte
 
 
 def _src_entries() -> list[str]:
+    """The `src` list of the root ruff.toml, as written."""
     return tomllib.loads((REPO_ROOT / "ruff.toml").read_text())["src"]
 
 
@@ -46,26 +50,38 @@ def _src_roots() -> set[Path]:
     return {root for entry in _src_entries() for root in _expand(entry)}
 
 
-def _package_roots() -> set[str]:
-    """Every directory below the root holding a pyproject.toml, relative to the root."""
-    # Packages sit at the top level or one container deep (hindsight-integrations/<name>);
-    # depth 3 is headroom. Fixed-depth globs instead of `git ls-files`: Codacy's Bandit
-    # reports every subprocess import and call (B404, B603), and its gate allows no new
-    # issue. Dot directories (.venv, .claude/worktrees) and node_modules are not packages.
+def _package_roots(root: Path = REPO_ROOT) -> set[str]:
+    """Every directory below `root` holding a pyproject.toml, relative to `root`."""
+    # A pruned os.walk instead of `git ls-files`: Codacy's Bandit reports every subprocess
+    # import and call (B404, B603), and its gate allows no new issue. Fixed-depth globs (one
+    # to three levels) came first and missed a package nested deeper, so the walk is
+    # recursive. Dot directories (.venv, .claude/worktrees) and node_modules are pruned
+    # before descending: they hold no package of this repository and are the bulk of the tree.
     roots: set[str] = set()
-    for pattern in ("*/pyproject.toml", "*/*/pyproject.toml", "*/*/*/pyproject.toml"):
-        for path in REPO_ROOT.glob(pattern):
-            parts = path.relative_to(REPO_ROOT).parent.parts
-            if not any(part.startswith(".") or part == "node_modules" for part in parts):
-                roots.add("/".join(parts))
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if not name.startswith(".") and name != "node_modules"]
+        directory = Path(dirpath)
+        if "pyproject.toml" in filenames and directory != root:
+            roots.add(directory.relative_to(root).as_posix())
     return roots
 
 
 def _relative(roots: set[Path]) -> set[str]:
-    return {str(root.relative_to(REPO_ROOT)) for root in roots}
+    """`roots` as paths relative to the repository root, in the form `src` entries use."""
+    return {root.relative_to(REPO_ROOT).as_posix() for root in roots}
+
+
+def _dev_filter_rules() -> list[str | dict[str, str]]:
+    """The path rules of the `dev` filter that decides whether CI runs test-dev."""
+    workflow = yaml.safe_load((REPO_ROOT / ".github/workflows/test.yml").read_text())
+    for step in workflow["jobs"]["detect-changes"]["steps"]:
+        if step.get("id") == "filter":
+            return yaml.safe_load(step["with"]["filters"])["dev"]
+    raise AssertionError("test.yml has no detect-changes step with id `filter`")
 
 
 def test_every_package_is_a_source_root() -> None:
+    """A directory holding a pyproject.toml is a `src` root, unless deliberately left out."""
     packages = _package_roots()
     assert packages, "no pyproject.toml found below the repository root"
     missing = sorted(packages - _relative(_src_roots()) - NOT_SOURCE_ROOTS)
@@ -75,7 +91,17 @@ def test_every_package_is_a_source_root() -> None:
     )
 
 
+def test_package_walk_reaches_nested_directories(tmp_path: Path) -> None:
+    """The package walk finds a package at any depth and skips dot and node_modules trees."""
+    for package in ("top", "a/b/c/deep", ".venv/lib/hidden", "web/node_modules/vendored"):
+        (tmp_path / package).mkdir(parents=True)
+        (tmp_path / package / "pyproject.toml").write_text("")
+    (tmp_path / "pyproject.toml").write_text("")
+    assert _package_roots(tmp_path) == {"top", "a/b/c/deep"}
+
+
 def test_left_out_packages_stay_out() -> None:
+    """The packages in NOT_SOURCE_ROOTS are not made source roots by an entry or a glob."""
     included = sorted(_relative(_src_roots()) & NOT_SOURCE_ROOTS)
     assert not included, (
         f"{included} is a source root in ruff.toml, but the integrations sort its module with "
@@ -85,6 +111,7 @@ def test_left_out_packages_stay_out() -> None:
 
 
 def test_container_directories_are_not_source_roots() -> None:
+    """No container directory (hindsight-integrations, ...) resolves as a source root."""
     containers = sorted(_relative(_src_roots()) & CONTAINER_DIRS)
     assert not containers, (
         f"{containers} became a source root (a `hindsight-*` glob does this). Its children are "
@@ -94,6 +121,7 @@ def test_container_directories_are_not_source_roots() -> None:
 
 
 def test_every_src_entry_matches_a_directory() -> None:
+    """Each `src` entry names at least one existing directory."""
     # "src" is ruff's default second entry, kept for runs that pass `--config` from a package
     # with a src layout; there is no src/ at the root.
     stale = sorted(entry for entry in _src_entries() if entry != "src" and not _expand(entry))
@@ -101,6 +129,7 @@ def test_every_src_entry_matches_a_directory() -> None:
 
 
 def test_root_pyproject_extends_ruff_toml() -> None:
+    """The root pyproject.toml [tool.ruff] does nothing but extend ruff.toml."""
     # Codacy's runner takes the first root config it lists (pyproject.toml, ruff.toml or
     # .ruff.toml) as `--config`. Measured on Codacy, that was not ruff.toml: its I001 on
     # hindsight_api/admin/cli.py follows ruff's default line length of 88, and it put
@@ -110,4 +139,18 @@ def test_root_pyproject_extends_ruff_toml() -> None:
     assert ruff_table == {"extend": "ruff.toml"}, (
         f"The root pyproject.toml [tool.ruff] is {ruff_table!r}. It must be exactly "
         '`extend = "ruff.toml"`, or Codacy can lint with ruff defaults instead of ruff.toml.'
+    )
+
+
+def test_ci_runs_this_test_on_every_change_it_checks() -> None:
+    """test-dev runs when ruff.toml, the root pyproject.toml or the set of packages changes."""
+    # The `dev` paths filter gates test-dev. Without these rules a pull request that adds a
+    # package, or edits only the root ruff config, skips the job that checks them.
+    rules = _dev_filter_rules()
+    assert "ruff.toml" in rules, "the `dev` filter in test.yml must list 'ruff.toml'"
+    assert "pyproject.toml" in rules, "the `dev` filter in test.yml must list the root 'pyproject.toml'"
+    package_set_rule = {"added|deleted|renamed|copied": "**/pyproject.toml"}
+    assert package_set_rule in rules, (
+        f"the `dev` filter in test.yml must list {package_set_rule!r}, so a pull request that "
+        "adds, removes or moves a package runs test-dev"
     )
