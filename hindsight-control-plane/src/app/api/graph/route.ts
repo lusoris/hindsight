@@ -3,6 +3,7 @@ import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { DATAPLANE_URL, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { requireQueryBankId } from "@/lib/route-validation";
 
+/** Streams the bank's memory graph from the dataplane, gzipped when the browser accepts it. */
 export async function GET(request: NextRequest) {
   try {
     const bankId = requireQueryBankId(request, ["bank_id", "agent_id"]);

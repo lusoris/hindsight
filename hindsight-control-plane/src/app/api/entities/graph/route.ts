@@ -5,6 +5,7 @@ import { readTagFilter } from "@/lib/tag-filter-params";
 import { requireQueryBankId } from "@/lib/route-validation";
 import { readOptionalNumber } from "@/lib/query-params";
 
+/** Fetches the bank's entity graph, narrowed by `limit`, `min_count` and the tag filter. */
 export async function GET(request: NextRequest) {
   const bankId = requireQueryBankId(request);
   if (bankId instanceof NextResponse) return bankId;

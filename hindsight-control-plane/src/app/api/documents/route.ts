@@ -13,6 +13,7 @@ type TimeField = "created_at" | "updated_at";
 type TagsMatch = "any" | "all" | "any_strict" | "all_strict" | "exact";
 const TIME_FIELDS = new Set<string>(["created_at", "updated_at"]);
 
+/** Lists a bank's documents with filters and paging, or fetches one when `document_id` is set. */
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const bankId = searchParams.get("bank_id");
@@ -69,6 +70,7 @@ export async function GET(request: NextRequest) {
   return respondWithSdk(response, "Failed to fetch documents", { request });
 }
 
+/** Forwards a document's tag update to the dataplane; both ids come from the query string. */
 export async function PATCH(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const bankId = searchParams.get("bank_id");
@@ -107,6 +109,7 @@ export async function PATCH(request: NextRequest) {
   }
 }
 
+/** Deletes the document named by `?bank_id=` and `?document_id=`. */
 export async function DELETE(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const bankId = searchParams.get("bank_id");

@@ -15,6 +15,7 @@ const TIME_FIELDS = new Set<string>([
   "occurred_end",
 ]);
 
+/** Lists the bank's memory units, forwarding the query filters and paging to listMemories. */
 export async function GET(request: NextRequest) {
   try {
     const bankId = requireQueryBankId(request, ["bank_id", "agent_id"]);
@@ -78,6 +79,7 @@ export async function GET(request: NextRequest) {
 
 // Note: Individual memory unit deletion is not yet supported by the API
 // Use clearBankMemories to delete all memories for a bank instead
+/** Always answers 501: the dataplane has no single-memory delete. */
 export async function DELETE(request: NextRequest) {
   return NextResponse.json(
     localizeApiErrorPayload(request, {

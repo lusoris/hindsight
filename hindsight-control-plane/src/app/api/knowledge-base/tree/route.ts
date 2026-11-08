@@ -4,6 +4,7 @@ import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { appendTagFilter, readTagFilter } from "@/lib/tag-filter-params";
 import { requireQueryBankId } from "@/lib/route-validation";
 
+/** Returns the bank's knowledge-base tree, narrowed by the tag filter. */
 export async function GET(request: NextRequest) {
   try {
     const bankId = requireQueryBankId(request);

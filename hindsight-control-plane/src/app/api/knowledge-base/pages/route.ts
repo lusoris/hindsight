@@ -3,6 +3,7 @@ import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { requireQueryBankId } from "@/lib/route-validation";
 
+/** Creates a knowledge-base page in the bank from the JSON body. */
 export async function POST(request: NextRequest) {
   try {
     const bankId = requireQueryBankId(request);
