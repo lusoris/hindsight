@@ -1677,16 +1677,18 @@ async def test_recall_include_source_facts_hydrates_from_store(memory, request_c
 
 
 @pytest.mark.parametrize(
-    ("carries_contract", "seeded_status", "expected_is_stale"),
+    ("carries_contract", "seeded_status", "seeded_ttl", "expected_is_stale"),
     [
-        pytest.param(True, "active", False, id="carried-active-fresh"),
-        pytest.param(True, "stale", True, id="carried-stale"),
-        pytest.param(False, "active", True, id="not-carried-stale"),
+        pytest.param(True, "active", None, False, id="carried-active-fresh"),
+        pytest.param(True, "stale", None, True, id="carried-stale"),
+        pytest.param(False, "active", None, True, id="not-carried-stale"),
+        pytest.param(True, "active", 3600, True, id="carried-ttl-no-fetch-time-stale"),
     ],
 )
 async def test_recall_record_contract_freshness_from_store(
     carries_contract: bool,
     seeded_status: str,
+    seeded_ttl: int | None,
     expected_is_stale: bool,
     memory: MemoryEngine,
     request_context: RequestContext,
@@ -1698,7 +1700,8 @@ async def test_recall_record_contract_freshness_from_store(
     ttl_seconds, and fetched_at leaves freshness unknown. If recall defaulted
     a missing record_status to 'active', an expired or stale memory from such a
     store would pass as fresh. Recall must therefore treat a missing record contract
-    (record_status is None) as stale.
+    (record_status is None) as stale. A record that carries a time-to-live but
+    no fetch time similarly has an unknown age and is reported stale.
     """
     store = InMemoryMemories({})
     store.carries_record_contract_on_result = carries_contract
@@ -1713,7 +1716,7 @@ async def test_recall_record_contract_freshness_from_store(
         fact_text,
         "world",
         record_status=seeded_status,
-        ttl_seconds=None,
+        ttl_seconds=seeded_ttl,
     )
 
     result = await memory.recall_async(

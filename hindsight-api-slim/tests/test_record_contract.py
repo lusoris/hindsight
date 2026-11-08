@@ -18,6 +18,7 @@ from hindsight_api.engine.memories.base import FactRecord, StoredMemory, compute
 from hindsight_api.engine.memory_engine import MemoryEngine
 from hindsight_api.engine.response_models import Budget, MemoryFact
 from hindsight_api.engine.schema import fq_table
+from hindsight_api.engine.search.types import RetrievalResult
 from tests.fact_fakes import RECORD_CONTRACT_DEFAULTS
 
 
@@ -166,6 +167,36 @@ def test_ttl_expired_is_stale() -> None:
     assert fact.is_stale is True
     result = RecallResult(id=fact.id, text=fact.text, type=fact.fact_type, is_stale=fact.is_stale)
     assert result.is_stale is True
+
+
+def test_ttl_without_fetched_at_is_stale() -> None:
+    """A record with a TTL but no fetch time has unknown age, so it is reported stale.
+
+    Memories with no TTL (ttl_seconds is None) stay fresh when fetched_at is None.
+    """
+    now = datetime.now(timezone.utc)
+    assert compute_is_stale("active", ttl_seconds=3600, fetched_at=None, now=now) is True
+    assert compute_is_stale("active", ttl_seconds=None, fetched_at=None, now=now) is False
+
+
+def test_from_db_row_leaves_missing_record_status_unset() -> None:
+    """from_db_row must not default a missing record_status column to 'active'.
+
+    Every database query selects record_status and the column is NOT NULL. A row
+    lacking the column only appears if a query dropped it, and recall must then
+    see record_status is None so it reports the memory stale rather than fresh.
+    """
+    row: dict[str, object] = {
+        "id": uuid.uuid4(),
+        "text": "fresh fact",
+        "fact_type": "world",
+    }
+    result = RetrievalResult.from_db_row(row)
+    assert result.record_status is None
+
+    row_stale = dict(row, record_status="stale")
+    result_stale = RetrievalResult.from_db_row(row_stale)
+    assert result_stale.record_status == "stale"
 
 
 def test_ttl_not_expired_is_not_stale() -> None:

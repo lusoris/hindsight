@@ -101,7 +101,10 @@ class RetrievalResult:
 
     # Record contract metadata (record_status, ttl_seconds, fetched_at).
     # ``None`` for record_status means the store did not carry the record contract
-    # on this result; recall then reports the result stale (see memory_engine).
+    # on this result; from_db_row also leaves record_status as None when the row
+    # lacks the column. Every query selects it and the column is NOT NULL, so None
+    # only appears when a query dropped it, and recall then reports the result
+    # stale instead of fresh (see memory_engine).
     record_status: str | None = None
     ttl_seconds: int | None = None
     fetched_at: datetime | None = None
@@ -130,7 +133,7 @@ class RetrievalResult:
             tags=row.get("tags"),
             metadata=row.get("metadata"),
             proof_count=row.get("proof_count"),
-            record_status=row.get("record_status") or "active",
+            record_status=row.get("record_status"),
             ttl_seconds=row.get("ttl_seconds"),
             fetched_at=row.get("fetched_at"),
             similarity=row.get("similarity"),

@@ -35,7 +35,7 @@ type RecallResult struct {
 	Tags []string `json:"tags,omitempty"`
 	SourceFactIds []string `json:"source_fact_ids,omitempty"`
 	Scores NullableRecallScores `json:"scores,omitempty"`
-	// Whether to re-check this memory before relying on it: its record is marked 'stale', or its ttl_seconds have elapsed since it was fetched. Stale memories are still returned and ranked.
+	// Whether to re-check this memory before relying on it: its record is marked 'stale', its ttl_seconds have elapsed since it was fetched, or it has ttl_seconds but no fetch time. Stale memories are still returned and ranked.
 	IsStale *bool `json:"is_stale,omitempty"`
 	Attachments []ChunkAttachment `json:"attachments,omitempty"`
 }

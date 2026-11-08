@@ -42,7 +42,7 @@ class RecallResult(BaseModel):
     tags: Optional[List[StrictStr]] = None
     source_fact_ids: Optional[List[StrictStr]] = None
     scores: Optional[RecallScores] = None
-    is_stale: Optional[StrictBool] = Field(default=False, description="Whether to re-check this memory before relying on it: its record is marked 'stale', or its ttl_seconds have elapsed since it was fetched. Stale memories are still returned and ranked.")
+    is_stale: Optional[StrictBool] = Field(default=False, description="Whether to re-check this memory before relying on it: its record is marked 'stale', its ttl_seconds have elapsed since it was fetched, or it has ttl_seconds but no fetch time. Stale memories are still returned and ranked.")
     attachments: Optional[List[ChunkAttachment]] = None
     __properties: ClassVar[List[str]] = ["id", "text", "type", "entities", "context", "occurred_start", "occurred_end", "mentioned_at", "document_id", "metadata", "chunk_id", "tags", "source_fact_ids", "scores", "is_stale", "attachments"]
 

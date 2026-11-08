@@ -337,11 +337,19 @@ def compute_is_stale(
     *,
     now: datetime | None = None,
 ) -> bool:
-    """Compute whether a memory record is stale from its record_status or TTL."""
+    """Compute whether a memory record is stale from its record_status or TTL.
+
+    A TTL with no fetch time has an unknown age, so it is reported stale rather than fresh.
+    """
     if record_status == "stale":
         return True
-    if ttl_seconds is None or fetched_at is None:
+    if ttl_seconds is None:
         return False
+    # A TTL with no fetch time has an unknown age, so it is reported stale rather
+    # than fresh, the same fail-closed rule recall applies to a result whose store
+    # did not carry the record contract.
+    if fetched_at is None:
+        return True
     if now is None:
         now = datetime.now(timezone.utc)
     return (_normalize_utc(now) - _normalize_utc(fetched_at)).total_seconds() > ttl_seconds
