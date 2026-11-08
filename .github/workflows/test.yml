@@ -322,6 +322,30 @@ jobs:
     - name: Check integration lockfiles resolve from the npm registry
       run: ./scripts/check-integration-lockfiles.sh
 
+  # Inline semgrep suppressions are checked by scripts/hooks/lint.sh, which CI
+  # runs only inside verify-generated-files, and that job steps aside for a PR
+  # confined to hindsight-system-tests/ (see the outside-system-tests filter).
+  # This job runs the same checker on every change, so a suppression added
+  # there, or one that expires while nothing else changes, still fails CI. The
+  # checker needs only git and a stdlib Python, so it has no needs: and no
+  # filter: it takes seconds and stays a defence independent of detect-changes.
+  check-scanner-suppressions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        ref: ${{ github.event.pull_request.head.sha || '' }}
+        persist-credentials: false
+
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version-file: ".python-version"
+
+    - name: Check inline scanner suppressions
+      run: ./scripts/check-scanner-suppressions.sh
+
   typecheck-api:
     # `ty check` over hindsight-api-slim. Green today, and it stays green: the rules it enforces
     # are listed in `[tool.ty.rules]`, with the ones not yet clean marked "ignore" there rather
@@ -5672,6 +5696,7 @@ jobs:
       - test-doc-examples
       - test-upgrade
       - verify-generated-files
+      - check-scanner-suppressions
       - check-openapi-compatibility
       - check-cli-coverage
       - check-client-coverage
