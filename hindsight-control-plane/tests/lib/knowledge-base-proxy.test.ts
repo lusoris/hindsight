@@ -58,6 +58,24 @@ describe("createKnowledgeBaseNode", () => {
     expect(consoleErrorSpy).not.toHaveBeenCalled();
   });
 
+  it("percent-encodes a bank id holding path, query, fragment and control characters as one segment", async () => {
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify({}), { status: HTTP_OK }));
+    const hostile = "a/b?c#d\r\n";
+
+    const request = new NextRequest(
+      `http://localhost/api/knowledge-base/pages?bank_id=${encodeURIComponent(hostile)}`,
+      { method: "POST", body: JSON.stringify({ title: "x" }) }
+    );
+
+    await createKnowledgeBaseNode(request, "pages", FAILURE);
+
+    const [target] = fetchSpy.mock.calls[0] as [string];
+    const url = new URL(target);
+    expect(url.pathname).toBe("/v1/default/banks/a%2Fb%3Fc%23d%0D%0A/knowledge-base/pages");
+    expect(url.search).toBe("");
+    expect(url.hash).toBe("");
+  });
+
   it("upstream 201 JSON -> 201 with that JSON", async () => {
     const upstream = { id: "f-1", name: "x" };
     fetchSpy.mockResolvedValueOnce(
