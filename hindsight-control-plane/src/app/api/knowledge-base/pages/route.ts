@@ -1,33 +1,10 @@
-import { NextRequest, NextResponse } from "next/server";
-import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
-import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
-import { requireQueryBankId } from "@/lib/route-validation";
+import { NextRequest } from "next/server";
+import { createKnowledgeBaseNode } from "@/lib/knowledge-base-proxy";
 
 /** Creates a knowledge-base page in the bank from the JSON body. */
 export async function POST(request: NextRequest) {
-  try {
-    const bankId = requireQueryBankId(request);
-    if (bankId instanceof NextResponse) return bankId;
-
-    const body = await request.json();
-    const response = await fetch(dataplaneBankUrl(bankId, "/knowledge-base/pages"), {
-      method: "POST",
-      headers: getDataplaneHeaders({ "Content-Type": "application/json" }),
-      body: JSON.stringify(body),
-    });
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ detail: response.statusText }));
-      return NextResponse.json(error, { status: response.status });
-    }
-    return NextResponse.json(await response.json(), { status: response.status });
-  } catch (error) {
-    console.error("Failed to create page:", error);
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "Failed to create page",
-        errorKey: "api.errors.knowledgeBase.createPage",
-      }),
-      { status: 500 }
-    );
-  }
+  return createKnowledgeBaseNode(request, "pages", {
+    error: "Failed to create page",
+    errorKey: "api.errors.knowledgeBase.createPage",
+  });
 }
