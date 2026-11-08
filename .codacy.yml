@@ -1,7 +1,14 @@
 ---
-# category D: OpenAPI Generator output, regenerated from the API spec
-# entry 2026-11-07, expiry 2027-03-07
 engines:
   duplication:
     exclude_paths:
+      # category D, entry 2026-11-07, expiry 2027-03-07, rule duplication: OpenAPI Generator output, regenerated from the API spec
       - "hindsight-clients/python/hindsight_client_api/**"
+      # category D, entry 2026-11-08, expiry 2027-03-08, rule duplication: generated copy of hindsight-integrations/_shared/user_config.py, kept identical by scripts/sync-integration-config.py --check
+      - "hindsight-integrations/aider/hindsight_aider/_user_config.py"
+      # category D, entry 2026-11-08, expiry 2027-03-08, rule duplication: generated copy of hindsight-integrations/_shared/user_config.py, kept identical by scripts/sync-integration-config.py --check
+      - "hindsight-integrations/github-copilot/hindsight_copilot/_user_config.py"
+      # category D, entry 2026-11-08, expiry 2027-03-08, rule duplication: generated copy of hindsight-integrations/_shared/user_config.py, kept identical by scripts/sync-integration-config.py --check
+      - "hindsight-integrations/openhands/hindsight_openhands/_user_config.py"
+      # category D, entry 2026-11-08, expiry 2027-03-08, rule duplication: generated copy of hindsight-integrations/_shared/user_config.py, kept identical by scripts/sync-integration-config.py --check
+      - "hindsight-integrations/devin-desktop/hindsight_devin_desktop/_user_config.py"

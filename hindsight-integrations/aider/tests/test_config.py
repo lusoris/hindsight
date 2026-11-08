@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from hindsight_aider.config import DEFAULT_HINDSIGHT_API_URL, load_config
 
 
@@ -44,3 +46,20 @@ def test_malformed_file_falls_back(tmp_path):
     p.write_text("{ broken")
     cfg = load_config(config_file=p, env={})
     assert cfg.hindsight_api_url == DEFAULT_HINDSIGHT_API_URL
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[1, 2]",
+        # A string holding a key name passes the `key in data` test and then fails on data[key];
+        # a list never does, so it alone would not notice a missing object check.
+        '"bankId"',
+    ],
+)
+def test_non_object_json_falls_back(tmp_path, content):
+    p = tmp_path / "aider.json"
+    p.write_text(content)
+    cfg = load_config(config_file=p, env={})
+    assert cfg.hindsight_api_url == DEFAULT_HINDSIGHT_API_URL
+    assert cfg.bank_id is None

@@ -293,6 +293,10 @@ jobs:
           integrations-roo-code:
             - 'hindsight-integrations/roo-code/**'
           dev:
+            - 'scripts/sync-integration-config.py'
+            - 'scripts/check-codacy-config.py'
+            - 'hindsight-integrations/_shared/**'
+            - '.codacy.yml'
             - 'hindsight-dev/**'
             - 'scripts/dev/**'
           ci:

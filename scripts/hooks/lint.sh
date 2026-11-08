@@ -96,6 +96,10 @@ if [ -d "$INTEGRATIONS_DIR" ] && { [ "$LINT_ALL" = "1" ] || [ -n "$CHANGED_FILES
     done
 fi
 
+# Generated integration copies match their shared source; Codacy exceptions carry a category and live dates
+run_task "integration-config-sync" "$REPO_ROOT" "scripts/sync-integration-config.py --check"
+run_task "codacy-config" "$REPO_ROOT" "scripts/check-codacy-config.py"
+
 # Wait for all tasks to complete
 for pid in "${PIDS[@]}"; do
     wait "$pid" 2>/dev/null || true

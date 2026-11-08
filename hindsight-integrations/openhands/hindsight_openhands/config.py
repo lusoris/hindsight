@@ -11,11 +11,12 @@ server at runtime, so there is no daemon or direct API client here.
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+
+from ._user_config import apply_string_settings, read_user_config
 
 # Cross-integration cloud-default convention.
 DEFAULT_HINDSIGHT_API_URL = "https://api.hindsight.vectorize.io"
@@ -51,23 +52,8 @@ _ENV_KEYS = {
 def load_config(config_file: Optional[Path] = None, env: Optional[dict] = None) -> OpenHandsConfig:
     """Load and resolve configuration from file then environment."""
     cfg = OpenHandsConfig()
-    env = os.environ if env is None else env
-
-    path = config_file if config_file is not None else USER_CONFIG_FILE
-    if path.is_file():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            data = {}
-        for key, attr in _FILE_KEYS.items():
-            value = data.get(key)
-            if value:
-                setattr(cfg, attr, str(value))
-
-    for key, attr in _ENV_KEYS.items():
-        value = env.get(key)
-        if value:
-            setattr(cfg, attr, str(value))
+    apply_string_settings(cfg, read_user_config(config_file, USER_CONFIG_FILE), _FILE_KEYS)
+    apply_string_settings(cfg, os.environ if env is None else env, _ENV_KEYS)
 
     if not cfg.hindsight_api_url:
         cfg.hindsight_api_url = DEFAULT_HINDSIGHT_API_URL

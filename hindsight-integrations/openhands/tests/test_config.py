@@ -41,3 +41,11 @@ def test_malformed_file_falls_back(tmp_path):
     cfg = load_config(config_file=p, env={})
     assert cfg.hindsight_api_url == DEFAULT_HINDSIGHT_API_URL
     assert cfg.bank_id == DEFAULT_BANK_ID
+
+
+def test_non_object_json_falls_back(tmp_path):
+    p = tmp_path / "openhands.json"
+    p.write_text("[1, 2]")
+    cfg = load_config(config_file=p, env={})
+    assert cfg.hindsight_api_url == DEFAULT_HINDSIGHT_API_URL
+    assert cfg.bank_id == DEFAULT_BANK_ID

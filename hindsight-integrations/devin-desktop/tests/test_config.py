@@ -55,3 +55,11 @@ def test_malformed_file_falls_back(tmp_path):
     p = tmp_path / "devin-desktop.json"
     p.write_text("{ broken")
     assert load_config(config_file=p, env={}).global_bank == DEFAULT_GLOBAL_BANK
+
+
+def test_non_object_json_falls_back(tmp_path):
+    p = tmp_path / "devin-desktop.json"
+    p.write_text("[1, 2]")
+    cfg = load_config(config_file=p, env={})
+    assert cfg.hindsight_api_url == DEFAULT_HINDSIGHT_API_URL
+    assert cfg.global_bank == DEFAULT_GLOBAL_BANK
