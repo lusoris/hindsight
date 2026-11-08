@@ -67,6 +67,9 @@ run_task "osv-config" "$REPO_ROOT" "scripts/check-osv-config.sh"
 # Inline semgrep suppressions name the rule, a reason, a category and an unexpired date
 run_task "scanner-suppressions" "$REPO_ROOT" "scripts/check-scanner-suppressions.sh"
 
+# Repo scripts had no local lint; naive dates (DTZ) and complexity (C90) are what Codacy reported on the first one
+run_task "ruff-scripts" "$REPO_ROOT" "uv run --no-project ruff check --config ruff.toml --extend-select DTZ,C90 scripts"
+
 # Integrations: lint packages with modifications vs HEAD locally; lint all in CI.
 # Python integrations use shared ruff.toml; Node integrations use shared .prettierrc.json.
 INTEGRATIONS_DIR="$REPO_ROOT/hindsight-integrations"
