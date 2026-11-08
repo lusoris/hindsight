@@ -6,6 +6,7 @@ const HTTP_OK = 200;
 const HTTP_BAD_REQUEST = 400;
 const HTTP_NOT_FOUND = 404;
 const HTTP_INTERNAL_ERROR = 500;
+const HTTP_SERVICE_UNAVAILABLE = 503;
 
 const URL = "http://localhost/api/test";
 const SUFFIX = "/directives/dir-1";
@@ -21,6 +22,11 @@ const MISSING = {
 const UNTRANSLATED_FAILURE = {
   error: "Failed to update directive",
   errorKey: "test.directives.update",
+};
+
+const NOT_FOUND_FAILURE = {
+  error: "Directive not found",
+  errorKey: "test.directives.notFound",
 };
 
 /** GET options for the directive item, with `overrides` applied. */
@@ -199,6 +205,66 @@ describe("proxyDataplane", () => {
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       "Error %s:",
       "deleting directive",
+      expect.any(Error)
+    );
+  });
+
+  it.each([
+    { label: "alone", extra: {} },
+    { label: "with nonOkAsServerError", extra: { nonOkAsServerError: true } },
+  ])(
+    "notFound ($label) returns the notFound payload at 404 without reading upstream text or logging",
+    async ({ extra }) => {
+      const upstream = new Response("upstream 404 body", { status: HTTP_NOT_FOUND });
+      const textSpy = vi.spyOn(upstream, "text");
+      fetchSpy.mockResolvedValueOnce(upstream);
+
+      const response = await proxyDataplane(
+        new Request(URL),
+        options({ notFound: NOT_FOUND_FAILURE, ...extra })
+      );
+
+      expect(response.status).toBe(HTTP_NOT_FOUND);
+      expect(await response.json()).toEqual({ error: NOT_FOUND_FAILURE.error });
+      expect(textSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    }
+  );
+
+  it("notFound on upstream 500 without nonOkAsServerError retains non-OK behavior", async () => {
+    fetchSpy.mockResolvedValueOnce(new Response("Upstream Error", { status: HTTP_INTERNAL_ERROR }));
+    const failure = { error: "Failed to get directive", errorKey: "test.directives.fetch" };
+
+    const response = await proxyDataplane(
+      new Request(URL),
+      options({ failure, notFound: NOT_FOUND_FAILURE })
+    );
+
+    expect(response.status).toBe(HTTP_INTERNAL_ERROR);
+    expect(await response.json()).toEqual({ error: failure.error });
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "API error %s:",
+      "getting directive",
+      "Upstream Error"
+    );
+  });
+
+  it("nonOkAsServerError answers failure at 500 and logs Error for upstream 503", async () => {
+    fetchSpy.mockResolvedValueOnce(
+      new Response("Service Unavailable", { status: HTTP_SERVICE_UNAVAILABLE })
+    );
+    const failure = { error: "Failed to get directive", errorKey: "test.directives.fetch" };
+
+    const response = await proxyDataplane(
+      new Request(URL),
+      options({ failure, nonOkAsServerError: true })
+    );
+
+    expect(response.status).toBe(HTTP_INTERNAL_ERROR);
+    expect(await response.json()).toEqual({ error: failure.error });
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "Error %s:",
+      "getting directive",
       expect.any(Error)
     );
   });
