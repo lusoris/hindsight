@@ -1,15 +1,10 @@
 import { NextRequest } from "next/server";
 import { lowLevelClient, sdk } from "@/lib/hindsight-client";
-import { respondWithSdk } from "@/lib/sdk-response";
+import { respondWithBankSdk, type BankRouteContext } from "@/lib/bank-sdk-route";
 
-export async function POST(
-  request: NextRequest,
-  { params }: { params: Promise<{ bankId: string }> }
-) {
-  const { bankId } = await params;
-  const response = await sdk.testBankLlm({
-    client: lowLevelClient,
-    path: { bank_id: bankId },
-  });
-  return respondWithSdk(response, "Failed to test bank LLM connectivity", { request });
+/** Tests LLM connectivity for a bank. */
+export async function POST(request: NextRequest, context: BankRouteContext) {
+  return respondWithBankSdk(request, context, "Failed to test bank LLM connectivity", (bankId) =>
+    sdk.testBankLlm({ client: lowLevelClient, path: { bank_id: bankId } })
+  );
 }
