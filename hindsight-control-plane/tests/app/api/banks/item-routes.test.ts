@@ -10,6 +10,7 @@ vi.mock("@/lib/dataplane-proxy", () => ({ proxyDataplane }));
 import * as directiveRoute from "@/app/api/banks/[bankId]/directives/[directiveId]/route";
 import * as mentalModelRoute from "@/app/api/banks/[bankId]/mental-models/[mentalModelId]/route";
 import { GET as getMentalModelHistory } from "@/app/api/banks/[bankId]/mental-models/[mentalModelId]/history/route";
+import * as aliasRoute from "@/app/api/banks/[bankId]/aliases/[alias]/route";
 
 type Method = "GET" | "PATCH" | "DELETE";
 type Handler = (request: Request, context: { params: Promise<never> }) => Promise<unknown>;
@@ -149,5 +150,56 @@ describe("mental-models/[mentalModelId]/history route", () => {
       },
       nonOkAsServerError: true,
     });
+  });
+});
+
+describe("aliases/[alias] route", () => {
+  const target = {
+    required: ["bank 1"],
+    missing: { error: "bank_id is required", errorKey: "api.errors.validation.bankIdRequired" },
+    bankId: "bank 1",
+    suffix: "/aliases/a%2F1",
+  };
+
+  beforeEach(() => {
+    proxyDataplane.mockReset();
+    proxyDataplane.mockResolvedValue(new Response(null, { status: 200 }));
+  });
+
+  it.each([
+    {
+      method: "PATCH" as const,
+      handler: aliasRoute.PATCH,
+      call: {
+        method: "PATCH",
+        failure: {
+          error: "Failed to update bank alias",
+          errorKey: "api.errors.bankAliases.update",
+        },
+        action: "setting primary bank alias",
+        forwardJsonBody: true,
+      },
+    },
+    {
+      method: "DELETE" as const,
+      handler: aliasRoute.DELETE,
+      call: {
+        method: "DELETE",
+        failure: {
+          error: "Failed to delete bank alias",
+          errorKey: "api.errors.bankAliases.delete",
+        },
+        action: "deleting bank alias",
+      },
+    },
+  ])("$method hands proxyDataplane its options", async ({ method, handler, call }) => {
+    const request = new Request("http://localhost/api/test", { method });
+
+    await handler(request, { params: Promise.resolve({ bankId: "bank 1", alias: "a/1" }) });
+
+    expect(proxyDataplane).toHaveBeenCalledTimes(1);
+    const [forwardedRequest, options] = proxyDataplane.mock.calls[0];
+    expect(forwardedRequest).toBe(request);
+    expect(options).toEqual({ ...target, ...call });
   });
 });
