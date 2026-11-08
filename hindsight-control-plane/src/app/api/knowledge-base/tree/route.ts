@@ -2,19 +2,14 @@ import { NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { appendTagFilter, readTagFilter } from "@/lib/tag-filter-params";
+import { requireQueryBankId } from "@/lib/route-validation";
 
+/** Returns the bank's knowledge-base tree, narrowed by the tag filter. */
 export async function GET(request: NextRequest) {
   try {
-    const bankId = request.nextUrl.searchParams.get("bank_id");
-    if (!bankId) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "bank_id is required",
-          errorKey: "api.errors.validation.bankIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
+    const bankId = requireQueryBankId(request);
+    if (bankId instanceof NextResponse) return bankId;
+
     const query = new URLSearchParams();
     appendTagFilter(query, readTagFilter(request.nextUrl.searchParams));
     const response = await fetch(dataplaneBankUrl(bankId, `/knowledge-base/tree?${query}`), {

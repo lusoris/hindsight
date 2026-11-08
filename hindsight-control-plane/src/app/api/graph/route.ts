@@ -1,21 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { DATAPLANE_URL, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { requireQueryBankId } from "@/lib/route-validation";
 
+/** Streams the bank's memory graph from the dataplane, gzipped when the browser accepts it. */
 export async function GET(request: NextRequest) {
   try {
-    const searchParams = request.nextUrl.searchParams;
-    const bankId = searchParams.get("bank_id") || searchParams.get("agent_id");
+    const bankId = requireQueryBankId(request, ["bank_id", "agent_id"]);
+    if (bankId instanceof NextResponse) return bankId;
 
-    if (!bankId) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "bank_id is required",
-          errorKey: "api.errors.validation.bankIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
+    const searchParams = request.nextUrl.searchParams;
 
     // Build query params for the dataplane
     const params = new URLSearchParams();

@@ -2,21 +2,16 @@ import { NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { appendTagFilter, readTagFilter } from "@/lib/tag-filter-params";
+import { requireQueryBankId } from "@/lib/route-validation";
 
+/** Searches the bank's knowledge pages; a blank `q` returns no results without calling upstream. */
 export async function GET(request: NextRequest) {
   try {
-    const bankId = request.nextUrl.searchParams.get("bank_id");
+    const bankId = requireQueryBankId(request);
+    if (bankId instanceof NextResponse) return bankId;
+
     const q = request.nextUrl.searchParams.get("q");
     const limit = request.nextUrl.searchParams.get("limit") ?? "10";
-    if (!bankId) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "bank_id is required",
-          errorKey: "api.errors.validation.bankIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
     if (!q || !q.trim()) {
       return NextResponse.json({ results: [], total: 0 }, { status: 200 });
     }

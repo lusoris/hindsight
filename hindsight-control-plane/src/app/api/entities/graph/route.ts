@@ -1,27 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
-import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { sdk, lowLevelClient } from "@/lib/hindsight-client";
 import { respondWithSdk } from "@/lib/sdk-response";
 import { readTagFilter } from "@/lib/tag-filter-params";
+import { requireQueryBankId } from "@/lib/route-validation";
+import { readOptionalNumber } from "@/lib/query-params";
 
+/** Fetches the bank's entity graph, narrowed by `limit`, `min_count` and the tag filter. */
 export async function GET(request: NextRequest) {
+  const bankId = requireQueryBankId(request);
+  if (bankId instanceof NextResponse) return bankId;
+
   const searchParams = request.nextUrl.searchParams;
-  const bankId = searchParams.get("bank_id");
-
-  if (!bankId) {
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "bank_id is required",
-        errorKey: "api.errors.validation.bankIdRequired",
-      }),
-      { status: 400 }
-    );
-  }
-
-  const limit = searchParams.get("limit") ? Number(searchParams.get("limit")) : undefined;
-  const minCount = searchParams.get("min_count")
-    ? Number(searchParams.get("min_count"))
-    : undefined;
+  const limit = readOptionalNumber(searchParams, "limit");
+  const minCount = readOptionalNumber(searchParams, "min_count");
 
   const response = await sdk.getEntityGraph({
     client: lowLevelClient,

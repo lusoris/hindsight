@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { DATAPLANE_URL, dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { requireQueryBankId } from "@/lib/route-validation";
 
 // The dataplane export is asynchronous (a large whole-bank export can pin the API,
 // so the synchronous endpoint was removed). We hide that from the browser: submit
@@ -16,17 +17,10 @@ const EXPORT_TIMEOUT_MS = 5 * 60 * 1000;
  */
 export async function GET(request: NextRequest) {
   try {
+    const bankId = requireQueryBankId(request);
+    if (bankId instanceof NextResponse) return bankId;
+
     const searchParams = request.nextUrl.searchParams;
-    const bankId = searchParams.get("bank_id");
-    if (!bankId) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "bank_id is required",
-          errorKey: "api.errors.validation.bankIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
 
     const qs = new URLSearchParams();
     for (const id of searchParams.getAll("document_id")) {
@@ -146,17 +140,10 @@ export async function GET(request: NextRequest) {
  */
 export async function POST(request: NextRequest) {
   try {
+    const bankId = requireQueryBankId(request);
+    if (bankId instanceof NextResponse) return bankId;
+
     const searchParams = request.nextUrl.searchParams;
-    const bankId = searchParams.get("bank_id");
-    if (!bankId) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "bank_id is required",
-          errorKey: "api.errors.validation.bankIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
     const onConflict = searchParams.get("on_conflict") || "skip";
 
     const inForm = await request.formData();
