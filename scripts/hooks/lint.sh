@@ -64,6 +64,14 @@ run_task "ty-embed" "$REPO_ROOT/hindsight-embed" "uv run --frozen ty check hinds
 # osv-scanner exception files (osv-scanner skips an unparseable one silently)
 run_task "osv-config" "$REPO_ROOT" "scripts/check-osv-config.sh"
 
+# Inline semgrep suppressions name the rule, a reason, a category and an unexpired date
+run_task "scanner-suppressions" "$REPO_ROOT" "scripts/check-scanner-suppressions.sh"
+
+# Repo scripts had no local lint; naive dates (DTZ) and complexity (C90) are what Codacy reported on the first one.
+# The workspace venv synced above, not --no-project: that one takes an active VIRTUAL_ENV or the ruff on PATH, a
+# different version from the lock (0.17.2 vs the pinned 0.14.9 when this was written).
+run_task "ruff-scripts" "$REPO_ROOT" "uv run --frozen --no-sync ruff check --config ruff.toml --extend-select DTZ,C90 scripts"
+
 # Integrations: lint packages with modifications vs HEAD locally; lint all in CI.
 # Python integrations use shared ruff.toml; Node integrations use shared .prettierrc.json.
 INTEGRATIONS_DIR="$REPO_ROOT/hindsight-integrations"
