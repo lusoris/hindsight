@@ -27,6 +27,10 @@ import { POST as testBankLlmRoute } from "@/app/api/banks/[bankId]/health/llm/ro
 import { POST as dryRunExtractRoute } from "@/app/api/banks/[bankId]/memories/dry-run-extract/route";
 import { POST as previewPromptRoute } from "@/app/api/banks/[bankId]/prompts/preview/route";
 
+const BANK_ID = "bank 1";
+const DRY_RUN_BODY = { text: "sample text to extract" };
+const PREVIEW_BODY = { mission: "custom prompt mission" };
+
 type RouteCase = {
   name: string;
   handler: (
@@ -35,7 +39,10 @@ type RouteCase = {
   ) => Promise<Response>;
   sdkMethod: ReturnType<typeof vi.fn>;
   label: string;
-  body?: Record<string, unknown>;
+  /** Raw request body; absent for a route that reads none. */
+  body?: string;
+  /** The exact argument the route must hand its SDK method. */
+  sdkArgs: Record<string, unknown>;
 };
 
 const ROUTES: RouteCase[] = [
@@ -44,20 +51,23 @@ const ROUTES: RouteCase[] = [
     handler: testBankLlmRoute,
     sdkMethod: testBankLlm,
     label: "Failed to test bank LLM connectivity",
+    sdkArgs: { client: lowLevelClient, path: { bank_id: BANK_ID } },
   },
   {
     name: "POST memories/dry-run-extract",
     handler: dryRunExtractRoute,
     sdkMethod: dryRunExtractMemories,
     label: "Failed to run dry-run extraction",
-    body: { text: "sample text to extract" },
+    body: JSON.stringify(DRY_RUN_BODY),
+    sdkArgs: { client: lowLevelClient, path: { bank_id: BANK_ID }, body: DRY_RUN_BODY },
   },
   {
     name: "POST prompts/preview",
     handler: previewPromptRoute,
     sdkMethod: previewPrompt,
     label: "Failed to preview prompt",
-    body: { mission: "custom prompt mission" },
+    body: JSON.stringify(PREVIEW_BODY),
+    sdkArgs: { client: lowLevelClient, path: { bank_id: BANK_ID }, body: PREVIEW_BODY },
   },
 ];
 
@@ -72,22 +82,18 @@ describe("bank-scoped SDK POST routes", () => {
 
   it.each(ROUTES)(
     "$name calls its SDK method and respondWithSdk with expected arguments",
-    async ({ handler, sdkMethod, label, body }) => {
+    async ({ handler, sdkMethod, label, body, sdkArgs }) => {
       const request = new NextRequest("http://localhost/api/banks/bank%201/test", {
         method: "POST",
-        ...(body ? { body: JSON.stringify(body) } : {}),
+        body,
       });
-      const context = { params: Promise.resolve({ bankId: "bank 1" }) };
+      const context = { params: Promise.resolve({ bankId: BANK_ID }) };
 
       const response = await handler(request, context);
 
       expect(response.status).toBe(200);
       expect(sdkMethod).toHaveBeenCalledTimes(1);
-      expect(sdkMethod).toHaveBeenCalledWith({
-        client: lowLevelClient,
-        path: { bank_id: "bank 1" },
-        ...(body ? { body } : {}),
-      });
+      expect(sdkMethod).toHaveBeenCalledWith(sdkArgs);
 
       expect(respondWithSdk).toHaveBeenCalledTimes(1);
       expect(respondWithSdk).toHaveBeenCalledWith(SENTINEL_RESULT, label, { request });

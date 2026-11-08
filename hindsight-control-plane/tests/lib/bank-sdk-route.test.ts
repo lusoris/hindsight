@@ -5,14 +5,17 @@ import type { SdkResult } from "@/lib/sdk-response";
 const HTTP_OK = 200;
 const HTTP_NOT_FOUND = 404;
 
+/** A bodyless Response with the given status, standing in for the SDK's raw response. */
 function makeResponse(status: number): Response {
   return new Response(null, { status });
 }
 
+/** A successful SDK result carrying `data`. */
 function ok<T>(data: T, status = HTTP_OK): SdkResult<T> {
   return { data, error: undefined, response: makeResponse(status) };
 }
 
+/** A failed SDK result carrying the upstream `error` at `status`. */
 function fail(error: unknown, status: number): SdkResult<never> {
   return { data: undefined, error, response: makeResponse(status) };
 }
