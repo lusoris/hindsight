@@ -37,14 +37,30 @@ describe("createKnowledgeBaseNode", () => {
     consoleErrorSpy.mockRestore();
   });
 
+  function postRequest(
+    body: string = JSON.stringify({ name: "x" }),
+    url: string = REQUEST_URL
+  ): NextRequest {
+    return new NextRequest(url, { method: "POST", body });
+  }
+
+  function upstreamReturns(body: string, init: ResponseInit): void {
+    fetchSpy.mockResolvedValueOnce(new Response(body, init));
+  }
+
+  function expectLoggedFailure(): void {
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "%s:",
+      UNTRANSLATED_FAILURE.error,
+      expect.any(Error)
+    );
+  }
+
   it("forwards to dataplaneBankUrl with method POST, Content-Type application/json and the same JSON body", async () => {
     const upstream = { id: "f-1", name: "x" };
-    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(upstream), { status: HTTP_OK }));
+    upstreamReturns(JSON.stringify(upstream), { status: HTTP_OK });
 
-    const request = new NextRequest(REQUEST_URL, {
-      method: "POST",
-      body: JSON.stringify({ name: "x" }),
-    });
+    const request = postRequest();
 
     const response = await createKnowledgeBaseNode(request, "folders", FAILURE);
 
@@ -59,12 +75,12 @@ describe("createKnowledgeBaseNode", () => {
   });
 
   it("percent-encodes a bank id holding path, query, fragment and control characters as one segment", async () => {
-    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify({}), { status: HTTP_OK }));
+    upstreamReturns(JSON.stringify({}), { status: HTTP_OK });
     const hostile = "a/b?c#d\r\n";
 
-    const request = new NextRequest(
-      `http://localhost/api/knowledge-base/pages?bank_id=${encodeURIComponent(hostile)}`,
-      { method: "POST", body: JSON.stringify({ title: "x" }) }
+    const request = postRequest(
+      JSON.stringify({ title: "x" }),
+      `http://localhost/api/knowledge-base/pages?bank_id=${encodeURIComponent(hostile)}`
     );
 
     await createKnowledgeBaseNode(request, "pages", FAILURE);
@@ -76,54 +92,31 @@ describe("createKnowledgeBaseNode", () => {
     expect(url.hash).toBe("");
   });
 
-  it("upstream 201 JSON -> 201 with that JSON", async () => {
-    const upstream = { id: "f-1", name: "x" };
-    fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify(upstream), { status: HTTP_CREATED })
-    );
+  it.each([
+    [HTTP_CREATED, { id: "f-1", name: "x" }],
+    [HTTP_CONFLICT, { detail: "exists" }],
+  ])(
+    "upstream %i JSON -> the same status with that JSON, console.error not called",
+    async (status, upstream) => {
+      upstreamReturns(JSON.stringify(upstream), { status });
 
-    const request = new NextRequest(REQUEST_URL, {
-      method: "POST",
-      body: JSON.stringify({ name: "x" }),
-    });
+      const request = postRequest();
 
-    const response = await createKnowledgeBaseNode(request, "folders", FAILURE);
+      const response = await createKnowledgeBaseNode(request, "folders", FAILURE);
 
-    expect(response.status).toBe(HTTP_CREATED);
-    expect(await response.json()).toEqual(upstream);
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
-  });
-
-  it("upstream 409 JSON { detail: 'exists' } -> 409 with that JSON, console.error not called", async () => {
-    const upstream = { detail: "exists" };
-    fetchSpy.mockResolvedValueOnce(
-      new Response(JSON.stringify(upstream), { status: HTTP_CONFLICT })
-    );
-
-    const request = new NextRequest(REQUEST_URL, {
-      method: "POST",
-      body: JSON.stringify({ name: "x" }),
-    });
-
-    const response = await createKnowledgeBaseNode(request, "folders", FAILURE);
-
-    expect(response.status).toBe(HTTP_CONFLICT);
-    expect(await response.json()).toEqual(upstream);
-    expect(consoleErrorSpy).not.toHaveBeenCalled();
-  });
+      expect(response.status).toBe(status);
+      expect(await response.json()).toEqual(upstream);
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    }
+  );
 
   it("upstream 502 with a non-JSON body and statusText 'Bad Gateway' -> 502 { detail: 'Bad Gateway' }", async () => {
-    fetchSpy.mockResolvedValueOnce(
-      new Response("<html>Bad Gateway</html>", {
-        status: HTTP_BAD_GATEWAY,
-        statusText: "Bad Gateway",
-      })
-    );
-
-    const request = new NextRequest(REQUEST_URL, {
-      method: "POST",
-      body: JSON.stringify({ name: "x" }),
+    upstreamReturns("<html>Bad Gateway</html>", {
+      status: HTTP_BAD_GATEWAY,
+      statusText: "Bad Gateway",
     });
+
+    const request = postRequest();
 
     const response = await createKnowledgeBaseNode(request, "folders", FAILURE);
 
@@ -133,10 +126,7 @@ describe("createKnowledgeBaseNode", () => {
   });
 
   it("missing bank_id -> 400, fetch not called", async () => {
-    const request = new NextRequest("http://localhost/api/knowledge-base/folders", {
-      method: "POST",
-      body: JSON.stringify({ name: "x" }),
-    });
+    const request = postRequest(undefined, "http://localhost/api/knowledge-base/folders");
 
     const response = await createKnowledgeBaseNode(request, "folders", FAILURE);
 
@@ -148,37 +138,23 @@ describe("createKnowledgeBaseNode", () => {
   it("fetch rejects -> 500 with failure.error, console.error called with format string", async () => {
     fetchSpy.mockRejectedValueOnce(new Error("Network connection error"));
 
-    const request = new NextRequest(REQUEST_URL, {
-      method: "POST",
-      body: JSON.stringify({ name: "x" }),
-    });
+    const request = postRequest();
 
     const response = await createKnowledgeBaseNode(request, "folders", UNTRANSLATED_FAILURE);
 
     expect(response.status).toBe(HTTP_INTERNAL_ERROR);
     expect(await response.json()).toEqual({ error: UNTRANSLATED_FAILURE.error });
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      "%s:",
-      UNTRANSLATED_FAILURE.error,
-      expect.any(Error)
-    );
+    expectLoggedFailure();
   });
 
   it("invalid JSON request body -> 500 with failure.error, fetch not called", async () => {
-    const request = new NextRequest(REQUEST_URL, {
-      method: "POST",
-      body: "invalid JSON {",
-    });
+    const request = postRequest("invalid JSON {");
 
     const response = await createKnowledgeBaseNode(request, "folders", UNTRANSLATED_FAILURE);
 
     expect(response.status).toBe(HTTP_INTERNAL_ERROR);
     expect(await response.json()).toEqual({ error: UNTRANSLATED_FAILURE.error });
     expect(fetchSpy).not.toHaveBeenCalled();
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      "%s:",
-      UNTRANSLATED_FAILURE.error,
-      expect.any(Error)
-    );
+    expectLoggedFailure();
   });
 });
