@@ -1,25 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { requireQueryBankId } from "@/lib/route-validation";
 
+/** Proxies one memory from the dataplane for the bank named by `?bank_id=`; an upstream 404 maps to `memories.notFound`. */
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ memoryId: string }> }
 ) {
   try {
-    const { memoryId } = await params;
-    const searchParams = request.nextUrl.searchParams;
-    const bankId = searchParams.get("bank_id");
+    const bankId = requireQueryBankId(request);
+    if (bankId instanceof NextResponse) return bankId;
 
-    if (!bankId) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "bank_id is required",
-          errorKey: "api.errors.validation.bankIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
+    const { memoryId } = await params;
 
     const response = await fetch(
       dataplaneBankUrl(bankId, `/memories/${encodeURIComponent(memoryId)}`),
@@ -56,6 +49,7 @@ export async function GET(
   }
 }
 
+/** Forwards a memory's curation fields to the dataplane; the bank comes from the body `bank_id`, else `?bank_id=`. */
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ memoryId: string }> }

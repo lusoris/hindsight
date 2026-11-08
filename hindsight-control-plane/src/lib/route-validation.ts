@@ -1,6 +1,7 @@
-import { NextResponse } from "next/server";
+import { type NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 
+/** The 400 `api.errors.validation.bankIdRequired` response when `bankId` is empty, else `null`. */
 export function validateBankId(request: Request, bankId: string | undefined): NextResponse | null {
   if (!bankId) {
     return NextResponse.json(
@@ -14,6 +15,24 @@ export function validateBankId(request: Request, bankId: string | undefined): Ne
   return null;
 }
 
+/**
+ * The bank id from the query string (first non-empty of `names`, default `["bank_id"]`),
+ * or the 400 `api.errors.validation.bankIdRequired` response when none is set.
+ */
+export function requireQueryBankId(
+  request: NextRequest,
+  names: readonly string[] = ["bank_id"]
+): string | NextResponse {
+  for (const name of names) {
+    const value = request.nextUrl.searchParams.get(name);
+    if (value) {
+      return value;
+    }
+  }
+  return validateBankId(request, undefined)!;
+}
+
+/** The 400 `api.errors.validation.operationIdRequired` response when `operationId` is empty, else `null`. */
 export function validateOperationId(
   request: Request,
   operationId: string | undefined
@@ -30,6 +49,7 @@ export function validateOperationId(
   return null;
 }
 
+/** The request body when it is a JSON object, else the 400 `api.errors.auth.invalidRequestBody` response. */
 export async function parseJsonBody(
   request: Request
 ): Promise<NextResponse | Record<string, unknown>> {

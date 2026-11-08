@@ -1,27 +1,18 @@
 import { NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { requireQueryBankId } from "@/lib/route-validation";
 
-function bankId(request: NextRequest): string | null {
-  return request.nextUrl.searchParams.get("bank_id");
-}
-
+/** Forwards a knowledge-base node update to the dataplane for the bank named by `?bank_id=`. */
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ nodeId: string }> }
 ) {
   try {
+    const bank = requireQueryBankId(request);
+    if (bank instanceof NextResponse) return bank;
+
     const { nodeId } = await params;
-    const bank = bankId(request);
-    if (!bank) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "bank_id is required",
-          errorKey: "api.errors.validation.bankIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
     const body = await request.json();
     const response = await fetch(
       dataplaneBankUrl(
@@ -51,22 +42,16 @@ export async function PATCH(
   }
 }
 
+/** Deletes a knowledge-base node on the dataplane for the bank named by `?bank_id=`. */
 export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ nodeId: string }> }
 ) {
   try {
+    const bank = requireQueryBankId(request);
+    if (bank instanceof NextResponse) return bank;
+
     const { nodeId } = await params;
-    const bank = bankId(request);
-    if (!bank) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "bank_id is required",
-          errorKey: "api.errors.validation.bankIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
     const response = await fetch(
       dataplaneBankUrl(
         bank,
