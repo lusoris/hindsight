@@ -22,6 +22,10 @@ export type DataplaneProxyOptions = {
   upstreamTextAsError?: boolean;
   /** DELETE: body for a 200 instead of the upstream JSON (today `{ success: true }`). */
   successBody?: unknown;
+  /** An upstream 404 returns this payload at 404, without reading or logging the upstream body. */
+  notFound?: ApiFailure;
+  /** A non-OK upstream (other than a `notFound` 404) answers `failure` at 500 instead of at the upstream status. */
+  nonOkAsServerError?: boolean;
 };
 
 /** What a route handler supplies per method; the route fills in the ids and the path. */
@@ -63,6 +67,15 @@ export async function proxyDataplane(
     const response = await fetch(dataplaneBankUrl(options.bankId, options.suffix), init);
 
     if (!response.ok) {
+      if (options.notFound && response.status === 404) {
+        return NextResponse.json(localizeApiErrorPayload(request, options.notFound), {
+          status: 404,
+        });
+      }
+      if (options.nonOkAsServerError) {
+        // The catch below turns it into the 500.
+        throw new Error(`API returned ${response.status}`);
+      }
       const errorText = await response.text();
       // Constant format string: `action` goes in as a %s argument, so a `%` in it cannot
       // act as a format specifier. The printed line is the same as the old interpolation.
