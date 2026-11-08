@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload, missingQueryParam } from "@/lib/i18n/api-errors";
 import { sdk, lowLevelClient, dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { respondWithSdk } from "@/lib/sdk-response";
+import { readOptionalNumber } from "@/lib/query-params";
 
 // Tag matching modes accepted by the dataplane's list_documents endpoint.
 const TAGS_MATCH_MODES = new Set(["any", "all", "any_strict", "all_strict", "exact"]);
@@ -12,6 +13,7 @@ type TimeField = "created_at" | "updated_at";
 type TagsMatch = "any" | "all" | "any_strict" | "all_strict" | "exact";
 const TIME_FIELDS = new Set<string>(["created_at", "updated_at"]);
 
+/** Lists a bank's documents with filters and paging, or fetches one when `document_id` is set. */
 export async function GET(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const bankId = searchParams.get("bank_id");
@@ -31,8 +33,8 @@ export async function GET(request: NextRequest) {
   }
 
   const q = searchParams.get("q") || undefined;
-  const limit = searchParams.get("limit") ? Number(searchParams.get("limit")) : undefined;
-  const offset = searchParams.get("offset") ? Number(searchParams.get("offset")) : undefined;
+  const limit = readOptionalNumber(searchParams, "limit");
+  const offset = readOptionalNumber(searchParams, "offset");
   const tagList = searchParams.getAll("tags").filter((tag) => tag.length > 0);
   const tags = tagList.length > 0 ? tagList : undefined;
   // Only forward tags_match alongside tags — on its own it would override the
@@ -68,6 +70,7 @@ export async function GET(request: NextRequest) {
   return respondWithSdk(response, "Failed to fetch documents", { request });
 }
 
+/** Forwards a document's tag update to the dataplane; both ids come from the query string. */
 export async function PATCH(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const bankId = searchParams.get("bank_id");
@@ -106,6 +109,7 @@ export async function PATCH(request: NextRequest) {
   }
 }
 
+/** Deletes the document named by `?bank_id=` and `?document_id=`. */
 export async function DELETE(request: NextRequest) {
   const searchParams = request.nextUrl.searchParams;
   const bankId = searchParams.get("bank_id");

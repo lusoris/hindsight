@@ -1,90 +1,42 @@
-import { NextResponse } from "next/server";
-import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
-import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
-import { validateBankId } from "@/lib/route-validation";
+import { proxyDataplane, type ApiFailure, type DataplaneCall } from "@/lib/dataplane-proxy";
 
-export async function PATCH(
-  request: Request,
-  { params }: { params: Promise<{ bankId: string; alias: string }> }
-) {
-  try {
-    const { bankId, alias } = await params;
-    const bankIdError = validateBankId(request, bankId);
-    if (bankIdError) return bankIdError;
+const MISSING_PAYLOAD: ApiFailure = {
+  error: "bank_id is required",
+  errorKey: "api.errors.validation.bankIdRequired",
+};
 
-    const body = await request.json();
+type HandlerContext = { params: Promise<{ bankId: string; alias: string }> };
 
-    const response = await fetch(
-      dataplaneBankUrl(bankId, `/aliases/${encodeURIComponent(alias)}`),
-      {
-        method: "PATCH",
-        headers: getDataplaneHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify(body),
-      }
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("API error setting primary bank alias:", errorText);
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "Failed to update bank alias",
-          errorKey: "api.errors.bankAliases.update",
-        }),
-        { status: response.status }
-      );
-    }
-
-    const data = await response.json();
-    return NextResponse.json(data, { status: 200 });
-  } catch (error) {
-    console.error("Error setting primary bank alias:", error);
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "Failed to update bank alias",
-        errorKey: "api.errors.bankAliases.update",
-      }),
-      { status: 500 }
-    );
-  }
+/**
+ * Resolves the ids and the dataplane path once for PATCH and DELETE, which differ only in the
+ * call options. Only the bank id is required: the alias always comes from the route segment.
+ */
+async function proxyAlias(request: Request, { params }: HandlerContext, call: DataplaneCall) {
+  const { bankId, alias } = await params;
+  return proxyDataplane(request, {
+    required: [bankId],
+    missing: MISSING_PAYLOAD,
+    bankId,
+    suffix: `/aliases/${encodeURIComponent(alias)}`,
+    ...call,
+  });
 }
 
-export async function DELETE(
-  request: Request,
-  { params }: { params: Promise<{ bankId: string; alias: string }> }
-) {
-  try {
-    const { bankId, alias } = await params;
-    const bankIdError = validateBankId(request, bankId);
-    if (bankIdError) return bankIdError;
+/** Forwards a primary-alias update (shown in place of the bank id) to the dataplane. */
+export async function PATCH(request: Request, context: HandlerContext) {
+  return proxyAlias(request, context, {
+    method: "PATCH",
+    failure: { error: "Failed to update bank alias", errorKey: "api.errors.bankAliases.update" },
+    action: "setting primary bank alias",
+    forwardJsonBody: true,
+  });
+}
 
-    const response = await fetch(
-      dataplaneBankUrl(bankId, `/aliases/${encodeURIComponent(alias)}`),
-      { method: "DELETE", headers: getDataplaneHeaders() }
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("API error deleting bank alias:", errorText);
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "Failed to delete bank alias",
-          errorKey: "api.errors.bankAliases.delete",
-        }),
-        { status: response.status }
-      );
-    }
-
-    const data = await response.json();
-    return NextResponse.json(data, { status: 200 });
-  } catch (error) {
-    console.error("Error deleting bank alias:", error);
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "Failed to delete bank alias",
-        errorKey: "api.errors.bankAliases.delete",
-      }),
-      { status: 500 }
-    );
-  }
+/** Removes one alias from the bank on the dataplane. */
+export async function DELETE(request: Request, context: HandlerContext) {
+  return proxyAlias(request, context, {
+    method: "DELETE",
+    failure: { error: "Failed to delete bank alias", errorKey: "api.errors.bankAliases.delete" },
+    action: "deleting bank alias",
+  });
 }

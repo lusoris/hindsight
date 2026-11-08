@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { hindsightClient } from "@/lib/hindsight-client";
 import { readTagFilter } from "@/lib/tag-filter-params";
+import { requireQueryBankId } from "@/lib/route-validation";
+import { readOptionalNumber } from "@/lib/query-params";
 
 // Time axes accepted by the dataplane's list_memories endpoint.
 type TimeField = "created_at" | "updated_at" | "mentioned_at" | "occurred_start" | "occurred_end";
@@ -13,23 +15,15 @@ const TIME_FIELDS = new Set<string>([
   "occurred_end",
 ]);
 
+/** Lists the bank's memory units, forwarding the query filters and paging to listMemories. */
 export async function GET(request: NextRequest) {
   try {
+    const bankId = requireQueryBankId(request, ["bank_id", "agent_id"]);
+    if (bankId instanceof NextResponse) return bankId;
+
     const searchParams = request.nextUrl.searchParams;
-    const bankId = searchParams.get("bank_id") || searchParams.get("agent_id");
-
-    if (!bankId) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "bank_id is required",
-          errorKey: "api.errors.validation.bankIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
-
-    const limit = searchParams.get("limit") ? Number(searchParams.get("limit")) : undefined;
-    const offset = searchParams.get("offset") ? Number(searchParams.get("offset")) : undefined;
+    const limit = readOptionalNumber(searchParams, "limit");
+    const offset = readOptionalNumber(searchParams, "offset");
     const type = searchParams.get("type") || searchParams.get("fact_type") || undefined;
     const q = searchParams.get("q") || undefined;
     const consolidationStateParam =
@@ -85,6 +79,7 @@ export async function GET(request: NextRequest) {
 
 // Note: Individual memory unit deletion is not yet supported by the API
 // Use clearBankMemories to delete all memories for a bank instead
+/** Always answers 501: the dataplane has no single-memory delete. */
 export async function DELETE(request: NextRequest) {
   return NextResponse.json(
     localizeApiErrorPayload(request, {
