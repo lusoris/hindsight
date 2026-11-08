@@ -3,6 +3,7 @@ import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { requireQueryBankId } from "@/lib/route-validation";
 
+/** Proxies one memory's observation history for the bank named by `?bank_id=`; an upstream 404 maps to `memories.notFound`. */
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ memoryId: string }> }

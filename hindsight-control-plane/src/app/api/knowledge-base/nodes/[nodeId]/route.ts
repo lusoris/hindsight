@@ -3,6 +3,7 @@ import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { requireQueryBankId } from "@/lib/route-validation";
 
+/** Forwards a knowledge-base node update to the dataplane for the bank named by `?bank_id=`. */
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ nodeId: string }> }
@@ -41,6 +42,7 @@ export async function PATCH(
   }
 }
 
+/** Deletes a knowledge-base node on the dataplane for the bank named by `?bank_id=`. */
 export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ nodeId: string }> }

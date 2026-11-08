@@ -4,6 +4,7 @@ import { respondWithSdk } from "@/lib/sdk-response";
 import { readTagFilter } from "@/lib/tag-filter-params";
 import { requireQueryBankId } from "@/lib/route-validation";
 
+/** Proxies one entity (`sdk.getEntity`) for the bank named by `?bank_id=`, forwarding the tag filter. */
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ entityId: string }> }

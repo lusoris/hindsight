@@ -3,6 +3,7 @@ import { sdk, lowLevelClient } from "@/lib/hindsight-client";
 import { respondWithSdk } from "@/lib/sdk-response";
 import { requireQueryBankId } from "@/lib/route-validation";
 
+/** Regenerates one entity's observations (`sdk.regenerateEntityObservations`) for the bank named by `?bank_id=`. */
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ entityId: string }> }
