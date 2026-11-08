@@ -178,6 +178,9 @@ def main(argv: list[str] | None = None, today: datetime.date | None = None) -> i
         try:
             text = p.read_text(encoding="utf-8")
         except UnicodeDecodeError:
+            # The wrapper's `git grep -I` drops only files with NUL bytes, so a text file in another
+            # encoding gets here with a marker semgrep may still honour; skipping it read as clean.
+            all_problems.append(Problem(file_path, 1, "file is not valid UTF-8; cannot verify suppressions"))
             continue
         except OSError as exc:
             all_problems.append(Problem(file_path, 1, f"cannot read file: {exc}"))

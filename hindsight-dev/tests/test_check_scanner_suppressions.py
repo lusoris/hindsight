@@ -133,6 +133,14 @@ def test_16_main_exit_codes(tmp_path: Path) -> None:
     assert main([], today=TODAY) == 0
 
 
+def test_22_file_that_is_not_utf8_fails(tmp_path: Path, capsys) -> None:
+    # Latin-1 text with no NUL byte passes the wrapper's `git grep -I`; it must not read as clean.
+    latin1 = tmp_path / "latin1.py"
+    latin1.write_bytes("x = 1  # nosemgrep: rule-a -- café category C, expires 2026-11-18\n".encode("latin-1"))
+    assert main([str(latin1)], today=TODAY) == 1
+    assert "not valid UTF-8" in capsys.readouterr().err
+
+
 # Cases 18-21 are markers semgrep 1.183 honours (or silently ignores) that a narrower reader missed.
 
 
