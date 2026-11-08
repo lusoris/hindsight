@@ -49,6 +49,7 @@ export async function GET(
   }
 }
 
+/** Forwards a memory's curation fields to the dataplane; the bank comes from the body `bank_id`, else `?bank_id=`. */
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ memoryId: string }> }
