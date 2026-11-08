@@ -1,12 +1,11 @@
 """Reflection mode must consume the SDK response field, including in HTTP calls."""
 
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Thread
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from hindsight_client_api.models.reflect_request import ReflectRequest
 from hindsight_client_api.models.reflect_response import ReflectResponse
+from pytest_httpserver import HTTPServer
 
 from hindsight_agentcore import HindsightRuntimeAdapter, RecallPolicy, TurnContext, reset_config
 
@@ -32,36 +31,23 @@ async def test_before_turn_accepts_sdk_reflect_response(text: str) -> None:
 
 
 @pytest.mark.asyncio
-async def test_before_turn_reflects_through_actual_sdk() -> None:
-    requests: list[ReflectRequest] = []
-    paths: list[str] = []
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            requests.append(ReflectRequest.model_validate_json(self.rfile.read(int(self.headers["Content-Length"]))))
-            paths.append(self.path)
-            body = b'{"text": "Synthesized project context"}'
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-
-        def log_message(self, format: str, *args: object) -> None:
-            pass
-
-    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+async def test_before_turn_reflects_through_actual_sdk(httpserver: HTTPServer) -> None:
+    """A reflect-mode recall policy reaches the real SDK client as one reflect request with its budget and max_tokens."""
+    httpserver.expect_request(
+        "/v1/default/banks/user:user:agent:agent/reflect",
+        method="POST",
+    ).respond_with_json({"text": "Synthesized project context"})
     reset_config()
     # The adapter builds its own SDK client from the URL, so the real client path is exercised.
     adapter = HindsightRuntimeAdapter(
-        hindsight_api_url=f"http://127.0.0.1:{server.server_port}",
+        hindsight_api_url=httpserver.url_for("/").rstrip("/"),
         recall_policy=RecallPolicy(mode="reflect", budget="high", max_tokens=1234),
     )
     try:
         context = TurnContext(runtime_session_id="session", user_id="user", agent_name="agent")
         assert await adapter.before_turn(context, query="preferences") == "Synthesized project context"
+        paths = [request.path for request, _ in httpserver.log]
+        requests = [ReflectRequest.model_validate_json(request.get_data(as_text=True)) for request, _ in httpserver.log]
         assert paths == ["/v1/default/banks/user:user:agent:agent/reflect"]
         assert len(requests) == 1
         assert requests[0].query == "preferences"
@@ -71,6 +57,3 @@ async def test_before_turn_reflects_through_actual_sdk() -> None:
         if adapter._client is not None:
             await adapter._client.aclose()
         reset_config()
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2.0)

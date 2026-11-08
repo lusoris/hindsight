@@ -49,6 +49,7 @@ testpaths = ["tests"]
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
+    "pytest-httpserver>=1.2.0",
     "ruff>=0.8.0",
 ]
 
