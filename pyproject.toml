@@ -11,3 +11,10 @@ dev-dependencies = []
 # no cp314 wheels. This forks onnxruntime per platform. Drop it once markitdown
 # allows magika 1.x.
 constraint-dependencies = ["onnxruntime>=1.24.1; sys_platform != 'win32'"]
+
+# Codacy's ruff runner passes the root config it finds first as `--config`, and
+# measured on Codacy it is not ruff.toml (its I001 findings follow the ruff defaults:
+# line length 88, no tomllib in the standard library). Pointing this table at
+# ruff.toml makes every root entry point resolve to the one config.
+[tool.ruff]
+extend = "ruff.toml"
