@@ -1,152 +1,49 @@
-import { NextResponse } from "next/server";
-import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
-import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { proxyDataplane, type ApiFailure, type DataplaneCall } from "@/lib/dataplane-proxy";
 
-export async function GET(
-  request: Request,
-  { params }: { params: Promise<{ bankId: string; mentalModelId: string }> }
-) {
-  try {
-    const { bankId, mentalModelId } = await params;
+const MISSING_PAYLOAD: ApiFailure = {
+  error: "bank_id and mental_model_id are required",
+  errorKey: "api.errors.validation.bankAndMentalModelIdRequired",
+};
 
-    if (!bankId || !mentalModelId) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "bank_id and mental_model_id are required",
-          errorKey: "api.errors.validation.bankAndMentalModelIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
+type HandlerContext = { params: Promise<{ bankId: string; mentalModelId: string }> };
 
-    const response = await fetch(
-      dataplaneBankUrl(bankId, `/mental-models/${encodeURIComponent(mentalModelId)}`),
-      { method: "GET", headers: getDataplaneHeaders() }
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("API error getting mental model:", errorText);
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "Failed to get mental model",
-          errorKey: "api.errors.mentalModels.fetch",
-        }),
-        { status: response.status }
-      );
-    }
-
-    const data = await response.json();
-    return NextResponse.json(data, { status: 200 });
-  } catch (error) {
-    console.error("Error getting mental model:", error);
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "Failed to get mental model",
-        errorKey: "api.errors.mentalModels.fetch",
-      }),
-      { status: 500 }
-    );
-  }
+// GET, PATCH and DELETE differ only in the call options, so the params and the
+// path live here once instead of in each handler.
+async function proxyMentalModel(request: Request, { params }: HandlerContext, call: DataplaneCall) {
+  const { bankId, mentalModelId } = await params;
+  return proxyDataplane(request, {
+    required: [bankId, mentalModelId],
+    missing: MISSING_PAYLOAD,
+    bankId,
+    suffix: `/mental-models/${encodeURIComponent(mentalModelId)}`,
+    ...call,
+  });
 }
 
-export async function PATCH(
-  request: Request,
-  { params }: { params: Promise<{ bankId: string; mentalModelId: string }> }
-) {
-  try {
-    const { bankId, mentalModelId } = await params;
-
-    if (!bankId || !mentalModelId) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "bank_id and mental_model_id are required",
-          errorKey: "api.errors.validation.bankAndMentalModelIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
-
-    const body = await request.json();
-
-    const response = await fetch(
-      dataplaneBankUrl(bankId, `/mental-models/${encodeURIComponent(mentalModelId)}`),
-      {
-        method: "PATCH",
-        headers: getDataplaneHeaders({ "Content-Type": "application/json" }),
-        body: JSON.stringify(body),
-      }
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("API error updating mental model:", errorText);
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: errorText || "Failed to update mental model",
-          errorKey: "api.errors.mentalModels.update",
-        }),
-        { status: response.status }
-      );
-    }
-
-    const data = await response.json();
-    return NextResponse.json(data, { status: 200 });
-  } catch (error) {
-    console.error("Error updating mental model:", error);
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "Failed to update mental model",
-        errorKey: "api.errors.mentalModels.update",
-      }),
-      { status: 500 }
-    );
-  }
+export async function GET(request: Request, context: HandlerContext) {
+  return proxyMentalModel(request, context, {
+    method: "GET",
+    failure: { error: "Failed to get mental model", errorKey: "api.errors.mentalModels.fetch" },
+    action: "getting mental model",
+  });
 }
 
-export async function DELETE(
-  request: Request,
-  { params }: { params: Promise<{ bankId: string; mentalModelId: string }> }
-) {
-  try {
-    const { bankId, mentalModelId } = await params;
+export async function PATCH(request: Request, context: HandlerContext) {
+  return proxyMentalModel(request, context, {
+    method: "PATCH",
+    failure: { error: "Failed to update mental model", errorKey: "api.errors.mentalModels.update" },
+    action: "updating mental model",
+    forwardJsonBody: true,
+    upstreamTextAsError: true,
+  });
+}
 
-    if (!bankId || !mentalModelId) {
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "bank_id and mental_model_id are required",
-          errorKey: "api.errors.validation.bankAndMentalModelIdRequired",
-        }),
-        { status: 400 }
-      );
-    }
-
-    const response = await fetch(
-      dataplaneBankUrl(bankId, `/mental-models/${encodeURIComponent(mentalModelId)}`),
-      { method: "DELETE", headers: getDataplaneHeaders() }
-    );
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("API error deleting mental model:", errorText);
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: errorText || "Failed to delete mental model",
-          errorKey: "api.errors.mentalModels.delete",
-        }),
-        { status: response.status }
-      );
-    }
-
-    return NextResponse.json({ success: true }, { status: 200 });
-  } catch (error) {
-    console.error("Error deleting mental model:", error);
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "Failed to delete mental model",
-        errorKey: "api.errors.mentalModels.delete",
-      }),
-      { status: 500 }
-    );
-  }
+export async function DELETE(request: Request, context: HandlerContext) {
+  return proxyMentalModel(request, context, {
+    method: "DELETE",
+    failure: { error: "Failed to delete mental model", errorKey: "api.errors.mentalModels.delete" },
+    action: "deleting mental model",
+    upstreamTextAsError: true,
+    successBody: { success: true },
+  });
 }
