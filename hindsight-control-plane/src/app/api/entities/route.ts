@@ -1,25 +1,17 @@
 import { NextRequest, NextResponse } from "next/server";
-import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { sdk, lowLevelClient } from "@/lib/hindsight-client";
 import { respondWithSdk } from "@/lib/sdk-response";
 import { readTagFilter } from "@/lib/tag-filter-params";
+import { requireQueryBankId } from "@/lib/route-validation";
+import { readOptionalNumber } from "@/lib/query-params";
 
 export async function GET(request: NextRequest) {
+  const bankId = requireQueryBankId(request);
+  if (bankId instanceof NextResponse) return bankId;
+
   const searchParams = request.nextUrl.searchParams;
-  const bankId = searchParams.get("bank_id");
-
-  if (!bankId) {
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "bank_id is required",
-        errorKey: "api.errors.validation.bankIdRequired",
-      }),
-      { status: 400 }
-    );
-  }
-
-  const limit = searchParams.get("limit") ? Number(searchParams.get("limit")) : undefined;
-  const offset = searchParams.get("offset") ? Number(searchParams.get("offset")) : undefined;
+  const limit = readOptionalNumber(searchParams, "limit");
+  const offset = readOptionalNumber(searchParams, "offset");
 
   const response = await sdk.listEntities({
     client: lowLevelClient,

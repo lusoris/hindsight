@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload, missingQueryParam } from "@/lib/i18n/api-errors";
 import { sdk, lowLevelClient, dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { respondWithSdk } from "@/lib/sdk-response";
+import { readOptionalNumber } from "@/lib/query-params";
 
 // Tag matching modes accepted by the dataplane's list_documents endpoint.
 const TAGS_MATCH_MODES = new Set(["any", "all", "any_strict", "all_strict", "exact"]);
@@ -31,8 +32,8 @@ export async function GET(request: NextRequest) {
   }
 
   const q = searchParams.get("q") || undefined;
-  const limit = searchParams.get("limit") ? Number(searchParams.get("limit")) : undefined;
-  const offset = searchParams.get("offset") ? Number(searchParams.get("offset")) : undefined;
+  const limit = readOptionalNumber(searchParams, "limit");
+  const offset = readOptionalNumber(searchParams, "offset");
   const tagList = searchParams.getAll("tags").filter((tag) => tag.length > 0);
   const tags = tagList.length > 0 ? tagList : undefined;
   // Only forward tags_match alongside tags — on its own it would override the
