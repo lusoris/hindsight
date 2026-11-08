@@ -11040,12 +11040,19 @@ class MemoryEngine(MemoryEngineInterface):
                 if include_entities and result_id in fact_entity_map:
                     entity_names = [e["canonical_name"] for e in fact_entity_map[result_id]]
 
-                is_stale = compute_is_stale(
-                    result_dict.get("record_status") or "active",
-                    result_dict.get("ttl_seconds"),
-                    result_dict.get("fetched_at"),
-                    now=now,
-                )
+                # Freshness that was not carried is unknown, so it is reported stale
+                # rather than defaulted to "active", which would let an expired memory
+                # pass as fresh.
+                record_status = result_dict.get("record_status")
+                if record_status is None:
+                    is_stale = True
+                else:
+                    is_stale = compute_is_stale(
+                        record_status,
+                        result_dict.get("ttl_seconds"),
+                        result_dict.get("fetched_at"),
+                        now=now,
+                    )
 
                 memory_facts.append(
                     MemoryFact(

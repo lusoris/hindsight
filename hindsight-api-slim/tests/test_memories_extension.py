@@ -25,6 +25,7 @@ import json
 import os
 import uuid
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import pytest
@@ -51,6 +52,10 @@ from hindsight_api.engine.memories.base import (
 from hindsight_api.engine.memories.postgres import PostgresMemories
 from hindsight_api.engine.schema import fq_store_table
 
+if TYPE_CHECKING:
+    from hindsight_api.engine.memory_engine import MemoryEngine
+    from hindsight_api.models import RequestContext
+
 
 class InMemoryMemories(MemoriesExtension):
     """A complete store that is a dict — no connection, no tables, no SQL.
@@ -72,6 +77,10 @@ class InMemoryMemories(MemoriesExtension):
     # (the default store) and recall re-fetches via ``entity_map_for_units``. Both must produce
     # identical output — the parametrized entity tests pin that.
     carries_entity_ids_on_result = False
+    # When True the store carries the record contract (record_status, ttl_seconds, fetched_at)
+    # on the recall result, like a conforming store. When False it passes none of the three
+    # fields, simulating a score-only store that leaves them unset.
+    carries_record_contract_on_result = True
     # Likewise for an observation's sources. When False the result carries none, and recall
     # re-fetches the observation to read them (for the prefer_observations dedup and the chunk
     # walk); when True it reads them off the result. Both must produce identical output.
@@ -240,6 +249,7 @@ class InMemoryMemories(MemoriesExtension):
             # fusion/rerank keeps a stable, faithful order; the chunk_id/document_id ride along so the
             # chunk-overlay arm can find the row's chunk, exactly like a real semantic/BM25 hit.
             score = 1.0 - rank * 0.01
+            carries_contract = self.carries_record_contract_on_result
             return RetrievalResult(
                 id=row.unit_id,
                 text=row.text,
@@ -256,6 +266,11 @@ class InMemoryMemories(MemoriesExtension):
                 source_memory_ids=(list(row.source_memory_ids) if self.carries_source_ids_on_result else None),
                 similarity=score if semantic else None,
                 bm25_score=None if semantic else score,
+                # A score-only store leaves the record contract unset (None), which recall
+                # reports stale; a conforming store carries the row's values.
+                record_status=row.record_status if carries_contract else None,
+                ttl_seconds=row.ttl_seconds if carries_contract else None,
+                fetched_at=row.fetched_at if carries_contract else None,
             )
 
         out: dict[str, SemanticBm25Result] = {}
@@ -1659,6 +1674,59 @@ async def test_recall_include_source_facts_hydrates_from_store(memory, request_c
     assert result.source_facts and src_id in result.source_facts, f"source fact missing from {result.source_facts}"
     assert result.source_facts[src_id].text == src_text
     assert by_id[obs_id].source_fact_ids == [src_id]
+
+
+@pytest.mark.parametrize(
+    ("carries_contract", "seeded_status", "expected_is_stale"),
+    [
+        pytest.param(True, "active", False, id="carried-active-fresh"),
+        pytest.param(True, "stale", True, id="carried-stale"),
+        pytest.param(False, "active", True, id="not-carried-stale"),
+    ],
+)
+async def test_recall_record_contract_freshness_from_store(
+    carries_contract: bool,
+    seeded_status: str,
+    expected_is_stale: bool,
+    memory: MemoryEngine,
+    request_context: RequestContext,
+    restore_default_store: None,
+) -> None:
+    """Recall must report a memory as stale when its store did not carry the record contract.
+
+    A store that returns score-only results without carrying record_status,
+    ttl_seconds, and fetched_at leaves freshness unknown. If recall defaulted
+    a missing record_status to 'active', an expired or stale memory from such a
+    store would pass as fresh. Recall must therefore treat a missing record contract
+    (record_status is None) as stale.
+    """
+    store = InMemoryMemories({})
+    store.carries_record_contract_on_result = carries_contract
+    set_memories(store)
+    bank_id = f"seam-contract-{uuid.uuid4().hex[:8]}"
+    await memory.ensure_bank_profile(bank_id, request_context=request_context)
+    fact_id = str(uuid.uuid4())
+    fact_text = "Alice deployed the hotfix on Tuesday afternoon"
+
+    store.rows[fact_id] = _stored(
+        fact_id,
+        fact_text,
+        "world",
+        record_status=seeded_status,
+        ttl_seconds=None,
+    )
+
+    result = await memory.recall_async(
+        bank_id=bank_id,
+        query="Alice deployed hotfix",
+        fact_type=["world"],
+        max_tokens=4096,
+        request_context=request_context,
+    )
+
+    by_id = {str(r.id): r for r in result.results}
+    assert fact_id in by_id, f"fact missing from results {list(by_id)}"
+    assert by_id[fact_id].is_stale is expected_is_stale
 
 
 @pytest.mark.parametrize("carries_ids_on_result", [False, True], ids=["map-refetch", "ids-on-result"])

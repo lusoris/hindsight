@@ -98,7 +98,11 @@ class RetrievalResult:
     # empty — means the backend returned them on the row, so the read surface resolves
     # them without asking the store again.
     attachment_ids: list[str] | None = None
-    record_status: str = "active"
+
+    # Record contract metadata (record_status, ttl_seconds, fetched_at).
+    # ``None`` for record_status means the store did not carry the record contract
+    # on this result; recall then reports the result stale (see memory_engine).
+    record_status: str | None = None
     ttl_seconds: int | None = None
     fetched_at: datetime | None = None
 

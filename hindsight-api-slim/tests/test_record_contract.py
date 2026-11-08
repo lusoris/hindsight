@@ -365,13 +365,13 @@ async def test_recall_source_facts_carries_record_contract_fields(
                 write_authority="psql --version",
                 fetched_at=now,
                 ttl_seconds=1800,
-                record_status="active",
+                record_status="stale",
             )
             store = get_memories()
             sources = await store.recall_source_facts(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[unit_id])
             assert unit_id in sources
             fact = sources[unit_id]
-            assert fact.record_status == "active"
+            assert fact.record_status == "stale"
             assert fact.ttl_seconds == 1800
             assert fact.fetched_at is not None
             assert abs((fact.fetched_at - now).total_seconds()) < 1.0
