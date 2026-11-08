@@ -22,6 +22,7 @@ import pytest
 import hindsight_api.engine.retain.orchestrator as orch
 from hindsight_api.engine.memories.base import MemoriesExtension
 from hindsight_api.engine.retain.types import ConcurrentAppendConflict
+from tests.fact_fakes import RECORD_CONTRACT_DEFAULTS
 
 
 class _ConnTracker:
@@ -76,6 +77,7 @@ def _fact():
         occurred_end=None,
         mentioned_at=None,
         attachment_ids=[],
+        **RECORD_CONTRACT_DEFAULTS,
     )
 
 

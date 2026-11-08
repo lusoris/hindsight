@@ -30,6 +30,7 @@ from hindsight_api import RequestContext
 from hindsight_api.engine.memories import get_memories
 from hindsight_api.engine.memory_engine import MemoryEngine
 from hindsight_api.engine.schema import fq_table
+from tests.fact_fakes import RECORD_CONTRACT_DEFAULTS
 
 # This module asserts the `memory_units.updated_at` COLUMN, and UPDATEs it directly to stage each case. A MEMORIES extension owns those rows in its own store and leaves the Postgres
 # tables empty, so the seed lands nowhere the code under test can see it and every assertion here
@@ -61,6 +62,7 @@ async def _seed_memory(
         entities=[],
         causal_relations=[],
         attachment_ids=[],
+        **RECORD_CONTRACT_DEFAULTS,
         occurred_start=None,
         occurred_end=None,
         mentioned_at=None,

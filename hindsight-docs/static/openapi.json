@@ -18022,6 +18022,12 @@
               }
             ]
           },
+          "is_stale": {
+            "type": "boolean",
+            "title": "Is Stale",
+            "description": "Whether to re-check this memory before relying on it: its record is marked 'stale', or its ttl_seconds have elapsed since it was fetched. Stale memories are still returned and ranked.",
+            "default": false
+          },
           "attachments": {
             "anyOf": [
               {

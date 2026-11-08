@@ -55,6 +55,10 @@ MEMORY_UNIT_COLUMNS: tuple[str, ...] = (
     "chunk_id",
     "tags",
     "proof_count",
+    # Record contract: what recall needs to flag a stale memory (see compute_is_stale).
+    "record_status",
+    "ttl_seconds",
+    "fetched_at",
 )
 
 

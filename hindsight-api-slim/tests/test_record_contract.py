@@ -1,23 +1,24 @@
-"""Unit tests for W15 slice 1: memory record contract fields and recall staleness."""
+"""Memory record contract: the provenance/TTL/status columns and the stale flag on recall.
 
+The record-level tests pin validation and the staleness rule; the database test drives
+the columns through the store's insert and the engine's recall, which is the path a
+caller actually sees.
+"""
+
+import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
+from hindsight_api import RequestContext
 from hindsight_api.api.http import RecallResult
-from hindsight_api.engine.memories.base import FactRecord, StoredMemory
-from hindsight_api.engine.response_models import MemoryFact
-
-
-def _compute_is_stale(
-    record_status: str,
-    ttl_seconds: int | None,
-    fetched_at: datetime | None,
-    now: datetime,
-) -> bool:
-    return (record_status == "stale") or (
-        ttl_seconds is not None and fetched_at is not None and (now - fetched_at).total_seconds() > ttl_seconds
-    )
+from hindsight_api.engine.memories import get_memories
+from hindsight_api.engine.memories.base import FactRecord, StoredMemory, compute_is_stale
+from hindsight_api.engine.memory_engine import MemoryEngine
+from hindsight_api.engine.response_models import Budget, MemoryFact
+from hindsight_api.engine.schema import fq_table
+from tests.fact_fakes import RECORD_CONTRACT_DEFAULTS
 
 
 def test_fact_record_accepts_provenance_and_write_authority() -> None:
@@ -110,7 +111,7 @@ def test_ttl_expired_is_stale() -> None:
         fetched_at=fetched_at,
         record_status="active",
     )
-    is_stale = _compute_is_stale(rec.record_status, rec.ttl_seconds, rec.fetched_at, now)
+    is_stale = compute_is_stale(rec.record_status, rec.ttl_seconds, rec.fetched_at, now=now)
     assert is_stale is True
     assert rec.is_stale(now=now) is True
     fact = MemoryFact(id=rec.unit_id, text=rec.text, fact_type=rec.fact_type, is_stale=is_stale)
@@ -130,7 +131,7 @@ def test_ttl_not_expired_is_not_stale() -> None:
         fetched_at=fetched_at,
         record_status="active",
     )
-    is_stale = _compute_is_stale(rec.record_status, rec.ttl_seconds, rec.fetched_at, now)
+    is_stale = compute_is_stale(rec.record_status, rec.ttl_seconds, rec.fetched_at, now=now)
     assert is_stale is False
     assert rec.is_stale(now=now) is False
     fact = MemoryFact(id=rec.unit_id, text=rec.text, fact_type=rec.fact_type)
@@ -150,10 +151,130 @@ def test_record_status_stale_ignores_ttl() -> None:
         fetched_at=fetched_at,
         record_status="stale",
     )
-    is_stale = _compute_is_stale(rec.record_status, rec.ttl_seconds, rec.fetched_at, now)
+    is_stale = compute_is_stale(rec.record_status, rec.ttl_seconds, rec.fetched_at, now=now)
     assert is_stale is True
     assert rec.is_stale(now=now) is True
     fact = MemoryFact(id=rec.unit_id, text=rec.text, fact_type=rec.fact_type, is_stale=is_stale)
     assert fact.is_stale is True
     result = RecallResult(id=fact.id, text=fact.text, type=fact.fact_type, is_stale=fact.is_stale)
     assert result.is_stale is True
+
+
+async def _seed(memory: MemoryEngine, conn, bank_id: str, text: str, **contract: object) -> str:
+    """Insert one world fact through the store with the given record-contract columns."""
+    fact = SimpleNamespace(
+        fact_text=text,
+        embedding=(await memory.embeddings.encode([text]))[0],
+        fact_type="world",
+        tags=[],
+        context=None,
+        document_id=None,
+        chunk_id=None,
+        metadata=None,
+        observation_scopes=None,
+        entities=[],
+        causal_relations=[],
+        occurred_start=None,
+        occurred_end=None,
+        mentioned_at=None,
+        attachment_ids=[],
+        **{**RECORD_CONTRACT_DEFAULTS, **contract},
+    )
+    unit_ids = await get_memories().insert_facts(conn=conn, ops=memory._backend.ops, bank_id=bank_id, facts=[fact])
+    return unit_ids[0]
+
+
+@pytest.mark.asyncio
+async def test_recall_flags_expired_and_stale_records(memory: MemoryEngine, request_context: RequestContext) -> None:
+    bank_id = f"test-record-contract-{uuid.uuid4().hex[:8]}"
+    await memory.ensure_bank_profile(bank_id=bank_id, request_context=request_context)
+    two_hours_ago = datetime.now(timezone.utc) - timedelta(hours=2)
+    try:
+        pool = await memory._get_pool()
+        async with pool.acquire() as conn:
+            expired = await _seed(
+                memory,
+                conn,
+                bank_id,
+                "The staging cluster runs Kubernetes 1.31.",
+                provenance_class="tool-run",
+                write_authority="kubectl version",
+                fetched_at=two_hours_ago,
+                ttl_seconds=3600,
+            )
+            marked = await _seed(
+                memory, conn, bank_id, "The staging cluster runs on three nodes.", record_status="stale"
+            )
+            fresh = await _seed(
+                memory,
+                conn,
+                bank_id,
+                "The staging cluster stores data on Ceph.",
+                fetched_at=datetime.now(timezone.utc),
+                ttl_seconds=3600,
+            )
+
+            stored = await get_memories().get_memories(
+                conn=conn, fq_table=fq_table, bank_id=bank_id, unit_ids=[expired]
+            )
+            [row] = stored
+            assert row.provenance_class == "tool-run"
+            assert row.write_authority == "kubectl version"
+            assert row.ttl_seconds == 3600
+
+        result = await memory.recall_async(
+            bank_id=bank_id,
+            query="staging cluster",
+            fact_type=["world"],
+            budget=Budget.MID,
+            max_tokens=2048,
+            request_context=request_context,
+        )
+        stale_by_id = {fact.id: fact.is_stale for fact in result.results}
+        assert {expired, marked, fresh} <= set(stale_by_id), stale_by_id
+        assert stale_by_id[expired] is True
+        assert stale_by_id[marked] is True
+        assert stale_by_id[fresh] is False
+    finally:
+        await memory.delete_bank(bank_id, request_context=request_context)
+
+
+@pytest.mark.asyncio
+async def test_invalidated_memory_keeps_its_record_contract(
+    memory: MemoryEngine, request_context: RequestContext
+) -> None:
+    """The archive move copies the contract columns, and the archived read must return them."""
+    bank_id = f"test-record-contract-{uuid.uuid4().hex[:8]}"
+    await memory.ensure_bank_profile(bank_id=bank_id, request_context=request_context)
+    fetched = datetime.now(timezone.utc) - timedelta(minutes=10)
+    try:
+        pool = await memory._get_pool()
+        async with pool.acquire() as conn:
+            unit_id = await _seed(
+                memory,
+                conn,
+                bank_id,
+                "The build host runs Python 3.11.",
+                provenance_class="tool-run",
+                write_authority="python --version",
+                fetched_at=fetched,
+                ttl_seconds=900,
+                scope="host:build",
+                reset_condition="on toolchain upgrade",
+                record_status="disputed",
+            )
+            store = get_memories()
+            assert await store.invalidate_memory(
+                conn=conn, fq_table=fq_table, bank_id=bank_id, unit_id=unit_id, reason="test"
+            )
+            archived = await store.get_archived_memory(conn=conn, fq_table=fq_table, bank_id=bank_id, unit_id=unit_id)
+        assert archived is not None
+        assert archived.provenance_class == "tool-run"
+        assert archived.write_authority == "python --version"
+        assert archived.fetched_at == fetched
+        assert archived.ttl_seconds == 900
+        assert archived.scope == "host:build"
+        assert archived.reset_condition == "on toolchain upgrade"
+        assert archived.record_status == "disputed"
+    finally:
+        await memory.delete_bank(bank_id, request_context=request_context)

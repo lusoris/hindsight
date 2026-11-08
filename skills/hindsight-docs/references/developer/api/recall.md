@@ -869,6 +869,10 @@ An object of the per-stage scores for this result. `null` for `source_facts` ent
 
 Each field is also a valid [`min_scores`](#min_scores) floor — but `semantic` and `keyword` gate their own retrieval arm rather than the returned result, so a `null` here is expected even when you set that floor. A non-null value always clears it. See [`min_scores`](#min_scores).
 
+#### is_stale
+
+Whether this memory should be re-checked before you rely on it: `true` when its record has been marked `stale`, or when it carries a time-to-live and more than `ttl_seconds` have passed since it was fetched. Stale memories are still returned and ranked as usual — the flag tells you to re-verify, it does not filter. `false` for memories with no time-to-live, which is every memory retained without one. Not to be confused with the `is_stale` of a mental model, which reports whether the model needs a refresh.
+
 ---
 
 ### source_facts

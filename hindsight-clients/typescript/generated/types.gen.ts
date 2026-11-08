@@ -5892,6 +5892,12 @@ export type RecallResult = {
   source_fact_ids?: Array<string> | null;
   scores?: RecallScores | null;
   /**
+   * Is Stale
+   *
+   * Whether to re-check this memory before relying on it: its record is marked 'stale', or its ttl_seconds have elapsed since it was fetched. Stale memories are still returned and ranked.
+   */
+  is_stale?: boolean;
+  /**
    * Attachments
    *
    * Attachments this fact was drawn from, as recorded per fact at extraction time — the same edge the memory read endpoints return, not everything its chunk happened to carry. A fact stated in prose reports none; an observation reports those of the facts it was consolidated from. Omitted when there are none.

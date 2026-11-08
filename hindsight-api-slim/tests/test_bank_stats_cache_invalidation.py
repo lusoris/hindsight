@@ -23,6 +23,7 @@ from hindsight_api.engine.bank_stats_cache import BankStatsCache
 from hindsight_api.engine.memories import FactRecord, get_memories
 from hindsight_api.engine.memory_engine import MemoryEngine
 from hindsight_api.engine.schema import fq_table
+from tests.fact_fakes import RECORD_CONTRACT_DEFAULTS
 
 # A TTL long enough that, absent invalidation, the warmed cache would still be
 # served on the post-mutation read within the same test.
@@ -57,6 +58,7 @@ async def _insert_memory(
         entities=[],
         causal_relations=[],
         attachment_ids=[],
+        **RECORD_CONTRACT_DEFAULTS,
         occurred_start=None,
         occurred_end=None,
         mentioned_at=None,

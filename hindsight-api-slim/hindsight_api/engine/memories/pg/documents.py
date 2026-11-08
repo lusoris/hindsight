@@ -218,10 +218,14 @@ async def recall_source_facts(
             chunk_id=r["chunk_id"],
             tags=list(r["tags"] or []),
             metadata=r["metadata"],
+            record_status=r["record_status"] or "active",
+            ttl_seconds=r["ttl_seconds"],
+            fetched_at=r["fetched_at"],
         )
         for r in await conn.fetch(
             f"SELECT id, text, fact_type, context, occurred_start, occurred_end, "
-            f"mentioned_at, document_id, chunk_id, tags, metadata "
+            f"mentioned_at, document_id, chunk_id, tags, metadata, "
+            f"record_status, ttl_seconds, fetched_at "
             f"FROM {fq_table('memory_units')} WHERE id = ANY($1::uuid[]) AND bank_id = $2",
             [uuid.UUID(s) for s in unit_ids],
             bank_id,

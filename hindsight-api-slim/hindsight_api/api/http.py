@@ -680,7 +680,13 @@ class RecallResult(BaseModel):
         None  # IDs of source facts (observation type only, when source_facts is enabled)
     )
     scores: RecallScores | None = None  # Per-stage recall scores (final/reranker/semantic/text)
-    is_stale: bool = False
+    is_stale: bool = Field(
+        default=False,
+        description=(
+            "Whether to re-check this memory before relying on it: its record is marked 'stale', or its "
+            "ttl_seconds have elapsed since it was fetched. Stale memories are still returned and ranked."
+        ),
+    )
     attachments: list["ChunkAttachment"] | None = Field(
         default=None,
         description=(

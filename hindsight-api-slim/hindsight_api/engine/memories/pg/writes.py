@@ -124,14 +124,14 @@ async def insert_facts(
         # attributed them. Empty for a fact stated in the prose — which is most of
         # them, and the reason this is per fact rather than per chunk.
         attachment_ids_list.append(json.dumps(list(dict.fromkeys(fact.attachment_ids))))
-        provenance_classes.append(getattr(fact, "provenance_class", None) or "inferred")
-        write_authorities.append(getattr(fact, "write_authority", None))
-        observed_ats.append(getattr(fact, "observed_at", None))
-        fetched_ats.append(getattr(fact, "fetched_at", None))
-        ttl_seconds_list.append(getattr(fact, "ttl_seconds", None))
-        scopes.append(getattr(fact, "scope", None))
-        reset_conditions.append(getattr(fact, "reset_condition", None))
-        record_statuses.append(getattr(fact, "record_status", None) or "active")
+        provenance_classes.append(fact.provenance_class)
+        write_authorities.append(fact.write_authority)
+        observed_ats.append(fact.observed_at)
+        fetched_ats.append(fact.fetched_at)
+        ttl_seconds_list.append(fact.ttl_seconds)
+        scopes.append(fact.scope)
+        reset_conditions.append(fact.reset_condition)
+        record_statuses.append(fact.record_status)
 
     # Batch insert all facts — delegates to DataAccessOps which handles
     # unnest (PG) vs row-by-row (Oracle) transparently.
@@ -407,7 +407,11 @@ async def _archive_columns(conn, fq_table: Callable[[str], str]) -> str:
 _ARCHIVE_SELECT = (
     "id, text, fact_type, context, occurred_start, occurred_end, mentioned_at, "
     "document_id, chunk_id, tags, metadata, proof_count, event_date, created_at, "
-    "consolidated_at, entity_ids"
+    "consolidated_at, entity_ids, "
+    # Record contract: the archive move copies these (catalog column list above), so
+    # the archived read returns them too instead of reporting the column defaults.
+    "provenance_class, write_authority, observed_at, fetched_at, ttl_seconds, scope, "
+    "reset_condition, record_status"
 )
 
 
@@ -430,6 +434,14 @@ def _archived_stored(row: Any) -> StoredMemory:
         created_at=row["created_at"],
         consolidated_at=row["consolidated_at"],
         entity_ids=[str(e) for e in (row["entity_ids"] or [])],
+        provenance_class=row["provenance_class"],
+        write_authority=row["write_authority"],
+        observed_at=row["observed_at"],
+        fetched_at=row["fetched_at"],
+        ttl_seconds=row["ttl_seconds"],
+        scope=row["scope"],
+        reset_condition=row["reset_condition"],
+        record_status=row["record_status"],
     )
 
 

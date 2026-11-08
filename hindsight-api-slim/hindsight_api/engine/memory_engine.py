@@ -647,6 +647,7 @@ from .cross_encoder import RANK_SCORE_PROVIDERS, CrossEncoderModel, TypeSafeCros
 from .embeddings import Embeddings, create_embeddings_from_env
 from .interface import BankConfigState, BankTemplateImportWrite, MemoryEngineInterface
 from .memories import sql_memories
+from .memories.base import compute_is_stale
 from .page_markdown import EMPTY_PAGE_NOTICE
 from .schema import _is_oracle, fq_table
 from .search.decision_reranker import PROVIDER_NAME as DECISION_MODEL_RERANKER
@@ -10929,14 +10930,6 @@ class MemoryEngine(MemoryEngineInterface):
                             now_for_source_facts = datetime.now(timezone.utc)
 
                             def _make_source_fact(sid: str, r: "StoredMemory") -> MemoryFact:
-                                record_status = getattr(r, "record_status", "active") or "active"
-                                ttl_seconds = getattr(r, "ttl_seconds", None)
-                                fetched_at = getattr(r, "fetched_at", None)
-                                is_stale = (record_status == "stale") or (
-                                    ttl_seconds is not None
-                                    and fetched_at is not None
-                                    and (now_for_source_facts - fetched_at).total_seconds() > ttl_seconds
-                                )
                                 return MemoryFact(
                                     id=sid,
                                     text=r.text,
@@ -10949,7 +10942,7 @@ class MemoryEngine(MemoryEngineInterface):
                                     metadata=r.metadata,
                                     chunk_id=str(r.chunk_id) if r.chunk_id else None,
                                     tags=r.tags or None,
-                                    is_stale=is_stale,
+                                    is_stale=r.is_stale(now=now_for_source_facts),
                                 )
 
                             selection = select_source_facts_within_budget(
@@ -11047,13 +11040,11 @@ class MemoryEngine(MemoryEngineInterface):
                 if include_entities and result_id in fact_entity_map:
                     entity_names = [e["canonical_name"] for e in fact_entity_map[result_id]]
 
-                record_status = result_dict.get("record_status") or "active"
-                ttl_seconds = result_dict.get("ttl_seconds")
-                fetched_at = result_dict.get("fetched_at")
-                is_stale = (record_status == "stale") or (
-                    ttl_seconds is not None
-                    and fetched_at is not None
-                    and (now - fetched_at).total_seconds() > ttl_seconds
+                is_stale = compute_is_stale(
+                    result_dict.get("record_status") or "active",
+                    result_dict.get("ttl_seconds"),
+                    result_dict.get("fetched_at"),
+                    now=now,
                 )
 
                 memory_facts.append(
