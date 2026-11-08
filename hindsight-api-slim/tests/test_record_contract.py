@@ -210,8 +210,9 @@ def test_record_status_stale_ignores_ttl() -> None:
 
 def test_compute_is_stale_normalizes_naive_fetched_at() -> None:
     now = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-    fetched_fresh = datetime(2026, 1, 1, 11, 59, 30)  # 30s ago, naive
-    fetched_stale = datetime(2026, 1, 1, 11, 58, 30)  # 90s ago, naive
+    # Naive values as a timezone-unaware driver returns them: UTC wall time, no tzinfo.
+    fetched_fresh = (now - timedelta(seconds=30)).replace(tzinfo=None)
+    fetched_stale = (now - timedelta(seconds=90)).replace(tzinfo=None)
     assert compute_is_stale("active", ttl_seconds=60, fetched_at=fetched_fresh, now=now) is False
     assert compute_is_stale("active", ttl_seconds=60, fetched_at=fetched_stale, now=now) is True
 
