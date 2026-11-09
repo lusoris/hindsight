@@ -307,6 +307,58 @@ class CausalEdgeRecord:
     weight: float = 1.0
 
 
+VALID_PROVENANCE_CLASSES: tuple[str, ...] = ("tool-run", "file-read", "recalled", "inferred")
+VALID_RECORD_STATUSES: tuple[str, ...] = ("active", "stale", "disputed", "tombstoned")
+
+
+def _validate_record_contract(provenance_class: str, record_status: str) -> None:
+    """Raise ``ValueError`` unless both values are in ``VALID_PROVENANCE_CLASSES`` / ``VALID_RECORD_STATUSES``."""
+    if provenance_class not in VALID_PROVENANCE_CLASSES:
+        raise ValueError(f"Invalid provenance_class {provenance_class!r}; must be one of {VALID_PROVENANCE_CLASSES}")
+    if record_status not in VALID_RECORD_STATUSES:
+        raise ValueError(f"Invalid record_status {record_status!r}; must be one of {VALID_RECORD_STATUSES}")
+
+
+def _normalize_utc(dt: datetime) -> datetime:
+    """``dt`` as an aware UTC datetime: a naive value is read as UTC, an aware one keeps its instant.
+
+    A row read back through the Oracle connection can carry a naive ``fetched_at``,
+    and subtracting it from an aware ``now`` raises ``TypeError``. Naive is read as
+    UTC because that is what the Oracle row conversion already assumes for the
+    ``*_at`` columns it parses (``engine/db/oracle.py``)."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def compute_is_stale(
+    record_status: str | None = "active",
+    ttl_seconds: int | None = None,
+    fetched_at: datetime | None = None,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """Compute whether a memory record is stale from its record_status or TTL.
+
+    A record with no status (None) has unknown freshness and is reported stale, like a TTL with no fetch time.
+    A TTL with no fetch time has an unknown age, so it is reported stale rather than fresh.
+    """
+    if record_status is None:
+        return True
+    if record_status == "stale":
+        return True
+    if ttl_seconds is None:
+        return False
+    # A TTL with no fetch time has an unknown age, so it is reported stale rather
+    # than fresh, the same fail-closed rule recall applies to a result whose store
+    # did not carry the record contract.
+    if fetched_at is None:
+        return True
+    if now is None:
+        now = datetime.now(timezone.utc)
+    return (_normalize_utc(now) - _normalize_utc(fetched_at)).total_seconds() > ttl_seconds
+
+
 @dataclass
 class StoredMemory:
     """A memory read by address rather than by ranking.
@@ -355,6 +407,25 @@ class StoredMemory:
     # Short ids of the attachments this fact was drawn from (see META_ATTACHMENT_IDS).
     # Carried so the list and detail views resolve them from this read alone.
     attachment_ids: list[str] = field(default_factory=list)
+    provenance_class: str = "inferred"
+    write_authority: str | None = None
+    observed_at: datetime | None = None
+    fetched_at: datetime | None = None
+    ttl_seconds: int | None = None
+    scope: str | None = None
+    reset_condition: str | None = None
+    record_status: str = "active"
+
+    def __post_init__(self) -> None:
+        _validate_record_contract(self.provenance_class, self.record_status)
+
+    def is_stale(self, *, now: datetime | None = None) -> bool:
+        return compute_is_stale(
+            self.record_status,
+            self.ttl_seconds,
+            self.fetched_at,
+            now=now,
+        )
 
 
 @dataclass
@@ -607,6 +678,25 @@ class FactRecord:
     # Short ids of the attachments this fact was drawn from — what Postgres keeps in
     # `memory_units.attachment_ids`. Empty for a fact stated in plain text.
     attachment_ids: list[str] = field(default_factory=list)
+    provenance_class: str = "inferred"
+    write_authority: str | None = None
+    observed_at: datetime | None = None
+    fetched_at: datetime | None = None
+    ttl_seconds: int | None = None
+    scope: str | None = None
+    reset_condition: str | None = None
+    record_status: str = "active"
+
+    def __post_init__(self) -> None:
+        _validate_record_contract(self.provenance_class, self.record_status)
+
+    def is_stale(self, *, now: datetime | None = None) -> bool:
+        return compute_is_stale(
+            self.record_status,
+            self.ttl_seconds,
+            self.fetched_at,
+            now=now,
+        )
 
     def metadata_bag(self) -> dict[str, str]:
         """Render the non-modelled columns as an opaque str→str bag."""
@@ -729,6 +819,14 @@ def build_fact_records(
                 entity_ids=entity_ids,
                 causal_edges=causal_edges,
                 attachment_ids=list(getattr(fact, "attachment_ids", None) or []),
+                provenance_class=getattr(fact, "provenance_class", None) or "inferred",
+                write_authority=getattr(fact, "write_authority", None),
+                observed_at=getattr(fact, "observed_at", None),
+                fetched_at=getattr(fact, "fetched_at", None),
+                ttl_seconds=getattr(fact, "ttl_seconds", None),
+                scope=getattr(fact, "scope", None),
+                reset_condition=getattr(fact, "reset_condition", None),
+                record_status=getattr(fact, "record_status", None) or "active",
             )
         )
     return records
@@ -1595,10 +1693,13 @@ class MemoriesExtension(Extension, ABC):
         It exists because ranking does not need payloads. Fusion orders candidates by id and arm
         score, and only the few that survive are ever read, so a store CAN return scores for the
         wide arms and materialize the rest afterwards. A store that does so must populate at least
-        ``text`` here, and should also restore ``entity_ids`` and, for observations,
-        ``source_memory_ids`` — each field left ``None`` sends recall down a fallback that re-fetches
-        the very memories this just fetched (``entity_map_for_units`` for the first, the
-        ``prefer_observations`` and ``include_chunks`` reads for the second).
+        ``text`` here, and must also populate the record contract (``record_status``,
+        ``ttl_seconds``, ``fetched_at``; recall computes ``is_stale`` from them and reports a
+        result whose ``record_status`` is still ``None`` as stale). It should also restore
+        ``entity_ids`` and, for observations, ``source_memory_ids`` — each field left ``None`` sends
+        recall down a fallback that re-fetches the very memories this just fetched
+        (``entity_map_for_units`` for the first, the ``prefer_observations`` and ``include_chunks``
+        reads for the second).
 
         Declared here rather than probed for, because a routing store generates its delegators from
         this interface: a method that exists only on a concrete store is unreachable in a cloud
@@ -1867,6 +1968,10 @@ class MemoriesExtension(Extension, ABC):
         chunk enrichment. It must return the same shape the engine would have — the results in
         rank order, with their scores — because the caller cannot tell which path produced its
         answer and must not need to.
+
+        Each returned fact's ``is_stale`` is the store's to set from that record's status and
+        time-to-live (``compute_is_stale`` gives the engine's rule); a fact that leaves it unset
+        is reported stale, so an omission fails closed rather than passing as fresh.
 
         **Declining is normal and must stay cheap.** A store should return ``None`` for any
         request shape it does not implement rather than approximating it: a recall answered
@@ -2905,8 +3010,10 @@ class MemoriesExtension(Extension, ABC):
     ) -> dict[str, StoredMemory]:
         """The source facts recall shows under its observations, keyed by unit id.
 
-        Only the display fields need be set (text, fact_type, context, the three content times,
-        document_id, chunk_id, tags, metadata). Default: :meth:`get_memories`. Postgres selects
+        Display fields must be set (text, fact_type, context, the three content times,
+        document_id, chunk_id, tags, metadata), along with record contract fields
+        (record_status, ttl_seconds, fetched_at) so recall can compute staleness
+        for every source fact. Default: :meth:`get_memories`. Postgres selects
         just those columns."""
         return {
             m.unit_id: m

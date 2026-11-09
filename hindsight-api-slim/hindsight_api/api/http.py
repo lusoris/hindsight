@@ -680,6 +680,14 @@ class RecallResult(BaseModel):
         None  # IDs of source facts (observation type only, when source_facts is enabled)
     )
     scores: RecallScores | None = None  # Per-stage recall scores (final/reranker/semantic/text)
+    is_stale: bool = Field(
+        default=False,
+        description=(
+            "Whether to re-check this memory before relying on it: its record is marked 'stale', its "
+            "ttl_seconds have elapsed since it was fetched, or it has ttl_seconds but no fetch time. "
+            "Stale memories are still returned and ranked."
+        ),
+    )
     attachments: list["ChunkAttachment"] | None = Field(
         default=None,
         description=(
@@ -5455,6 +5463,7 @@ def _register_routes(app: FastAPI):
                     tags=fact.tags,
                     source_fact_ids=fact.source_fact_ids,
                     scores=fact.scores,
+                    is_stale=fact.is_stale,
                 )
 
             recall_results = [_fact_to_result(fact) for fact in core_result.results]

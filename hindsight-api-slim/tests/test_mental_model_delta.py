@@ -33,6 +33,7 @@ from hindsight_api.engine.maintenance import MaintenanceLoop
 from hindsight_api.engine.response_models import LLMCallResult, ReflectResult, TokenUsage
 from hindsight_api.engine.retain import embedding_utils
 from tests.conftest import stub_refresh_has_sources
+from tests.fact_fakes import RECORD_CONTRACT_DEFAULTS
 
 
 def _canned_reflect_result(text: str, facts: list[dict] | None = None) -> ReflectResult:
@@ -158,6 +159,7 @@ async def _seed_fact_row(memory: MemoryEngine, bank_id: str, text: str) -> str:
                     occurred_end=None,
                     mentioned_at=None,
                     attachment_ids=[],
+                    **RECORD_CONTRACT_DEFAULTS,
                 )
             ],
             document_id=None,

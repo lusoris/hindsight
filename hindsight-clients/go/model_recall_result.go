@@ -35,6 +35,8 @@ type RecallResult struct {
 	Tags []string `json:"tags,omitempty"`
 	SourceFactIds []string `json:"source_fact_ids,omitempty"`
 	Scores NullableRecallScores `json:"scores,omitempty"`
+	// Whether to re-check this memory before relying on it: its record is marked 'stale', its ttl_seconds have elapsed since it was fetched, or it has ttl_seconds but no fetch time. Stale memories are still returned and ranked.
+	IsStale *bool `json:"is_stale,omitempty"`
 	Attachments []ChunkAttachment `json:"attachments,omitempty"`
 }
 
@@ -48,6 +50,8 @@ func NewRecallResult(id string, text string) *RecallResult {
 	this := RecallResult{}
 	this.Id = id
 	this.Text = text
+	var isStale bool = false
+	this.IsStale = &isStale
 	return &this
 }
 
@@ -56,6 +60,8 @@ func NewRecallResult(id string, text string) *RecallResult {
 // but it doesn't guarantee that properties required by API are set
 func NewRecallResultWithDefaults() *RecallResult {
 	this := RecallResult{}
+	var isStale bool = false
+	this.IsStale = &isStale
 	return &this
 }
 
@@ -575,6 +581,38 @@ func (o *RecallResult) UnsetScores() {
 	o.Scores.Unset()
 }
 
+// GetIsStale returns the IsStale field value if set, zero value otherwise.
+func (o *RecallResult) GetIsStale() bool {
+	if o == nil || IsNil(o.IsStale) {
+		var ret bool
+		return ret
+	}
+	return *o.IsStale
+}
+
+// GetIsStaleOk returns a tuple with the IsStale field value if set, nil otherwise
+// and a boolean to check if the value has been set.
+func (o *RecallResult) GetIsStaleOk() (*bool, bool) {
+	if o == nil || IsNil(o.IsStale) {
+		return nil, false
+	}
+	return o.IsStale, true
+}
+
+// HasIsStale returns a boolean if a field has been set.
+func (o *RecallResult) HasIsStale() bool {
+	if o != nil && !IsNil(o.IsStale) {
+		return true
+	}
+
+	return false
+}
+
+// SetIsStale gets a reference to the given bool and assigns it to the IsStale field.
+func (o *RecallResult) SetIsStale(v bool) {
+	o.IsStale = &v
+}
+
 // GetAttachments returns the Attachments field value if set, zero value otherwise (both if not set or set to explicit null).
 func (o *RecallResult) GetAttachments() []ChunkAttachment {
 	if o == nil {
@@ -655,6 +693,9 @@ func (o RecallResult) ToMap() (map[string]interface{}, error) {
 	}
 	if o.Scores.IsSet() {
 		toSerialize["scores"] = o.Scores.Get()
+	}
+	if !IsNil(o.IsStale) {
+		toSerialize["is_stale"] = o.IsStale
 	}
 	if o.Attachments != nil {
 		toSerialize["attachments"] = o.Attachments

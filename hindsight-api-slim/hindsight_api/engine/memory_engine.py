@@ -647,6 +647,7 @@ from .cross_encoder import RANK_SCORE_PROVIDERS, CrossEncoderModel, TypeSafeCros
 from .embeddings import Embeddings, create_embeddings_from_env
 from .interface import BankConfigState, BankTemplateImportWrite, MemoryEngineInterface
 from .memories import sql_memories
+from .memories.base import compute_is_stale
 from .page_markdown import EMPTY_PAGE_NOTICE
 from .schema import _is_oracle, fq_table
 from .search.decision_reranker import PROVIDER_NAME as DECISION_MODEL_RERANKER
@@ -9949,6 +9950,13 @@ class MemoryEngine(MemoryEngineInterface):
                 )
             )
             if _store_result is not None:
+                # The store owns freshness for a recall it answers (see MemoriesExtension.full_recall), but
+                # MemoryFact defaults is_stale to False, so a store that never set it would report
+                # every record fresh. Fail closed: a fact whose is_stale the store left unset is
+                # reported stale; a value the store set, True or False, stands.
+                for _fact in [*_store_result.results, *(_store_result.source_facts or {}).values()]:
+                    if "is_stale" not in _fact.model_fields_set:
+                        _fact.is_stale = True
                 _full_elapsed = time.perf_counter() - _full_start
                 _t0_tail = time.perf_counter()
                 log_buffer.append(
@@ -10926,7 +10934,10 @@ class MemoryEngine(MemoryEngineInterface):
                                 conn=sf_conn, fq_table=fq_table, bank_id=bank_id, unit_ids=source_ids_ordered
                             )
 
+                            now_for_source_facts = datetime.now(timezone.utc)
+
                             def _make_source_fact(sid: str, r: "StoredMemory") -> MemoryFact:
+                                """Shape one stored source fact for the response; staleness is judged against one shared ``now``."""
                                 return MemoryFact(
                                     id=sid,
                                     text=r.text,
@@ -10939,6 +10950,7 @@ class MemoryEngine(MemoryEngineInterface):
                                     metadata=r.metadata,
                                     chunk_id=str(r.chunk_id) if r.chunk_id else None,
                                     tags=r.tags or None,
+                                    is_stale=r.is_stale(now=now_for_source_facts),
                                 )
 
                             selection = select_source_facts_within_budget(
@@ -11027,6 +11039,7 @@ class MemoryEngine(MemoryEngineInterface):
                 for sr in top_scored
             }
 
+            now = datetime.now(timezone.utc)
             memory_facts = []
             for result_dict in top_results_dicts:
                 result_id = str(result_dict.get("id"))
@@ -11034,6 +11047,15 @@ class MemoryEngine(MemoryEngineInterface):
                 entity_names = None
                 if include_entities and result_id in fact_entity_map:
                     entity_names = [e["canonical_name"] for e in fact_entity_map[result_id]]
+
+                # Freshness that was not carried is unknown; compute_is_stale reports it stale
+                # rather than defaulting to "active", which would let an expired memory pass as fresh.
+                is_stale = compute_is_stale(
+                    result_dict.get("record_status"),
+                    result_dict.get("ttl_seconds"),
+                    result_dict.get("fetched_at"),
+                    now=now,
+                )
 
                 memory_facts.append(
                     MemoryFact(
@@ -11051,6 +11073,7 @@ class MemoryEngine(MemoryEngineInterface):
                         tags=result_dict.get("tags"),
                         source_fact_ids=source_fact_ids_by_obs.get(result_id) if include_source_facts else None,
                         scores=scores_by_id.get(result_id),
+                        is_stale=is_stale,
                         attachment_ids=result_dict.get("attachment_ids"),
                     )
                 )

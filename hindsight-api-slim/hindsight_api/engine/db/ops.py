@@ -55,6 +55,10 @@ MEMORY_UNIT_COLUMNS: tuple[str, ...] = (
     "chunk_id",
     "tags",
     "proof_count",
+    # Record contract: what recall needs to flag a stale memory (see compute_is_stale).
+    "record_status",
+    "ttl_seconds",
+    "fetched_at",
 )
 
 
@@ -421,6 +425,14 @@ class DataAccessOps(ABC):
         text_signals_list: list,
         attachment_ids_list: list,
         text_search_extension: str = "native",
+        provenance_classes: list[str] | None = None,
+        write_authorities: list[str | None] | None = None,
+        observed_ats: list | None = None,
+        fetched_ats: list | None = None,
+        ttl_seconds_list: list[int | None] | None = None,
+        scopes: list[str | None] | None = None,
+        reset_conditions: list[str | None] | None = None,
+        record_statuses: list[str] | None = None,
     ) -> list[str]:
         """Batch-insert facts, returning IDs.
 

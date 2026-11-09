@@ -21,6 +21,7 @@ from hindsight_api.engine.db_utils import acquire_with_retry
 from hindsight_api.engine.memories import FactRecord, get_memories
 from hindsight_api.engine.memory_engine import MemoryEngine
 from hindsight_api.engine.schema import fq_table
+from tests.fact_fakes import RECORD_CONTRACT_DEFAULTS
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -58,6 +59,7 @@ async def _insert_memory(
         occurred_end=None,
         mentioned_at=None,
         attachment_ids=[],
+        **RECORD_CONTRACT_DEFAULTS,
     )
     unit_ids = await store.insert_facts(
         conn=conn, ops=memory._backend.ops, bank_id=bank_id, facts=[fact], document_id=document_id

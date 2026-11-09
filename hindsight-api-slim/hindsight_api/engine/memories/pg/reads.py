@@ -49,7 +49,9 @@ from ..base import MemoryScopeWatermark, ScanPage, StoredMemory
 _MEMORY_COLUMNS = """
     id, text, fact_type, context, document_id, chunk_id, tags, metadata,
     proof_count, event_date, occurred_start, occurred_end, mentioned_at,
-    created_at, updated_at, source_memory_ids, consolidated_at, observation_scopes
+    created_at, updated_at, source_memory_ids, consolidated_at, observation_scopes,
+    provenance_class, write_authority, observed_at, fetched_at,
+    ttl_seconds, scope, reset_condition, record_status
 """
 
 # The scan's order. Fixed (created_at, id) like the export loader's, because an
@@ -130,6 +132,14 @@ def _stored_from_row(row: Any) -> StoredMemory:
         # Consolidation routes a candidate by its scopes, so this has to survive
         # the trip through the store rather than being re-queried per memory.
         observation_scopes=_as_json(_column(row, "observation_scopes")),
+        provenance_class=_column(row, "provenance_class") or "inferred",
+        write_authority=_column(row, "write_authority"),
+        observed_at=_column(row, "observed_at"),
+        fetched_at=_column(row, "fetched_at"),
+        ttl_seconds=_column(row, "ttl_seconds"),
+        scope=_column(row, "scope"),
+        reset_condition=_column(row, "reset_condition"),
+        record_status=_column(row, "record_status") or "active",
     )
 
 
