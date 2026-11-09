@@ -61,6 +61,12 @@ jobs:
       with:
         python-version-file: ".python-version"
 
+    # The four integration packages carry generated copies of `_shared/user_config.py`;
+    # checking here stops a stale copy from being published even if the PR checks did not run.
+    - name: Check shared config copies
+      if: steps.type.outputs.type == 'python'
+      run: python3 scripts/sync-integration-config.py --check
+
     - name: Build Python package
       if: steps.type.outputs.type == 'python'
       working-directory: ./hindsight-integrations/${{ steps.info.outputs.integration }}
