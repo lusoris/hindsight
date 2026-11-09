@@ -149,6 +149,7 @@ def _table(name: str, schema: str | None) -> sa.Table:
 
 
 def _pg_upgrade() -> None:
+    """Add the ``_PG_ADD_COLUMNS`` columns to each of ``_TABLES`` in one ALTER, then create ``_INDEXES``."""
     schema = _pg_target_schema()
     for table in _TABLES:
         op.execute(sa.DDL(_PG_ADD_COLUMNS).against(_table(table, schema)))
@@ -157,6 +158,7 @@ def _pg_upgrade() -> None:
 
 
 def _pg_downgrade() -> None:
+    """Drop ``_INDEXES`` in reverse order, then the contract columns from each of ``_TABLES``."""
     schema = _pg_target_schema()
     for index_name, _columns in reversed(_INDEXES):
         op.drop_index(index_name, table_name="memory_units", schema=schema, if_exists=True)
@@ -165,6 +167,11 @@ def _pg_downgrade() -> None:
 
 
 def _oracle_upgrade() -> None:
+    """Add each ``_ORACLE_COLUMNS`` column and each index through a guard that skips an existing object.
+
+    Oracle has no ``ADD COLUMN IF NOT EXISTS``, so ``_ORACLE_COLUMN_GUARD`` and ``_ORACLE_INDEX_GUARD``
+    look the object up in the data dictionary first and run the DDL only when it is absent.
+    """
     bind = op.get_bind()
     for table, prefix in _ORACLE_TABLE_PREFIXES:
         for column_name, column_template in _ORACLE_COLUMNS:
@@ -188,6 +195,7 @@ def _oracle_upgrade() -> None:
 
 
 def _oracle_downgrade() -> None:
+    """Drop ``_INDEXES`` in reverse order, then the contract columns from each of ``_TABLES``."""
     for index_name, _columns in reversed(_INDEXES):
         op.drop_index(index_name, table_name="memory_units")
     for table in _TABLES:

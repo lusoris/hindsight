@@ -207,6 +207,11 @@ class PostgreSQLOps(DataAccessOps):
         reset_conditions: list[str | None] | None = None,
         record_statuses: list[str] | None = None,
     ) -> list[str]:
+        """Insert the facts in one ``unnest`` INSERT and return their ids in input order.
+
+        A contract list left as None defaults every row to provenance ``inferred``, status ``active``
+        and NULL for the other contract columns.
+        """
         from ...config import get_config
 
         config = get_config()

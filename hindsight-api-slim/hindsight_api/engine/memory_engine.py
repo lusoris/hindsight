@@ -10937,6 +10937,7 @@ class MemoryEngine(MemoryEngineInterface):
                             now_for_source_facts = datetime.now(timezone.utc)
 
                             def _make_source_fact(sid: str, r: "StoredMemory") -> MemoryFact:
+                                """Shape one stored source fact for the response; staleness is judged against one shared ``now``."""
                                 return MemoryFact(
                                     id=sid,
                                     text=r.text,

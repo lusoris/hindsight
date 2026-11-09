@@ -160,6 +160,11 @@ class OracleOps(DataAccessOps):
         reset_conditions: list[str | None] | None = None,
         record_statuses: list[str] | None = None,
     ) -> list[str]:
+        """Insert the facts in one executemany round-trip and return their client-generated ids.
+
+        A contract list left as None defaults every row to provenance ``inferred``, status ``active``
+        and NULL for the other contract columns.
+        """
         table = self._get_mu_table()
         n = len(fact_texts)
         if provenance_classes is None:

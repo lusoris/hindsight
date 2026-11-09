@@ -312,6 +312,7 @@ VALID_RECORD_STATUSES: tuple[str, ...] = ("active", "stale", "disputed", "tombst
 
 
 def _validate_record_contract(provenance_class: str, record_status: str) -> None:
+    """Raise ``ValueError`` unless both values are in ``VALID_PROVENANCE_CLASSES`` / ``VALID_RECORD_STATUSES``."""
     if provenance_class not in VALID_PROVENANCE_CLASSES:
         raise ValueError(f"Invalid provenance_class {provenance_class!r}; must be one of {VALID_PROVENANCE_CLASSES}")
     if record_status not in VALID_RECORD_STATUSES:

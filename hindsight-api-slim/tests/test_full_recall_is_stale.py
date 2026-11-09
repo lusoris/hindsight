@@ -64,6 +64,7 @@ async def _claiming_store(memory: MemoryEngine, request_context: RequestContext)
 async def test_store_answered_recall_fails_closed_when_is_stale_unset(
     api_client, memory, request_context, restore_default_store
 ) -> None:
+    """Recall fails closed by marking facts with unset is_stale as stale while preserving explicit freshness."""
     store = await _claiming_store(memory, request_context)
 
     response = await api_client.post(

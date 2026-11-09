@@ -115,6 +115,7 @@ def _render_pg(migration: ModuleType, direction: str) -> list[str]:
 
 @_SCHEMAS
 def test_pg_upgrade_sql(monkeypatch: pytest.MonkeyPatch, schema: str | None, qualifier: str) -> None:
+    """PG upgrade adds every contract column in one ALTER per table, each CHECK once, then both indexes."""
     migration = _load_migration()
     _set_target_schema(monkeypatch, migration, schema)
 
@@ -134,6 +135,7 @@ def test_pg_upgrade_sql(monkeypatch: pytest.MonkeyPatch, schema: str | None, qua
 
 @_SCHEMAS
 def test_pg_downgrade_sql(monkeypatch: pytest.MonkeyPatch, schema: str | None, qualifier: str) -> None:
+    """PostgreSQL downgrade drops composite indexes in reverse order and drops all contract columns from both tables."""
     migration = _load_migration()
     _set_target_schema(monkeypatch, migration, schema)
 
@@ -150,6 +152,7 @@ def test_pg_downgrade_sql(monkeypatch: pytest.MonkeyPatch, schema: str | None, q
 
 
 def test_oracle_upgrade_guards_every_add(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Oracle upgrade executes all column and index additions inside existence guards with distinct constraints."""
     migration = _load_migration()
     calls: list[_DriverCall] = []
 
@@ -181,6 +184,7 @@ def test_oracle_upgrade_guards_every_add(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_oracle_guards_skip_existing_objects() -> None:
+    """Both Oracle guards look the object up in the data dictionary and run the DDL only when it is absent."""
     migration = _load_migration()
 
     column_guard = " ".join(migration._ORACLE_COLUMN_GUARD.split())

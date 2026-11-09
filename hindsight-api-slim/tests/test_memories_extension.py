@@ -235,6 +235,7 @@ class InMemoryMemories(MemoriesExtension):
     # -- recall arms ---------------------------------------------------------
 
     async def search(self, *, conn, bank_id, fact_types, query_embedding, query_text, limit, **kwargs):
+        """Search in-memory facts by type and return ranked semantic and BM25 candidates up to the limit."""
         self.calls.append("search")
         # The engine consumes the three-field result (semantic hits, bm25 hits, graph seeds) and
         # fuses + reranks it into ``top_scored``, so the seam has to hand back REAL candidates built
@@ -245,6 +246,7 @@ class InMemoryMemories(MemoriesExtension):
         from hindsight_api.engine.search.types import RetrievalResult
 
         def _candidate(row, rank: int, *, semantic: bool) -> RetrievalResult:
+            """Build a ranked RetrievalResult from a row, attaching contract fields when enabled."""
             # One dict row becomes one ranked candidate. Score descends with insertion order so the
             # fusion/rerank keeps a stable, faithful order; the chunk_id/document_id ride along so the
             # chunk-overlay arm can find the row's chunk, exactly like a real semantic/BM25 hit.
