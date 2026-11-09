@@ -179,6 +179,13 @@ def test_ttl_without_fetched_at_is_stale() -> None:
     assert compute_is_stale("active", ttl_seconds=None, fetched_at=None, now=now) is False
 
 
+def test_unknown_record_status_is_stale() -> None:
+    """A record with no status (None) has unknown freshness and is reported stale."""
+    now = datetime.now(timezone.utc)
+    assert compute_is_stale(None, ttl_seconds=None, fetched_at=None, now=now) is True
+    assert compute_is_stale(None, ttl_seconds=3600, fetched_at=now, now=now) is True
+
+
 def test_from_db_row_leaves_missing_record_status_unset() -> None:
     """from_db_row must not default a missing record_status column to 'active'.
 

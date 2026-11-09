@@ -9950,6 +9950,13 @@ class MemoryEngine(MemoryEngineInterface):
                 )
             )
             if _store_result is not None:
+                # The store owns freshness for a recall it answers (see MemoriesExtension.full_recall), but
+                # MemoryFact defaults is_stale to False, so a store that never set it would report
+                # every record fresh. Fail closed: a fact whose is_stale the store left unset is
+                # reported stale; a value the store set, True or False, stands.
+                for _fact in [*_store_result.results, *(_store_result.source_facts or {}).values()]:
+                    if "is_stale" not in _fact.model_fields_set:
+                        _fact.is_stale = True
                 _full_elapsed = time.perf_counter() - _full_start
                 _t0_tail = time.perf_counter()
                 log_buffer.append(
@@ -11040,19 +11047,14 @@ class MemoryEngine(MemoryEngineInterface):
                 if include_entities and result_id in fact_entity_map:
                     entity_names = [e["canonical_name"] for e in fact_entity_map[result_id]]
 
-                # Freshness that was not carried is unknown, so it is reported stale
-                # rather than defaulted to "active", which would let an expired memory
-                # pass as fresh.
-                record_status = result_dict.get("record_status")
-                if record_status is None:
-                    is_stale = True
-                else:
-                    is_stale = compute_is_stale(
-                        record_status,
-                        result_dict.get("ttl_seconds"),
-                        result_dict.get("fetched_at"),
-                        now=now,
-                    )
+                # Freshness that was not carried is unknown; compute_is_stale reports it stale
+                # rather than defaulting to "active", which would let an expired memory pass as fresh.
+                is_stale = compute_is_stale(
+                    result_dict.get("record_status"),
+                    result_dict.get("ttl_seconds"),
+                    result_dict.get("fetched_at"),
+                    now=now,
+                )
 
                 memory_facts.append(
                     MemoryFact(

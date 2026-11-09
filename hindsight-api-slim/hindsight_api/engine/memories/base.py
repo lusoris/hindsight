@@ -339,8 +339,11 @@ def compute_is_stale(
 ) -> bool:
     """Compute whether a memory record is stale from its record_status or TTL.
 
+    A record with no status (None) has unknown freshness and is reported stale, like a TTL with no fetch time.
     A TTL with no fetch time has an unknown age, so it is reported stale rather than fresh.
     """
+    if record_status is None:
+        return True
     if record_status == "stale":
         return True
     if ttl_seconds is None:
@@ -1964,6 +1967,10 @@ class MemoriesExtension(Extension, ABC):
         chunk enrichment. It must return the same shape the engine would have — the results in
         rank order, with their scores — because the caller cannot tell which path produced its
         answer and must not need to.
+
+        Each returned fact's ``is_stale`` is the store's to set from that record's status and
+        time-to-live (``compute_is_stale`` gives the engine's rule); a fact that leaves it unset
+        is reported stale, so an omission fails closed rather than passing as fresh.
 
         **Declining is normal and must stay cheap.** A store should return ``None`` for any
         request shape it does not implement rather than approximating it: a recall answered
