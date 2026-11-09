@@ -46,6 +46,19 @@ def _setup_tmp_codacy(tmp_path: Path, codacy_text: str) -> Path:
     return codacy_file
 
 
+def _make_codacy_text(pattern: str, indent: int = 6) -> str:
+    """Build .codacy.yml exclusion text for ``pattern`` at ``indent`` spaces."""
+    spaces = " " * indent
+    return (
+        "---\n"
+        "engines:\n"
+        "  duplication:\n"
+        "    exclude_paths:\n"
+        "      # category D, entry 2026-11-08, expiry 2027-03-08, rule duplication: reason\n"
+        f'{spaces}- "{pattern}"\n'
+    )
+
+
 def test_missing_comment_fails(tmp_path: Path, capsys):
     """An exclusion item without a preceding comment fails."""
     text = '---\nengines:\n  duplication:\n    exclude_paths:\n      - "foo.py"\n'
@@ -286,3 +299,99 @@ def test_doublestar_recursive_file_match_passes(tmp_path: Path):
     codacy_file = tmp_path / ".codacy.yml"
     codacy_file.write_text(text, encoding="utf-8")
     assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 0
+
+
+def test_doublestar_py_nested_file_passes(tmp_path: Path):
+    """A pattern **.py passes with only a nested file and does not raise."""
+    target = tmp_path / "a" / "b" / "x.py"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.touch()
+    codacy_file = tmp_path / ".codacy.yml"
+    codacy_file.write_text(_make_codacy_text("**.py"), encoding="utf-8")
+    assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 0
+
+
+def test_star_does_not_cross_slash_fails(tmp_path: Path, capsys):
+    """A single star does not cross directory separators, so docs/*.md misses docs/sub/x.md."""
+    target = tmp_path / "docs" / "sub" / "x.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.touch()
+    codacy_file = tmp_path / ".codacy.yml"
+    codacy_file.write_text(_make_codacy_text("docs/*.md"), encoding="utf-8")
+    assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 1
+    captured = capsys.readouterr()
+    assert "matches no files under" in captured.err
+
+
+def test_doublestar_tests_doublestar_java_semantics(tmp_path: Path, capsys):
+    """Pattern **/tests/** matches a/tests/b/c.py but fails on root tests/c.py."""
+    root_target = tmp_path / "tests" / "c.py"
+    root_target.parent.mkdir(parents=True, exist_ok=True)
+    root_target.touch()
+    codacy_file = tmp_path / ".codacy.yml"
+    codacy_file.write_text(_make_codacy_text("**/tests/**"), encoding="utf-8")
+    assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 1
+    captured = capsys.readouterr()
+    assert "matches no files under" in captured.err
+
+    nested_target = tmp_path / "a" / "tests" / "b" / "c.py"
+    nested_target.parent.mkdir(parents=True, exist_ok=True)
+    nested_target.touch()
+    assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 0
+
+
+def test_group_pattern_matches_alternative(tmp_path: Path):
+    """Pattern {a,b}/x.txt passes with b/x.txt."""
+    target_b = tmp_path / "b" / "x.txt"
+    target_b.parent.mkdir(parents=True, exist_ok=True)
+    target_b.touch()
+    codacy_file = tmp_path / ".codacy.yml"
+    codacy_file.write_text(_make_codacy_text("{a,b}/x.txt"), encoding="utf-8")
+    assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 0
+
+
+def test_question_mark_pattern_matches_single_character(tmp_path: Path, capsys):
+    """Pattern fil?.txt passes with file.txt and fails with only fi.txt."""
+    (tmp_path / "fi.txt").touch()
+    codacy_file = tmp_path / ".codacy.yml"
+    codacy_file.write_text(_make_codacy_text("fil?.txt"), encoding="utf-8")
+    assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 1
+    assert "matches no files under" in capsys.readouterr().err
+
+    (tmp_path / "file.txt").touch()
+    assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 0
+
+
+def test_bracket_negation_pattern_matches(tmp_path: Path, capsys):
+    """Pattern [!a]bc.txt passes with xbc.txt and fails with only abc.txt."""
+    (tmp_path / "abc.txt").touch()
+    codacy_file = tmp_path / ".codacy.yml"
+    codacy_file.write_text(_make_codacy_text("[!a]bc.txt"), encoding="utf-8")
+    assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 1
+    assert "matches no files under" in capsys.readouterr().err
+
+    (tmp_path / "xbc.txt").touch()
+    assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 0
+
+
+def test_malformed_globs_fail_without_raising(tmp_path: Path, capsys):
+    """Malformed globs report 'is not a valid Codacy glob' and main returns 1 without raising."""
+    for bad_glob in ("src/[ab.py", "src/{a,b.py", "{a,{b}}.py"):
+        codacy_file = tmp_path / ".codacy.yml"
+        codacy_file.write_text(_make_codacy_text(bad_glob), encoding="utf-8")
+        assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 1
+        captured = capsys.readouterr()
+        assert f"pattern '{bad_glob}' is not a valid Codacy glob:" in captured.err
+
+
+def test_exclude_paths_item_indent(tmp_path: Path, capsys):
+    """List items indented at 2 spaces or 8 spaces fail with expected 6 error."""
+    (tmp_path / "foo.py").touch()
+    codacy_file = tmp_path / ".codacy.yml"
+    for bad_indent in (2, 8):
+        codacy_file.write_text(_make_codacy_text("foo.py", indent=bad_indent), encoding="utf-8")
+        assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 1
+        captured = capsys.readouterr()
+        assert (
+            f"list item indented {bad_indent} spaces; expected 6 under engines.<engine>.exclude_paths" in captured.err
+        )
