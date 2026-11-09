@@ -30,6 +30,7 @@ COMMENT_LINE_RE = re.compile(r"^\s*#")
 KEY_RE = re.compile(r"^( *)([a-z_]+):\s*$")
 LIST_ITEM_RE = re.compile(r'^ +- "?([^"\s]+)"?\s*$')
 COMMENT_RE = re.compile(r"^ *# category ([ABCD]), entry (\S+), expiry (\S+), rule ([a-z_]+): (\S.*)$")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 INTERVALS: dict[str, int] = {
     "B": 3,
@@ -44,19 +45,36 @@ class _Section:
 
     in_engines: bool = False
     engine: str | None = None
+    list_key: str | None = None
 
 
-def _enter_key(section: _Section, indent: int, key: str) -> None:
-    """Update ``section`` for a key line at ``indent``."""
+def _enter_key(section: _Section, indent: int, key: str) -> list[str]:
+    """Update ``section`` for a key line at ``indent`` and return any validation problems.
+
+    Keys are allow-listed by position: ``engines`` at the top, any engine name directly
+    under it, and ``exclude_paths`` under an engine. Any other key, or a known key at
+    another position, fails, so a new .codacy.yml key cannot pass unchecked.
+    """
     if indent == 0:
         section.in_engines = key == "engines"
         section.engine = None
-    elif section.in_engines and indent == 2:
-        section.engine = key
+        section.list_key = None
+        known = section.in_engines
+    elif indent == 2:
+        section.engine = key if section.in_engines else None
+        section.list_key = None
+        known = section.in_engines
+    else:
+        # section.engine is only ever set inside engines, so this also implies in_engines.
+        known = indent == 4 and section.engine is not None and key == "exclude_paths"
+        section.list_key = key if known else None
+    return [] if known else [f"unsupported key {key!r}; extend scripts/check-codacy-config.py"]
 
 
 def _date_problems(category: str, entry_str: str, expiry_str: str, today: datetime.date) -> list[str]:
     """Problems with the entry and expiry dates for ``category`` as of ``today``."""
+    if not DATE_RE.match(entry_str) or not DATE_RE.match(expiry_str):
+        return [f"invalid date in entry {entry_str!r} or expiry {expiry_str!r}; expected YYYY-MM-DD"]
     try:
         entry = datetime.date.fromisoformat(entry_str)
         expiry = datetime.date.fromisoformat(expiry_str)
@@ -73,6 +91,25 @@ def _date_problems(category: str, entry_str: str, expiry_str: str, today: dateti
     return problems
 
 
+def _matches_a_file(root: Path, pattern: str) -> bool:
+    """Return whether ``pattern`` (relative, without ``..``) matches a regular file inside ``root``."""
+    resolved_root = root.resolve()
+
+    def _is_file_in_root(p: Path) -> bool:
+        # resolve() follows symlinks, so a link that points outside the repository does not count.
+        try:
+            return p.is_file() and p.resolve().is_relative_to(resolved_root)
+        except (OSError, RuntimeError):
+            # RuntimeError is how resolve() reports a symlink loop before Python 3.13.
+            return False
+
+    if any(_is_file_in_root(p) for p in root.glob(pattern)):
+        return True
+    # Python before 3.13 returns only directories for a pattern ending in '**', while
+    # Codacy's 'dir/**' means every file below 'dir', so also look one level further.
+    return pattern.endswith("**") and any(_is_file_in_root(p) for p in root.glob(pattern + "/*"))
+
+
 def _item_problems(
     comment_line: str | None, pattern: str, engine: str | None, root: Path, today: datetime.date
 ) -> list[str]:
@@ -86,7 +123,10 @@ def _item_problems(
     problems = _date_problems(category, entry_str, expiry_str, today)
     if rule != engine:
         problems.append(f"rule {rule!r} does not match current engine {engine!r}")
-    if not any(root.glob(pattern)):
+    # Checked before globbing: Path.glob raises on an absolute pattern.
+    if pattern.startswith("/") or ".." in Path(pattern).parts:
+        problems.append(f"pattern {pattern!r} must be relative to the repository root without '..'")
+    elif not _matches_a_file(root, pattern):
         problems.append(f"pattern {pattern!r} matches no files under {root}")
     return problems
 
@@ -101,12 +141,16 @@ def check_text(text: str, root: Path, today: datetime.date) -> list[str]:
             continue
         key_match = KEY_RE.match(line)
         if key_match:
-            _enter_key(section, len(key_match.group(1)), key_match.group(2))
+            problems = _enter_key(section, len(key_match.group(1)), key_match.group(2))
+            errors.extend(f".codacy.yml:{i + 1}: {msg}" for msg in problems)
             continue
         item_match = LIST_ITEM_RE.match(line)
         if item_match:
-            above = lines[i - 1] if i > 0 else None
-            problems = _item_problems(above, item_match.group(1), section.engine, root, today)
+            if not (section.in_engines and section.engine is not None and section.list_key == "exclude_paths"):
+                problems = ["list item outside engines.<engine>.exclude_paths"]
+            else:
+                above = lines[i - 1] if i > 0 else None
+                problems = _item_problems(above, item_match.group(1), section.engine, root, today)
         else:
             problems = ["unrecognised line; extend scripts/check-codacy-config.py"]
         errors.extend(f".codacy.yml:{i + 1}: {msg}" for msg in problems)

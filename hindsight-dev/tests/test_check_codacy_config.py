@@ -186,3 +186,103 @@ def test_file_that_is_not_utf8_fails(tmp_path: Path, capsys):
     (tmp_path / ".codacy.yml").write_bytes("---\n# caf\u00e9\n".encode("latin-1"))
     assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 1
     assert "not valid UTF-8" in capsys.readouterr().err
+
+
+def test_unsupported_top_level_key_fails(tmp_path: Path, capsys):
+    """An unsupported top-level key fails naming the key."""
+    text = (
+        "---\n"
+        "exclude_paths:\n"
+        "  # category D, entry 2026-11-08, expiry 2027-03-08, rule duplication: reason\n"
+        '  - "foo.py"\n'
+    )
+    _setup_tmp_codacy(tmp_path, text)
+    assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 1
+    captured = capsys.readouterr()
+    assert "unsupported key 'exclude_paths'" in captured.err
+
+
+def test_unsupported_engine_level_key_fails(tmp_path: Path, capsys):
+    """An unsupported engine-level key under an engine fails naming the key."""
+    text = (
+        "---\n"
+        "engines:\n"
+        "  duplication:\n"
+        "    include_paths:\n"
+        "      # category D, entry 2026-11-08, expiry 2027-03-08, rule duplication: reason\n"
+        '      - "foo.py"\n'
+    )
+    _setup_tmp_codacy(tmp_path, text)
+    assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 1
+    captured = capsys.readouterr()
+    assert "unsupported key 'include_paths'" in captured.err
+
+
+def test_compact_and_week_dates_fail(tmp_path: Path, capsys):
+    """A compact date (20261108) and a week date (2026-W45-7) each fail with the YYYY-MM-DD message."""
+    for bad_date in ("20261108", "2026-W45-7"):
+        text = (
+            "---\n"
+            "engines:\n"
+            "  duplication:\n"
+            "    exclude_paths:\n"
+            f"      # category D, entry {bad_date}, expiry 2027-03-08, rule duplication: reason\n"
+            '      - "foo.py"\n'
+        )
+        _setup_tmp_codacy(tmp_path, text)
+        assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 1
+        captured = capsys.readouterr()
+        assert "expected YYYY-MM-DD" in captured.err
+
+
+def test_pattern_matching_only_directory_fails(tmp_path: Path, capsys):
+    """A pattern matching only an empty directory fails."""
+    (tmp_path / "emptydir").mkdir(parents=True, exist_ok=True)
+    text = (
+        "---\n"
+        "engines:\n"
+        "  duplication:\n"
+        "    exclude_paths:\n"
+        "      # category D, entry 2026-11-08, expiry 2027-03-08, rule duplication: reason\n"
+        '      - "emptydir"\n'
+    )
+    codacy_file = tmp_path / ".codacy.yml"
+    codacy_file.write_text(text, encoding="utf-8")
+    assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 1
+    captured = capsys.readouterr()
+    assert "matches no files under" in captured.err
+
+
+def test_absolute_and_dotdot_patterns_fail(tmp_path: Path, capsys):
+    """An absolute pattern and a ../x pattern fail with the relative-path message without raising."""
+    for pattern in ("/absolute/path.py", "../x"):
+        text = (
+            "---\n"
+            "engines:\n"
+            "  duplication:\n"
+            "    exclude_paths:\n"
+            "      # category D, entry 2026-11-08, expiry 2027-03-08, rule duplication: reason\n"
+            f'      - "{pattern}"\n'
+        )
+        _setup_tmp_codacy(tmp_path, text)
+        assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 1
+        captured = capsys.readouterr()
+        assert "must be relative to the repository root without '..'" in captured.err
+
+
+def test_doublestar_recursive_file_match_passes(tmp_path: Path):
+    """A pattern somedir/** with a file two levels below somedir passes."""
+    nested = tmp_path / "somedir" / "level1" / "level2"
+    nested.mkdir(parents=True, exist_ok=True)
+    (nested / "nested_file.py").touch()
+    text = (
+        "---\n"
+        "engines:\n"
+        "  duplication:\n"
+        "    exclude_paths:\n"
+        "      # category D, entry 2026-11-08, expiry 2027-03-08, rule duplication: reason\n"
+        '      - "somedir/**"\n'
+    )
+    codacy_file = tmp_path / ".codacy.yml"
+    codacy_file.write_text(text, encoding="utf-8")
+    assert check_mod.main(["--root", str(tmp_path)], today=TODAY) == 0

@@ -10,9 +10,16 @@ line endings and content edits, wheel inclusion, and caller wiring.
 from __future__ import annotations
 
 import importlib.util
-import tomllib
+import os
+import shutil
+import stat
+import subprocess
+import sys
+import zipfile
 from pathlib import Path
 from types import ModuleType
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "sync-integration-config.py"
@@ -22,6 +29,8 @@ def _load_sync_module() -> ModuleType:
     spec = importlib.util.spec_from_file_location("sync_integration_config", SCRIPT_PATH)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
+    # @dataclass resolves the module through sys.modules, so register it before running it.
+    sys.modules[spec.name] = mod
     spec.loader.exec_module(mod)
     return mod
 
@@ -124,23 +133,130 @@ def test_missing_source(tmp_path: Path):
     assert sync_mod.main(["--check", "--root", str(tmp_path)]) == 2
 
 
-def test_every_target_ships_in_wheel():
-    """Each target copy's parent directory must be declared in hatchling wheel packages."""
+def test_interrupted_write_cleans_up_and_preserves_target(tmp_path: Path, monkeypatch):
+    """An interrupted write leaves target byte-for-byte unchanged and cleans up temp files."""
+    src_rel = sync_mod.SOURCE
+    tmp_src = tmp_path / src_rel
+    tmp_src.parent.mkdir(parents=True, exist_ok=True)
+    tmp_src.write_text((REPO_ROOT / src_rel).read_text(encoding="utf-8"), encoding="utf-8")
+    assert sync_mod.main(["--root", str(tmp_path)]) == 0
+
+    target = sync_mod.TARGETS[0]
+    target_path = tmp_path / target
+    original_bytes = target_path.read_bytes()
+
+    # Modify source so a write would be triggered
+    tmp_src.write_text(tmp_src.read_text(encoding="utf-8") + "\n# change\n", encoding="utf-8")
+
+    def failing_replace(src, dst):
+        raise OSError("simulated write failure during replace")
+
+    monkeypatch.setattr(sync_mod.os, "replace", failing_replace)
+
+    with pytest.raises(OSError, match="simulated write failure"):
+        sync_mod.main(["--root", str(tmp_path)])
+
+    assert target_path.read_bytes() == original_bytes
+    temp_files = [p for p in target_path.parent.iterdir() if p != target_path]
+    assert temp_files == []
+
+
+def test_write_keeps_target_mode(tmp_path: Path):
+    """A rewritten target keeps its mode and a new one gets 0666 minus the umask, not 0600.
+
+    The atomic write goes through NamedTemporaryFile, which creates its file 0600.
+    """
+    src_rel = sync_mod.SOURCE
+    tmp_src = tmp_path / src_rel
+    tmp_src.parent.mkdir(parents=True, exist_ok=True)
+    tmp_src.write_text((REPO_ROOT / src_rel).read_text(encoding="utf-8"), encoding="utf-8")
+
+    previous_umask = os.umask(0o022)
+    try:
+        assert sync_mod.main(["--root", str(tmp_path)]) == 0
+    finally:
+        os.umask(previous_umask)
     for target in sync_mod.TARGETS:
-        pyproject_path = REPO_ROOT / target.parent.parent / "pyproject.toml"
-        assert pyproject_path.is_file(), f"missing pyproject.toml at {pyproject_path}"
-        data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-        wheel_packages = (
-            data.get("tool", {})
-            .get("hatch", {})
-            .get("build", {})
-            .get("targets", {})
-            .get("wheel", {})
-            .get("packages", [])
+        assert stat.S_IMODE((tmp_path / target).stat().st_mode) == 0o644
+
+    kept = tmp_path / sync_mod.TARGETS[0]
+    kept.chmod(0o640)
+    tmp_src.write_text(tmp_src.read_text(encoding="utf-8") + "\n# change\n", encoding="utf-8")
+    assert sync_mod.main(["--root", str(tmp_path)]) == 0
+    assert stat.S_IMODE(kept.stat().st_mode) == 0o640
+
+
+def test_concurrent_run_older_source_does_not_win(tmp_path: Path, monkeypatch):
+    """When source changes during first render pass, sync detects drift and applies newest source."""
+    src_rel = sync_mod.SOURCE
+    tmp_src = tmp_path / src_rel
+    tmp_src.parent.mkdir(parents=True, exist_ok=True)
+    initial_text = (REPO_ROOT / src_rel).read_text(encoding="utf-8")
+    tmp_src.write_text(initial_text, encoding="utf-8")
+
+    new_source_text = initial_text + "\n# updated concurrent source\n"
+    real_render = sync_mod.render
+    first_call = True
+
+    def racing_render(text: str) -> str:
+        nonlocal first_call
+        if first_call:
+            first_call = False
+            tmp_src.write_text(new_source_text, encoding="utf-8")
+        return real_render(text)
+
+    monkeypatch.setattr(sync_mod, "render", racing_render)
+
+    assert sync_mod.main(["--root", str(tmp_path)]) == 0
+    expected_content = real_render(new_source_text)
+    for target in sync_mod.TARGETS:
+        target_path = tmp_path / target
+        assert target_path.read_text(encoding="utf-8") == expected_content
+
+
+def test_source_that_never_settles_fails(tmp_path: Path, monkeypatch, capsys):
+    """If source continues changing on every pass, main returns 1 and stderr names the rerun."""
+    src_rel = sync_mod.SOURCE
+    tmp_src = tmp_path / src_rel
+    tmp_src.parent.mkdir(parents=True, exist_ok=True)
+    tmp_src.write_text((REPO_ROOT / src_rel).read_text(encoding="utf-8"), encoding="utf-8")
+
+    counter = 0
+    real_render = sync_mod.render
+
+    def mutating_render(text: str) -> str:
+        nonlocal counter
+        counter += 1
+        tmp_src.write_text(f"# constantly mutating source pass {counter}\n", encoding="utf-8")
+        return real_render(text)
+
+    monkeypatch.setattr(sync_mod, "render", mutating_render)
+
+    assert sync_mod.main(["--root", str(tmp_path)]) == 1
+    captured = capsys.readouterr()
+    assert "rerun scripts/sync-integration-config.py" in captured.err
+
+
+def test_every_target_ships_in_wheel(tmp_path: Path):
+    """Each target package's built wheel must contain its _user_config.py copy."""
+    uv_bin = shutil.which("uv")
+    assert uv_bin is not None, "uv executable not found on PATH"
+
+    for target in sync_mod.TARGETS:
+        package_dir = REPO_ROOT / target.parent.parent
+        out_dir = tmp_path / target.parent.parent.name
+        # check=False so a failed build shows uv's stderr instead of a bare CalledProcessError.
+        build = subprocess.run(
+            [uv_bin, "build", "--wheel", "--out-dir", str(out_dir), str(package_dir)],
+            check=False,
+            capture_output=True,
+            text=True,
         )
-        assert target.parent.name in wheel_packages, (
-            f"target parent dir {target.parent.name!r} not in {pyproject_path} wheel packages: {wheel_packages}"
-        )
+        assert build.returncode == 0, f"uv build {package_dir} failed:\n{build.stderr}"
+        wheels = list(out_dir.glob("*.whl"))
+        assert len(wheels) == 1, f"expected 1 wheel in {out_dir}, found {len(wheels)}"
+        with zipfile.ZipFile(wheels[0]) as zf:
+            assert f"{target.parent.name}/_user_config.py" in zf.namelist()
 
 
 def test_every_config_imports_user_config():
