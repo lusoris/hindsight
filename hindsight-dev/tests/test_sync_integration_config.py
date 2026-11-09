@@ -11,15 +11,15 @@ from __future__ import annotations
 
 import importlib.util
 import os
-import shutil
 import stat
-import subprocess
 import sys
+import tomllib
 import zipfile
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+from hatchling.build import build_wheel
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT_PATH = REPO_ROOT / "scripts" / "sync-integration-config.py"
@@ -237,25 +237,25 @@ def test_source_that_never_settles_fails(tmp_path: Path, monkeypatch, capsys):
     assert "rerun scripts/sync-integration-config.py" in captured.err
 
 
-def test_every_target_ships_in_wheel(tmp_path: Path):
+def test_every_target_ships_in_wheel(tmp_path: Path, monkeypatch):
     """Each target package's built wheel must contain its _user_config.py copy."""
-    uv_bin = shutil.which("uv")
-    assert uv_bin is not None, "uv executable not found on PATH"
-
+    # Built in-process through hatchling's PEP 517 build_wheel hook, the build backend every
+    # target declares (asserted below), so it runs the same backend a release build does. This ran
+    # `uv build --wheel` in a subprocess before; Bandit (B404, B603) and Opengrep flagged the
+    # child process, and the in-process hook needs none.
     for target in sync_mod.TARGETS:
         package_dir = REPO_ROOT / target.parent.parent
-        out_dir = tmp_path / target.parent.parent.name
-        # check=False so a failed build shows uv's stderr instead of a bare CalledProcessError.
-        build = subprocess.run(
-            [uv_bin, "build", "--wheel", "--out-dir", str(out_dir), str(package_dir)],
-            check=False,
-            capture_output=True,
-            text=True,
+        pyproject_path = package_dir / "pyproject.toml"
+        with open(pyproject_path, "rb") as f:
+            pyproject = tomllib.load(f)
+        assert pyproject.get("build-system", {}).get("build-backend") == "hatchling.build", (
+            f"expected build-backend 'hatchling.build' in {pyproject_path}"
         )
-        assert build.returncode == 0, f"uv build {package_dir} failed:\n{build.stderr}"
-        wheels = list(out_dir.glob("*.whl"))
-        assert len(wheels) == 1, f"expected 1 wheel in {out_dir}, found {len(wheels)}"
-        with zipfile.ZipFile(wheels[0]) as zf:
+        monkeypatch.chdir(package_dir)
+        out_dir = tmp_path / target.parent.parent.name
+        out_dir.mkdir()
+        wheel_name = build_wheel(str(out_dir))
+        with zipfile.ZipFile(out_dir / wheel_name) as zf:
             assert f"{target.parent.name}/_user_config.py" in zf.namelist()
 
 

@@ -24,6 +24,9 @@ test = [
     # tests/test_root_ruff_src.py reads the CI paths filter from .github/workflows/test.yml,
     # and tests/test_scanner_suppressions_workflow.py reads the suppression job's wiring.
     "pyyaml>=6.0",
+    # tests/test_sync_integration_config.py builds each integration wheel in-process through
+    # hatchling's PEP 517 hook (the integrations' build backend) instead of `uv build` in a subprocess.
+    "hatchling>=1.33.0",
 ]
 
 [tool.hatch.build.targets.wheel]
