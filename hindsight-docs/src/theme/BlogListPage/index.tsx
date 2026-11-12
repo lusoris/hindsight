@@ -1,11 +1,11 @@
 import React, {useEffect, useMemo, useRef, useState} from 'react';
 import {flushSync} from 'react-dom';
 import clsx from 'clsx';
-import Link from '@docusaurus/Link';
 import Layout from '@theme/Layout';
 import {useLocation, useHistory} from '@docusaurus/router';
 import type {Props} from '@theme/BlogListPage';
 import type {PropBlogPostContent} from '@docusaurus/plugin-content-blog';
+import BlogCard from '@site/src/components/BlogCard';
 import PageHero from '@site/src/components/PageHero';
 import featured from '@site/src/data/featured-posts.json';
 import styles from './styles.module.css';
@@ -46,51 +46,10 @@ function cardTransitionName(permalink: string): string {
   return `post-${permalink.replace(/[^a-zA-Z0-9-]/g, '-')}`;
 }
 
-function formatDate(dateString: string): string {
-  const date = new Date(dateString);
-  return date.toLocaleDateString('en-US', {month: 'short', day: 'numeric', year: 'numeric'});
-}
-
 // First category (skipping "All") whose tag the post carries, for the card badge.
 function categoryLabelFor(content: PropBlogPostContent): string | null {
   const match = CATEGORIES.find((cat) => cat.tag && postHasTag(content, cat.tag));
   return match ? match.label : null;
-}
-
-// `animate` is off for the featured copy: the same post also sits in the grid, and two
-// elements sharing a view-transition-name make the browser skip the whole transition.
-function BlogCard({content, animate = true}: {content: PropBlogPostContent; animate?: boolean}) {
-  const {metadata, assets} = content;
-  const {title, description, date, readingTime, permalink, frontMatter} = metadata;
-  const image = assets.image ?? frontMatter.image ?? '/img/blog-default.jpg';
-  const categoryLabel = categoryLabelFor(content);
-
-  return (
-    <Link
-      to={permalink}
-      className={styles.card}
-      style={animate ? {viewTransitionName: cardTransitionName(permalink)} : undefined}
-    >
-      <div className={styles.cardImageWrapper}>
-        {image ? (
-          <img src={image} alt={title} className={styles.cardImage} />
-        ) : (
-          <div className={styles.cardImagePlaceholder} />
-        )}
-      </div>
-      <div className={styles.cardBody}>
-        {categoryLabel && <span className={styles.cardBadge}>{categoryLabel}</span>}
-        <h2 className={styles.cardTitle}>{title}</h2>
-        {description && <p className={styles.cardDescription}>{description}</p>}
-        <div className={styles.cardFooter}>
-          <span className={styles.cardDate}>{formatDate(date)}</span>
-          {readingTime !== undefined && (
-            <span className={styles.cardReadTime}>{Math.ceil(readingTime)} min read</span>
-          )}
-        </div>
-      </div>
-    </Link>
-  );
 }
 
 function postHasTag(content: PropBlogPostContent, tag: string): boolean {
@@ -184,7 +143,14 @@ export default function BlogListPage({items, metadata}: Props): React.ReactEleme
             </div>
             <div className={styles.grid}>
               {featuredItems.map(({content: BlogPostContent}) => (
-                <BlogCard key={BlogPostContent.metadata.permalink} content={BlogPostContent} animate={false} />
+                // Omit viewTransitionName on the featured copy: the same post also sits in the
+                // grid, and two elements sharing a view-transition-name make the browser skip
+                // the whole transition.
+                <BlogCard
+                  key={BlogPostContent.metadata.permalink}
+                  content={BlogPostContent}
+                  categoryLabel={categoryLabelFor(BlogPostContent)}
+                />
               ))}
             </div>
           </section>
@@ -224,7 +190,12 @@ export default function BlogListPage({items, metadata}: Props): React.ReactEleme
           <section className={styles.section}>
             <div className={styles.grid}>
               {visiblePosts.map(({content: BlogPostContent}) => (
-                <BlogCard key={BlogPostContent.metadata.permalink} content={BlogPostContent} />
+                <BlogCard
+                  key={BlogPostContent.metadata.permalink}
+                  content={BlogPostContent}
+                  categoryLabel={categoryLabelFor(BlogPostContent)}
+                  viewTransitionName={cardTransitionName(BlogPostContent.metadata.permalink)}
+                />
               ))}
             </div>
           </section>
