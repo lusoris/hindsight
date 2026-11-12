@@ -1139,10 +1139,10 @@ A document file:
 | `entities` | Optional entity names, resolved against the bank's existing entities. |
 | `causal_relations` | Optional. `[{"relation_type": "caused_by", "target_fact_index": N}]`, where `N` is the position of another fact in the same document's `facts` list. |
 | `provenance_class`, `record_status` | Optional record contract. `provenance_class` is one of `tool-run`, `file-read`, `recalled`, `inferred` (default `inferred`); `record_status` is one of `active`, `stale`, `disputed`, `tombstoned` (default `active`). |
-| `observed_at`, `fetched_at`, `ttl_seconds` | Optional freshness. ISO 8601 times and a time-to-live in seconds; recall flags the memory [`is_stale`](./recall.md#is_stale) once `ttl_seconds` have passed since `fetched_at`, or at once when `ttl_seconds` is set without `fetched_at`. |
+| `observed_at`, `fetched_at`, `ttl_seconds` | Optional freshness. ISO 8601 times and a time-to-live in seconds, from 0 to 2147483647; recall flags the memory [`is_stale`](./recall.md#is_stale) once `ttl_seconds` have passed since `fetched_at`, or at once when `ttl_seconds` is set without `fetched_at`. |
 | `write_authority`, `scope`, `reset_condition` | Optional strings, stored as given. |
 
-Metadata and dates live on each fact; a document carries no metadata or timestamp of its own. Re-sending a document id follows `document_conflict` (`replace` to overwrite it). An export writes the record contract on every fact and observation, so a moved or cloned bank keeps each memory's status and time-to-live.
+Metadata and dates live on each fact; a document carries no metadata or timestamp of its own. Re-sending a document id follows `document_conflict` (`replace` to overwrite it). An export writes the record contract on every fact and observation, so a moved or cloned bank keeps each memory's status and time-to-live. An instance on a release from before these fields ignores them on import and stores every memory as `active` and `inferred`, with no time-to-live.
 
 ### Python
 

@@ -15,10 +15,11 @@ import io
 import json
 import logging
 import zipfile
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
+from functools import partial
 from typing import Any
 from uuid import UUID
 
@@ -44,6 +45,7 @@ from .schema import (
     TransferManifest,
     TransferObservation,
     TransferObservationSource,
+    TransferRecordContract,
     TransferScope,
     TransferScopeManifest,
     standalone_mental_models,
@@ -196,6 +198,22 @@ def _chunk_index_from_chunk_id(chunk_id: str | None) -> int | None:
         return int(chunk_id.rsplit("_", 1)[1])
     except (IndexError, ValueError):
         return None
+
+
+def _record_contract(source: object) -> TransferRecordContract:
+    """The record contract a stored memory (or a ``memory_units`` row, as a mapping) carries.
+
+    Every exported fact and observation takes it, always, not gated by include_lifecycle:
+    a moved or cloned bank has to keep each record's status and TTL. Reading the fields
+    by the model's own field names keeps the four loaders (store and SQL, facts and
+    observations) from each listing the eight of them.
+    """
+    read = source.__getitem__ if isinstance(source, Mapping) else partial(getattr, source)
+    # Each field is read without a default, so a loader whose SELECT (or a store whose
+    # record) lacks a contract column raises here. model_validate(from_attributes=True)
+    # was tried first and filled the gap with "inferred"/"active", exporting the column
+    # default as if it were the record's own.
+    return TransferRecordContract(**{name: read(name) for name in TransferRecordContract.model_fields})
 
 
 def _resolve_memories(memories: Any) -> Any:
@@ -1239,15 +1257,7 @@ async def _load_facts_from_store(
                 created_at=memory.created_at if include_lifecycle else None,
                 consolidated_at=memory.consolidated_at if include_lifecycle else None,
                 consolidation_failed_at=None,
-                # Record contract is carried always, not gated by include_lifecycle.
-                provenance_class=memory.provenance_class,
-                write_authority=memory.write_authority,
-                observed_at=memory.observed_at,
-                fetched_at=memory.fetched_at,
-                ttl_seconds=memory.ttl_seconds,
-                scope=memory.scope,
-                reset_condition=memory.reset_condition,
-                record_status=memory.record_status,
+                **_record_contract(memory).model_dump(),
             )
         )
         loaded.unit_index[memory.unit_id] = _UnitLocation(document_id=memory.document_id, ordinal=ordinal)
@@ -1327,15 +1337,7 @@ async def _load_observations_from_store(
                     for loc in locations
                     if loc is not None
                 ],
-                # Record contract is carried always, not gated by include_lifecycle.
-                provenance_class=memory.provenance_class,
-                write_authority=memory.write_authority,
-                observed_at=memory.observed_at,
-                fetched_at=memory.fetched_at,
-                ttl_seconds=memory.ttl_seconds,
-                scope=memory.scope,
-                reset_condition=memory.reset_condition,
-                record_status=memory.record_status,
+                **_record_contract(memory).model_dump(),
             )
         )
     if skipped:

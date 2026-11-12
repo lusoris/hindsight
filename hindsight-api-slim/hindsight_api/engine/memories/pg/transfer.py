@@ -29,6 +29,7 @@ from ...transfer.export import (
     _iter_id_batches,
     _LoadedExport,
     _LoadedFacts,
+    _record_contract,
     _UnitLocation,
 )
 from ...transfer.importer import (
@@ -190,15 +191,7 @@ async def load_observations(
                     for loc in locations
                     if loc is not None
                 ],
-                # Record contract is carried always, not gated by include_lifecycle.
-                provenance_class=row["provenance_class"],
-                write_authority=row["write_authority"],
-                observed_at=row["observed_at"],
-                fetched_at=row["fetched_at"],
-                ttl_seconds=row["ttl_seconds"],
-                scope=row["scope"],
-                reset_condition=row["reset_condition"],
-                record_status=row["record_status"],
+                **_record_contract(dict(row)).model_dump(),
             )
         )
     if skipped:
@@ -282,15 +275,7 @@ async def _load_facts(
             created_at=row["created_at"] if include_lifecycle else None,
             consolidated_at=row["consolidated_at"] if include_lifecycle else None,
             consolidation_failed_at=row["consolidation_failed_at"] if include_lifecycle else None,
-            # Record contract is carried always, not gated by include_lifecycle.
-            provenance_class=row["provenance_class"],
-            write_authority=row["write_authority"],
-            observed_at=row["observed_at"],
-            fetched_at=row["fetched_at"],
-            ttl_seconds=row["ttl_seconds"],
-            scope=row["scope"],
-            reset_condition=row["reset_condition"],
-            record_status=row["record_status"],
+            **_record_contract(dict(row)).model_dump(),
         )
         bucket.append(fact)
         loaded.unit_index[row["id"]] = _UnitLocation(document_id=doc_id, ordinal=ordinal)

@@ -5,6 +5,7 @@ behaviour, synchronisation between schema Literal types and engine valid tuple
 constants, and field propagation by _apply_record_contract and build_fact_records.
 """
 
+import dataclasses
 import typing
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -20,9 +21,10 @@ from hindsight_api.engine.memories.base import (
 )
 from hindsight_api.engine.memories.pg import transfer as pg_transfer
 from hindsight_api.engine.retain.types import ProcessedFact, pack_embedding
-from hindsight_api.engine.transfer.export import _UnitLocation
+from hindsight_api.engine.transfer.export import _record_contract, _UnitLocation
 from hindsight_api.engine.transfer.importer import _apply_record_contract
 from hindsight_api.engine.transfer.schema import (
+    TTL_SECONDS_MAX,
     ProvenanceClass,
     RecordStatus,
     TransferFact,
@@ -115,6 +117,83 @@ def test_record_contract_dates_normalized_on_fact_and_observation() -> None:
     )
     assert obs_placeholder.observed_at is None
     assert obs_placeholder.fetched_at is None
+
+
+@pytest.mark.parametrize("model", [TransferFact, TransferObservation])
+def test_ttl_seconds_bounded_to_the_column_range(model: type[TransferRecordContract]) -> None:
+    """An archive cannot carry a TTL that reads as stale forever or that the INTEGER column cannot hold."""
+    base = {"text": "t", "fact_type": "world"}
+    for ok in (0, 3600, TTL_SECONDS_MAX):
+        assert model.model_validate({**base, "ttl_seconds": ok}).ttl_seconds == ok
+    for bad in (-1, TTL_SECONDS_MAX + 1):
+        with pytest.raises(pydantic.ValidationError, match="ttl_seconds"):
+            model.model_validate({**base, "ttl_seconds": bad})
+
+
+@dataclass
+class _StoredMemory:
+    """The attribute shape of a store's memory, plus a field the contract does not own."""
+
+    text: str
+    provenance_class: str
+    write_authority: str | None
+    observed_at: datetime | None
+    fetched_at: datetime | None
+    ttl_seconds: int | None
+    scope: str | None
+    reset_condition: str | None
+    record_status: str
+
+
+def test_export_record_contract_reads_attribute_and_mapping_sources() -> None:
+    """The export helper takes all eight fields from a store memory and from a SQL row alike."""
+    t_observed = datetime(2026, 3, 2, 11, 0, 0, tzinfo=timezone.utc)
+    t_fetched = datetime(2026, 3, 2, 11, 15, 0, tzinfo=timezone.utc)
+    stored = _StoredMemory(
+        text="t",
+        provenance_class="tool-run",
+        write_authority="agent:v1",
+        observed_at=t_observed,
+        fetched_at=t_fetched,
+        ttl_seconds=60,
+        scope="repo",
+        reset_condition="on-commit",
+        record_status="tombstoned",
+    )
+    expected = {
+        "provenance_class": "tool-run",
+        "write_authority": "agent:v1",
+        "observed_at": t_observed,
+        "fetched_at": t_fetched,
+        "ttl_seconds": 60,
+        "scope": "repo",
+        "reset_condition": "on-commit",
+        "record_status": "tombstoned",
+    }
+    assert _record_contract(stored).model_dump() == expected
+    assert _record_contract(dataclasses.asdict(stored)).model_dump() == expected
+
+
+def test_export_record_contract_refuses_a_source_missing_a_column() -> None:
+    """A loader that stops selecting a contract column fails loudly instead of exporting the default."""
+    row = {
+        "provenance_class": "tool-run",
+        "write_authority": None,
+        "observed_at": None,
+        "fetched_at": None,
+        "ttl_seconds": None,
+        "scope": None,
+        "reset_condition": None,
+    }
+    with pytest.raises(KeyError, match="record_status"):
+        _record_contract(row)
+
+    @dataclass
+    class _NoStatus:
+        provenance_class: str = "tool-run"
+
+    with pytest.raises(AttributeError):
+        _record_contract(_NoStatus())
 
 
 def test_record_contract_literals_in_sync_with_base_tuples() -> None:

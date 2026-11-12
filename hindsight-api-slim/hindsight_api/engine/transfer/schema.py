@@ -122,6 +122,8 @@ ObservationScopes = Literal["per_tag", "combined", "all_combinations", "shared"]
 ProvenanceClass = Literal["tool-run", "file-read", "recalled", "inferred"]
 RecordStatus = Literal["active", "stale", "disputed", "tombstoned"]
 BankRowsJSONEncoding = Literal["decoded", "serialized"]
+# memory_units.ttl_seconds is INTEGER on Postgres (NUMBER(10) on Oracle, which is wider).
+TTL_SECONDS_MAX = 2_147_483_647
 
 
 class TransferRecordContract(BaseModel):
@@ -138,7 +140,10 @@ class TransferRecordContract(BaseModel):
     write_authority: str | None = None
     observed_at: datetime | None = None
     fetched_at: datetime | None = None
-    ttl_seconds: int | None = None
+    # An import is the only API path that writes ttl_seconds, so the range is
+    # checked here, before anything is written: a negative TTL would read as
+    # stale forever, and a value past the Postgres INTEGER column cannot be stored.
+    ttl_seconds: int | None = Field(default=None, ge=0, le=TTL_SECONDS_MAX)
     scope: str | None = None
     reset_condition: str | None = None
     record_status: RecordStatus = "active"
