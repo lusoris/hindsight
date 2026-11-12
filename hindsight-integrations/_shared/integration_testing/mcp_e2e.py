@@ -25,6 +25,8 @@ import pytest
 
 HINDSIGHT_API_URL: str = os.getenv("HINDSIGHT_API_URL", "http://localhost:8888")
 HINDSIGHT_API_TOKEN: str | None = os.getenv("HINDSIGHT_API_TOKEN")
+# The tools a coding agent's MCP endpoint has to list (hindsight_api/mcp_tools.py names).
+_MEMORY_TOOLS: frozenset[str] = frozenset({"recall", "retain"})
 
 
 @dataclass(frozen=True)
@@ -84,8 +86,16 @@ def _parse_http_url(url: str) -> _ParsedUrl:
     )
 
 
+# Credentials that must never reach another origin on a redirect: the bearer token and
+# the MCP session id. The session id is a credential too, since whoever holds it can
+# act in that session, so it is dropped together with Authorization. The fetch spec's
+# redirect step removes only Authorization, its one CORS non-wildcard request-header name.
+# Compared lowercased: urllib stores header names capitalize()d ("Mcp-session-id").
+_CROSS_ORIGIN_DROPPED_HEADERS: frozenset[str] = frozenset({"authorization", "mcp-session-id"})
+
+
 class _McpRedirectHandler(urllib.request.HTTPRedirectHandler):
-    """Redirect handler keeping POST on 307/308 and dropping cross-origin Authorization."""
+    """Redirect handler keeping POST on 307/308 and dropping credentials cross-origin."""
 
     def redirect_request(
         self,
@@ -108,7 +118,8 @@ class _McpRedirectHandler(urllib.request.HTTPRedirectHandler):
             forwarded_headers = {
                 key: value
                 for key, value in req.headers.items()
-                if key.lower() != "content-length" and not (cross_origin and key.lower() == "authorization")
+                if key.lower() != "content-length"
+                and not (cross_origin and key.lower() in _CROSS_ORIGIN_DROPPED_HEADERS)
             }
             return urllib.request.Request(
                 newurl,
@@ -121,7 +132,12 @@ class _McpRedirectHandler(urllib.request.HTTPRedirectHandler):
 
         redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
         if redirected is not None and cross_origin:
-            redirected.remove_header("Authorization")
+            # remove_header matches the stored key exactly, so look the keys up
+            # case-insensitively instead of guessing urllib's capitalisation.
+            # header_items() returns a fresh list, so removing while looping is safe.
+            for name, _value in redirected.header_items():
+                if name.lower() in _CROSS_ORIGIN_DROPPED_HEADERS:
+                    redirected.remove_header(name)
         return redirected
 
 
@@ -146,7 +162,8 @@ def _build_opener() -> urllib.request.OpenerDirector:
 # opens to http and https. ProxyHandler and redirect handling match main's
 # urlopen behaviour for HTTP(S)_PROXY/NO_PROXY and 3xx responses; the 307/308
 # override in _McpRedirectHandler preserves POST method, body and headers
-# (dropping Authorization when scheme, host or port changes) because stdlib
+# (dropping Authorization and Mcp-Session-Id when scheme, host or port changes,
+# on every redirect it follows) because stdlib
 # HTTPRedirectHandler raises HTTPError on POST 307/308 instead of following
 # Starlette's slash redirect as fetch and the MCP SDK clients do.
 _OPENER: urllib.request.OpenerDirector = _build_opener()
@@ -218,31 +235,75 @@ def _extract_last_sse_data(text: str) -> str | None:
     return events[-1] if events else None
 
 
-def parse_reply(resp: RpcResponse) -> JsonRpcReply:
-    """Decode an ``application/json`` or ``text/event-stream`` MCP JSON-RPC response."""
+def _message_json(resp: RpcResponse) -> str | None:
+    """The JSON-RPC message text of an ``application/json`` or ``text/event-stream`` response, or None."""
     text = resp.body.decode("utf-8", "replace")
     content_type = resp.headers.get_content_type()
     if content_type == "application/json":
-        raw_json: str | None = text.strip() or None
-    elif content_type == "text/event-stream":
-        raw_json = _extract_last_sse_data(text)
-    else:
-        raw_json = None
+        return text.strip() or None
+    if content_type == "text/event-stream":
+        return _extract_last_sse_data(text)
+    return None
 
+
+def _decode_json(raw_json: str) -> object:
     # Raise AssertionError explicitly because this helper module does not match
     # test_*.py (pytest skips assertion rewriting here and Bandit B101 flags assert).
-    if raw_json is None:
-        raise AssertionError(f"MCP response carried no JSON-RPC message ({content_type}): {text[:300]}")
     try:
-        decoded = json.loads(raw_json)
+        return json.loads(raw_json)
     except json.JSONDecodeError as exc:
         raise AssertionError(f"Invalid JSON in MCP response: {raw_json[:300]}") from exc
+
+
+def parse_reply(resp: RpcResponse, request_id: int) -> JsonRpcReply:
+    """Decode the MCP JSON-RPC 2.0 reply to the request ``request_id`` (JSON or SSE body).
+
+    Accepts only a reply object that says ``"jsonrpc": "2.0"`` and carries the request's
+    id, so a stray message or another request's reply on the stream cannot pass.
+    """
+    raw_json = _message_json(resp)
+    if raw_json is None:
+        raise AssertionError(
+            f"MCP response carried no JSON-RPC message ({resp.headers.get_content_type()}): "
+            f"{resp.body.decode('utf-8', 'replace')[:300]}"
+        )
+    decoded = _decode_json(raw_json)
     if not isinstance(decoded, Mapping) or ("result" not in decoded and "error" not in decoded):
         raise AssertionError(f"MCP response carried no JSON-RPC reply object: {raw_json[:300]}")
+    if decoded.get("jsonrpc") != "2.0":
+        raise AssertionError(f"MCP reply is not JSON-RPC 2.0: {raw_json[:300]}")
+    reply_id = decoded.get("id")
+    # bool is an int subclass and True == 1, so a reply id of true would otherwise
+    # match request 1.
+    if isinstance(reply_id, bool) or reply_id != request_id:
+        raise AssertionError(f"MCP reply id {reply_id!r} does not match request id {request_id}: {raw_json[:300]}")
     return JsonRpcReply(
         result=decoded["result"] if "result" in decoded else None,
         error=decoded["error"] if "error" in decoded else None,
     )
+
+
+def _assert_notification_accepted(resp: RpcResponse) -> None:
+    """Fail when the response to a JSON-RPC notification carries a JSON-RPC error.
+
+    A notification gets no reply, so Streamable HTTP answers 202 with an empty body and
+    that passes. A server that rejects the notification can still answer HTTP 200 with
+    an error object, which has to fail the handshake instead of being ignored.
+    """
+    raw_json = _message_json(resp)
+    if raw_json is None:
+        return
+    decoded = _decode_json(raw_json)
+    if isinstance(decoded, Mapping) and "error" in decoded:
+        raise AssertionError(f"MCP notification rejected (error={decoded['error']!r}): {raw_json[:300]}")
+
+
+def _tool_names(result: object) -> frozenset[str]:
+    """The ``name`` of every tool in a ``tools/list`` result, ignoring malformed entries."""
+    tools = result.get("tools") if isinstance(result, Mapping) else None
+    if not isinstance(tools, list):
+        return frozenset()
+    return frozenset(tool["name"] for tool in tools if isinstance(tool, Mapping) and isinstance(tool.get("name"), str))
 
 
 def assert_lists_memory_tools(url: str, client_name: str) -> None:
@@ -260,21 +321,24 @@ def assert_lists_memory_tools(url: str, client_name: str) -> None:
             },
         ),
     )
-    init_reply = parse_reply(init_resp)
+    init_reply = parse_reply(init_resp, request_id=1)
     if init_reply.error is not None or init_reply.result is None:
         raise AssertionError(f"MCP initialize failed (error={init_reply.error!r}, result={init_reply.result!r})")
     session = init_resp.headers.get("Mcp-Session-Id")
 
     # 2) initialized notification (required before normal requests)
-    rpc(url, JsonRpcRequest(method="notifications/initialized"), session=session)
+    _assert_notification_accepted(rpc(url, JsonRpcRequest(method="notifications/initialized"), session=session))
 
     # 3) tools/list -> should surface the memory tools
     resp = rpc(url, JsonRpcRequest(method="tools/list", id=2), session=session)
-    tools_reply = parse_reply(resp)
+    tools_reply = parse_reply(resp, request_id=2)
     if tools_reply.error is not None or tools_reply.result is None:
         raise AssertionError(f"MCP tools/list failed (error={tools_reply.error!r}, result={tools_reply.result!r})")
-    text = resp.body.decode("utf-8", "replace")
+    # Exact tool names rather than a substring search of the body, so a description
+    # or error text mentioning "recall" cannot stand in for the tool itself.
+    names = _tool_names(tools_reply.result)
+    missing = sorted(_MEMORY_TOOLS - names)
     # Raise AssertionError explicitly because this helper module does not match
     # test_*.py (pytest skips assertion rewriting here and Bandit B101 flags assert).
-    if not ("recall" in text and "retain" in text):
-        raise AssertionError(f"tools/list did not surface memory tools: {text[:300]}")
+    if missing:
+        raise AssertionError(f"tools/list did not surface memory tools {missing}; listed: {sorted(names)}")

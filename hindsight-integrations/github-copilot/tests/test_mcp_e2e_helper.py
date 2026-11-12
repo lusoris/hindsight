@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import re
 import socket
 import socketserver
 import threading
@@ -14,8 +15,9 @@ from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
-import integration_testing.mcp_e2e as mcp_e2e
 import pytest
+
+import integration_testing.mcp_e2e as mcp_e2e
 
 _PROXY_ENV_VARS: tuple[str, ...] = (
     "HTTP_PROXY",
@@ -96,6 +98,9 @@ class StubServer:
             "result": {"tools": [{"name": "recall"}, {"name": "retain"}]},
         }
     )
+    initialized_reply: StubReply = field(
+        default_factory=lambda: StubReply(status=202, content_type="text/plain", body=b"")
+    )
     route_overrides: dict[str, StubReply] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
     requests: list[RecordedRequest] = field(default_factory=list)
@@ -113,6 +118,30 @@ class _DaemonThreadingHTTPServer(ThreadingHTTPServer):
 
 class _IPv6ThreadingHTTPServer(_DaemonThreadingHTTPServer):
     address_family = socket.AF_INET6
+
+
+def _route_reply(stub: StubServer, command: str, route_path: str, body: bytes) -> StubReply:
+    """The scripted reply for one request: a route override, /health, the MCP handshake, or 404."""
+    override = stub.route_overrides.get(route_path)
+    if override is not None:
+        return override
+    if command == "GET" and route_path == "/health":
+        return stub.health_reply
+    if command == "POST" and route_path == "/mcp/":
+        method = json.loads(body.decode("utf-8")).get("method")
+        if method == "initialize":
+            base = _encode_mcp_payload(stub.init_payload, stub.response_mode)
+            return StubReply(
+                status=base.status,
+                content_type=base.content_type,
+                body=base.body,
+                session_id=stub.session_id,
+            )
+        if method == "notifications/initialized":
+            return stub.initialized_reply
+        if method == "tools/list":
+            return _encode_mcp_payload(stub.tools_payload, stub.response_mode)
+    return StubReply(status=404, content_type="text/plain", body=b"not found")
 
 
 def _make_handler(state_box: list[StubServer]) -> type[BaseHTTPRequestHandler]:
@@ -144,39 +173,7 @@ def _make_handler(state_box: list[StubServer]) -> type[BaseHTTPRequestHandler]:
             )
             with stub.lock:
                 stub.requests.append(recorded)
-
-            route_path = urlsplit(self.path).path
-            override = stub.route_overrides.get(route_path)
-            if override is not None:
-                self._send(override)
-                return
-
-            if self.command == "GET" and route_path == "/health":
-                self._send(stub.health_reply)
-                return
-
-            if self.command == "POST" and route_path == "/mcp/":
-                decoded = json.loads(body.decode("utf-8"))
-                method = decoded.get("method")
-                if method == "initialize":
-                    base = _encode_mcp_payload(stub.init_payload, stub.response_mode)
-                    self._send(
-                        StubReply(
-                            status=base.status,
-                            content_type=base.content_type,
-                            body=base.body,
-                            session_id=stub.session_id,
-                        )
-                    )
-                    return
-                if method == "notifications/initialized":
-                    self._send(StubReply(status=202, content_type="text/plain", body=b""))
-                    return
-                if method == "tools/list":
-                    self._send(_encode_mcp_payload(stub.tools_payload, stub.response_mode))
-                    return
-
-            self._send(StubReply(status=404, content_type="text/plain", body=b"not found"))
+            self._send(_route_reply(stub, self.command, urlsplit(self.path).path, body))
 
         def do_GET(self) -> None:
             self._dispatch()
@@ -184,7 +181,9 @@ def _make_handler(state_box: list[StubServer]) -> type[BaseHTTPRequestHandler]:
         def do_POST(self) -> None:
             self._dispatch()
 
-        def log_message(self, format: str, *args: object) -> None:
+        # Variadic so the override neither shadows the builtin `format` (the stdlib's
+        # parameter name) nor renames it; the stub stays silent either way.
+        def log_message(self, *args: object) -> None:
             return
 
     return _Handler
@@ -287,11 +286,11 @@ def test_redirects_followed_for_health_302_and_post_307(
     ]
 
 
-def test_redirect_307_drops_authorization_cross_origin_and_keeps_same_origin(
+def test_redirect_307_drops_credentials_cross_origin_and_keeps_same_origin(
     stub_server: StubServer,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """(c) A 307 to another port strips Authorization while a same-origin 307 keeps it."""
+    """(c) A 307 to another port strips Authorization and Mcp-Session-Id; a same-origin 307 keeps both."""
     monkeypatch.setattr(mcp_e2e, "HINDSIGHT_API_TOKEN", "secret-bearer-token")
     stub_server.route_overrides["/mcp"] = StubReply(status=307, content_type=None, location="/mcp/")
 
@@ -299,6 +298,9 @@ def test_redirect_307_drops_authorization_cross_origin_and_keeps_same_origin(
     assert len(stub_server.requests) == 6
     for req in stub_server.requests:
         assert req.header("Authorization") == "Bearer secret-bearer-token"
+    # initialize carries no session yet; initialized and tools/list keep it across the same-origin hop.
+    for req in stub_server.requests[2:]:
+        assert req.header("Mcp-Session-Id") == stub_server.session_id
 
     stub_server.requests.clear()
     with _running_stub() as other_stub:
@@ -312,8 +314,45 @@ def test_redirect_307_drops_authorization_cross_origin_and_keeps_same_origin(
         assert len(other_stub.requests) == 3
         for first_hop in stub_server.requests:
             assert first_hop.header("Authorization") == "Bearer secret-bearer-token"
+        for first_hop in stub_server.requests[1:]:
+            assert first_hop.header("Mcp-Session-Id") == other_stub.session_id
         for redirected in other_stub.requests:
             assert redirected.header("Authorization") is None
+            assert redirected.header("Mcp-Session-Id") is None
+
+
+def test_redirect_303_to_get_drops_credentials_cross_origin_and_keeps_same_origin(
+    stub_server: StubServer,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A POST answered 303 becomes a GET (stdlib branch); cross-origin it carries no credentials."""
+    monkeypatch.setattr(mcp_e2e, "HINDSIGHT_API_TOKEN", "secret-bearer-token")
+    request = mcp_e2e.JsonRpcRequest(method="tools/list", id=2)
+    landing = StubReply(status=200, content_type="application/json", body=b"{}")
+
+    stub_server.route_overrides["/mcp-303"] = StubReply(status=303, content_type=None, location="/landing")
+    stub_server.route_overrides["/landing"] = landing
+    mcp_e2e.rpc(f"{stub_server.base_url}/mcp-303", request, session="sess-same")
+    first_hop, same_origin = stub_server.requests
+    assert (first_hop.method, same_origin.method) == ("POST", "GET")
+    assert same_origin.header("Authorization") == "Bearer secret-bearer-token"
+    assert same_origin.header("Mcp-Session-Id") == "sess-same"
+
+    stub_server.requests.clear()
+    with _running_stub() as other_stub:
+        other_stub.route_overrides["/landing"] = landing
+        stub_server.route_overrides["/mcp-303-cross"] = StubReply(
+            status=303,
+            content_type=None,
+            location=f"{other_stub.base_url}/landing",
+        )
+        mcp_e2e.rpc(f"{stub_server.base_url}/mcp-303-cross", request, session="sess-cross")
+        assert stub_server.requests[0].header("Authorization") == "Bearer secret-bearer-token"
+        assert stub_server.requests[0].header("Mcp-Session-Id") == "sess-cross"
+        (redirected,) = other_stub.requests
+        assert redirected.method == "GET"
+        assert redirected.header("Authorization") is None
+        assert redirected.header("Mcp-Session-Id") is None
 
 
 def test_ipv6_loopback_reaches_server_with_bracketed_host(
@@ -407,6 +446,63 @@ def test_tools_list_jsonrpc_error_and_null_result_raise(stub_server: StubServer)
         mcp_e2e.assert_lists_memory_tools(f"{stub_server.base_url}/mcp/", "copilot-e2e")
 
 
+@pytest.mark.parametrize(
+    ("tools", "missing"),
+    [
+        ([{"name": "hindsight_recall", "description": "recall and retain memories"}], "['recall', 'retain']"),
+        ([{"name": "recall"}, {"description": "retain"}], "['retain']"),
+        ({"recall": {}, "retain": {}}, "['recall', 'retain']"),
+    ],
+)
+def test_tools_list_requires_exact_tool_names(stub_server: StubServer, tools: object, missing: str) -> None:
+    """Text that mentions recall/retain without tools of those exact names does not pass."""
+    stub_server.tools_payload = {"jsonrpc": "2.0", "id": 2, "result": {"tools": tools}}
+    with pytest.raises(AssertionError, match=f"did not surface memory tools {re.escape(missing)}"):
+        mcp_e2e.assert_lists_memory_tools(f"{stub_server.base_url}/mcp/", "copilot-e2e")
+
+
+def test_initialized_notification_error_raises_and_empty_reply_passes(stub_server: StubServer) -> None:
+    """A JSON-RPC error answering notifications/initialized fails even with HTTP 200; an empty reply passes."""
+    stub_server.initialized_reply = StubReply(
+        status=200,
+        content_type="application/json",
+        body=b'{"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "session not initialized"}}',
+    )
+    with pytest.raises(AssertionError, match="notification rejected.*session not initialized"):
+        mcp_e2e.assert_lists_memory_tools(f"{stub_server.base_url}/mcp/", "copilot-e2e")
+
+    stub_server.initialized_reply = StubReply(status=200, content_type="application/json", body=b"")
+    mcp_e2e.assert_lists_memory_tools(f"{stub_server.base_url}/mcp/", "copilot-e2e")
+
+
+@pytest.mark.parametrize(
+    ("reply", "match"),
+    [
+        ({"jsonrpc": "2.0", "id": 3, "result": {}}, "id 3 does not match request id 2"),
+        ({"jsonrpc": "2.0", "result": {}}, "id None does not match request id 2"),
+        ({"jsonrpc": "2.0", "id": "2", "result": {}}, "id '2' does not match request id 2"),
+        ({"jsonrpc": "1.0", "id": 2, "result": {}}, "not JSON-RPC 2.0"),
+        ({"id": 2, "result": {}}, "not JSON-RPC 2.0"),
+    ],
+)
+def test_parse_reply_requires_jsonrpc_2_and_matching_id(reply: Mapping[str, object], match: str) -> None:
+    """parse_reply rejects a reply without jsonrpc 2.0 or with another request's id."""
+    json_headers = http.client.HTTPMessage()
+    json_headers["Content-Type"] = "application/json"
+    resp = mcp_e2e.RpcResponse(status=200, headers=json_headers, body=json.dumps(dict(reply)).encode("utf-8"))
+    with pytest.raises(AssertionError, match=re.escape(match)):
+        mcp_e2e.parse_reply(resp, request_id=2)
+
+
+def test_parse_reply_rejects_boolean_id_for_request_1() -> None:
+    """A reply id of true is not request 1, although True == 1 in Python."""
+    json_headers = http.client.HTTPMessage()
+    json_headers["Content-Type"] = "application/json"
+    body = b'{"jsonrpc": "2.0", "id": true, "result": {}}'
+    with pytest.raises(AssertionError, match="id True does not match request id 1"):
+        mcp_e2e.parse_reply(mcp_e2e.RpcResponse(status=200, headers=json_headers, body=body), request_id=1)
+
+
 def test_parse_reply_joins_last_sse_event_and_rejects_missing_message() -> None:
     """parse_reply joins multiline data: on the final SSE event and rejects empty/non-RPC bodies."""
     sse_headers = http.client.HTTPMessage()
@@ -421,23 +517,25 @@ def test_parse_reply_joins_last_sse_event_and_rejects_missing_message() -> None:
         'data:   "result": {"ok": true}\n'
         "data: }\n\n"
     ).encode("utf-8")
-    parsed = mcp_e2e.parse_reply(mcp_e2e.RpcResponse(status=200, headers=sse_headers, body=sse_body))
+    parsed = mcp_e2e.parse_reply(mcp_e2e.RpcResponse(status=200, headers=sse_headers, body=sse_body), request_id=2)
     assert parsed == mcp_e2e.JsonRpcReply(result={"ok": True}, error=None)
 
     with pytest.raises(AssertionError):
-        mcp_e2e.parse_reply(mcp_e2e.RpcResponse(status=200, headers=sse_headers, body=b": ping\n\n"))
+        mcp_e2e.parse_reply(mcp_e2e.RpcResponse(status=200, headers=sse_headers, body=b": ping\n\n"), request_id=2)
 
     json_headers = http.client.HTTPMessage()
     json_headers["Content-Type"] = "application/json"
     with pytest.raises(AssertionError):
-        mcp_e2e.parse_reply(mcp_e2e.RpcResponse(status=200, headers=json_headers, body=b""))
+        mcp_e2e.parse_reply(mcp_e2e.RpcResponse(status=200, headers=json_headers, body=b""), request_id=2)
     with pytest.raises(AssertionError):
-        mcp_e2e.parse_reply(mcp_e2e.RpcResponse(status=200, headers=json_headers, body=b"{}"))
+        mcp_e2e.parse_reply(mcp_e2e.RpcResponse(status=200, headers=json_headers, body=b"{}"), request_id=2)
 
     html_headers = http.client.HTTPMessage()
     html_headers["Content-Type"] = "text/html"
     with pytest.raises(AssertionError):
-        mcp_e2e.parse_reply(mcp_e2e.RpcResponse(status=200, headers=html_headers, body=b"<html>ok</html>"))
+        mcp_e2e.parse_reply(
+            mcp_e2e.RpcResponse(status=200, headers=html_headers, body=b"<html>ok</html>"), request_id=2
+        )
 
 
 def test_scheme_allowlist_and_non_200_status(
