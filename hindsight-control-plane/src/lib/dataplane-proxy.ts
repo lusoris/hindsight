@@ -4,6 +4,11 @@ import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 
 export type ApiFailure = { error: string; errorKey: string };
 
+/** Route context of a `/banks/[bankId]/mental-models/[mentalModelId]/...` handler. */
+export type MentalModelRouteContext = {
+  params: Promise<{ bankId: string; mentalModelId: string }>;
+};
+
 export type DataplaneProxyOptions = {
   /** Every id the route requires; any falsy entry returns 400 with `missing`. */
   required: readonly (string | undefined)[];
@@ -11,14 +16,16 @@ export type DataplaneProxyOptions = {
   bankId: string;
   /** Path under the bank, e.g. `/directives/${encodeURIComponent(id)}`. */
   suffix: string;
-  method: "GET" | "PATCH" | "DELETE";
+  method: "GET" | "POST" | "PATCH" | "DELETE";
   /** Payload for a non-OK upstream (at the upstream status) and for a thrown error (at 500). */
   failure: ApiFailure;
   /** Log label, e.g. "getting directive": logs read `API error <action>:` and `Error <action>:`. */
   action: string;
   /** PATCH: parse the request JSON body and forward it with Content-Type application/json. */
   forwardJsonBody?: boolean;
-  /** PATCH/DELETE: a non-OK upstream reports `upstreamText || failure.error` as `error`. */
+  /** POST: serialize this value and send it with Content-Type application/json when not undefined. */
+  jsonBody?: unknown;
+  /** POST/PATCH/DELETE: a non-OK upstream reports `upstreamText || failure.error` as `error`. */
   upstreamTextAsError?: boolean;
   /** DELETE: body for a 200 instead of the upstream JSON (today `{ success: true }`). */
   successBody?: unknown;
@@ -52,9 +59,10 @@ export async function proxyDataplane(
       }
     }
 
+    const hasJsonBody = Boolean(options.forwardJsonBody) || options.jsonBody !== undefined;
     const init: RequestInit = {
       method: options.method,
-      headers: options.forwardJsonBody
+      headers: hasJsonBody
         ? getDataplaneHeaders({ "Content-Type": "application/json" })
         : getDataplaneHeaders(),
     };
@@ -62,6 +70,8 @@ export async function proxyDataplane(
     if (options.forwardJsonBody) {
       const body = await request.json();
       init.body = JSON.stringify(body);
+    } else if (options.jsonBody !== undefined) {
+      init.body = JSON.stringify(options.jsonBody);
     }
 
     const response = await fetch(dataplaneBankUrl(options.bankId, options.suffix), init);
