@@ -11,10 +11,11 @@ in them would otherwise ship green.
 """
 
 from datetime import datetime, timezone
+from typing import Any
 
-from hindsight_api.engine.memories.base import StoredMemory
+from hindsight_api.engine.memories.base import FactRecord, StoredMemory
 from hindsight_api.engine.retain.types import ProcessedFact, pack_embedding
-from hindsight_api.engine.transfer.importer import _fact_lifecycle_rows, _ObservationOutcome
+from hindsight_api.engine.transfer.importer import _apply_record_contract, _fact_lifecycle_rows, _ObservationOutcome
 from hindsight_api.engine.transfer.schema import TransferFact, TransferObservation
 from tests.test_memories_extension import InMemoryMemories
 
@@ -116,6 +117,62 @@ async def test_only_a_source_with_no_marker_of_its_own_is_stamped():
     assert store.rows[SRC_A].consolidated_at == EARLIER
     assert store.rows[SRC_B].consolidated_at is not None
     assert store.rows[SRC_B].consolidated_at > EARLIER
+
+
+class _RecordingStore(InMemoryMemories):
+    """Keeps every ``FactRecord`` an observation write receives; the dict store drops the contract."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.observation_records: list[FactRecord] = []
+
+    async def upsert_observation(self, *, conn: Any, bank_id: str, record: FactRecord) -> None:
+        self.observation_records.append(record)
+        await super().upsert_observation(conn=conn, bank_id=bank_id, record=record)
+
+
+async def test_the_observation_keeps_its_archived_record_contract() -> None:
+    """A disputed observation with a TTL must not be written back as active and never expiring."""
+    store = _RecordingStore()
+    for row in (_source(SRC_A), _source(SRC_B)):
+        store.rows[row.unit_id] = row
+    t_observed = datetime(2026, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+    t_fetched = datetime(2026, 1, 1, 10, 5, 0, tzinfo=timezone.utc)
+    observation = TransferObservation(
+        text=OBS_TEXT,
+        provenance_class="recalled",
+        write_authority="agent:lane",
+        observed_at=t_observed,
+        fetched_at=t_fetched,
+        ttl_seconds=3600,
+        scope="repo",
+        reset_condition="on-commit",
+        record_status="disputed",
+    )
+    fact = _processed()
+    # What the import pass does before handing the batch to the store.
+    _apply_record_contract(fact, observation)
+
+    outcome = await store.import_transfer_observations(
+        backend=None,
+        ops=None,
+        fq_table=None,
+        bank_id=BANK,
+        resolved=[(observation, [SRC_A, SRC_B])],
+        processed=[fact],
+        outcome=_ObservationOutcome(),
+    )
+
+    assert outcome.imported == 1
+    [record] = store.observation_records
+    assert record.provenance_class == "recalled"
+    assert record.write_authority == "agent:lane"
+    assert record.observed_at == t_observed
+    assert record.fetched_at == t_fetched
+    assert record.ttl_seconds == 3600
+    assert record.scope == "repo"
+    assert record.reset_condition == "on-commit"
+    assert record.record_status == "disputed"
 
 
 # -- fact consolidation markers ----------------------------------------------

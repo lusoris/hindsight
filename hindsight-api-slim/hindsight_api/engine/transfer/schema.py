@@ -119,7 +119,37 @@ class TransferAttachment(BaseModel):
 
 
 ObservationScopes = Literal["per_tag", "combined", "all_combinations", "shared"] | list[list[str]]
+ProvenanceClass = Literal["tool-run", "file-read", "recalled", "inferred"]
+RecordStatus = Literal["active", "stale", "disputed", "tombstoned"]
 BankRowsJSONEncoding = Literal["decoded", "serialized"]
+# memory_units.ttl_seconds is INTEGER on Postgres (NUMBER(10) on Oracle, which is wider).
+TTL_SECONDS_MAX = 2_147_483_647
+
+
+class TransferRecordContract(BaseModel):
+    """The record contract (provenance and freshness) of one memory, carried by every
+    transfer so a stale, disputed or tombstoned record, or one with a TTL, keeps that
+    state on the target.
+    """
+
+    # Absent in archives produced before these fields were added, so such an
+    # archive imports every record as `active` / `inferred` with no expiry,
+    # which is exactly what those records were on the source (the columns did
+    # not exist).
+    provenance_class: ProvenanceClass = "inferred"
+    write_authority: str | None = None
+    observed_at: datetime | None = None
+    fetched_at: datetime | None = None
+    # An import is the only API path that writes ttl_seconds, so the range is
+    # checked here, before anything is written: a negative TTL would read as
+    # stale forever, and a value past the Postgres INTEGER column cannot be stored.
+    ttl_seconds: int | None = Field(default=None, ge=0, le=TTL_SECONDS_MAX)
+    scope: str | None = None
+    reset_condition: str | None = None
+    record_status: RecordStatus = "active"
+
+    # External archives send offsetless ISO-8601, and open-bound year 1/9999 archives map to None (#5820).
+    _normalize_contract_dates = field_validator("observed_at", "fetched_at")(finite_utc)
 
 
 class TransferCausalRelation(BaseModel):
@@ -133,7 +163,7 @@ class TransferCausalRelation(BaseModel):
     target_fact_index: int
 
 
-class TransferFact(BaseModel):
+class TransferFact(TransferRecordContract):
     """One extracted fact (memory unit) without its embedding or database id.
 
     Everything here is reused verbatim on import except the embedding, which is
@@ -197,7 +227,7 @@ class TransferObservationSource(BaseModel):
     fact_index: int
 
 
-class TransferObservation(BaseModel):
+class TransferObservation(TransferRecordContract):
     """A consolidated observation (``fact_type='observation'``).
 
     Observations are bank-level (not tied to one document), carry no embedding
