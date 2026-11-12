@@ -306,6 +306,8 @@ jobs:
             - 'ruff.toml'
             - 'pyproject.toml'
             - added|deleted|renamed|copied: '**/pyproject.toml'
+            # test-dev holds the lint.sh pin tests (hindsight-dev/tests/test_lint_hook_pins.py)
+            - 'scripts/hooks/lint.sh'
           ci:
             - '.github/**'
 

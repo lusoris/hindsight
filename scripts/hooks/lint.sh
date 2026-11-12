@@ -5,6 +5,17 @@
 set -e
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# Prettier must run only the binary npm ci installs from the root package-lock.json (hindsight-control-plane
+# declares ^3.7.4; the lock held 3.7.4 when this was written). This used to be `npx prettier`: npm exec with
+# no local package assumes --yes when stdin is not a TTY or CI is set, so a checkout without node_modules
+# fetched the newest prettier from the registry and reformatted files (drift incidents 2026-11-08 and 2026-11-12).
+PRETTIER="$REPO_ROOT/node_modules/.bin/prettier"
+if [ ! -x "$PRETTIER" ]; then
+    echo "❌ Error: $PRETTIER not found or not executable; run npm ci at the repository root." >&2
+    exit 1
+fi
+
 TEMP_DIR=$(mktemp -d)
 trap "rm -rf $TEMP_DIR" EXIT
 
@@ -42,9 +53,9 @@ echo "  Running lints in parallel..."
 
 # Node/TypeScript tasks
 run_task "eslint" "$REPO_ROOT/hindsight-control-plane" "npm run lint -- --fix"
-run_task "prettier" "$REPO_ROOT/hindsight-control-plane" "npx prettier --write src/**/*.{ts,tsx}"
-run_task "prettier-ts-client" "$REPO_ROOT/hindsight-clients/typescript" "npx --yes prettier --write --config $REPO_ROOT/.prettierrc.json --ignore-path $REPO_ROOT/.gitignore ."
-run_task "prettier-all-npm" "$REPO_ROOT/hindsight-all-npm" "npx --yes prettier --write --config $REPO_ROOT/.prettierrc.json --ignore-path $REPO_ROOT/.gitignore ."
+run_task "prettier" "$REPO_ROOT/hindsight-control-plane" "$PRETTIER --write src/**/*.{ts,tsx}"
+run_task "prettier-ts-client" "$REPO_ROOT/hindsight-clients/typescript" "$PRETTIER --write --config $REPO_ROOT/.prettierrc.json --ignore-path $REPO_ROOT/.gitignore ."
+run_task "prettier-all-npm" "$REPO_ROOT/hindsight-all-npm" "$PRETTIER --write --config $REPO_ROOT/.prettierrc.json --ignore-path $REPO_ROOT/.gitignore ."
 
 # Python hindsight-api-slim tasks
 run_task "ruff-api-check" "$REPO_ROOT/hindsight-api-slim" "uv run --frozen ruff check --fix ."
@@ -96,10 +107,12 @@ if [ -d "$INTEGRATIONS_DIR" ] && { [ "$LINT_ALL" = "1" ] || [ -n "$CHANGED_FILES
         integration_changed "$name" || continue
 
         if [ -f "$dir/pyproject.toml" ]; then
-            run_task "ruff-int-$name-check" "$dir" "uv run --no-project ruff check --fix --config $REPO_ROOT/ruff.toml ."
-            run_task "ruff-int-$name-format" "$dir" "uv run --no-project ruff format --config $REPO_ROOT/ruff.toml ."
+            # Run ruff using root lockfile pin; --no-project from an integration directory resolves
+            # to an integration-local .venv or a user-level ruff on PATH, causing cross-machine version drift.
+            run_task "ruff-int-$name-check" "$dir" "uv run --frozen --no-sync --project $REPO_ROOT ruff check --fix --config $REPO_ROOT/ruff.toml ."
+            run_task "ruff-int-$name-format" "$dir" "uv run --frozen --no-sync --project $REPO_ROOT ruff format --config $REPO_ROOT/ruff.toml ."
         elif [ -f "$dir/package.json" ]; then
-            run_task "prettier-int-$name" "$dir" "npx --yes prettier --write --config $REPO_ROOT/.prettierrc.json --ignore-path $REPO_ROOT/.gitignore ."
+            run_task "prettier-int-$name" "$dir" "$PRETTIER --write --config $REPO_ROOT/.prettierrc.json --ignore-path $REPO_ROOT/.gitignore ."
         fi
     done
 fi
