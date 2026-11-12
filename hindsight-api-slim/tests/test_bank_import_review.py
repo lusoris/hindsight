@@ -85,7 +85,12 @@ def test_preflight_only_reads_requested_sections(section: str) -> None:
         excluded = TransferScope(data=False, bank_config=True)
         included = TransferScope()
     importer.validate_bank_archive(archive, excluded)
-    with pytest.raises(ValueError):
+    # History rows are streamed and fail on shape; the other sections are parsed whole.
+    if section.startswith("history/"):
+        refusal = pytest.raises(ValueError, match=f"{section} is not a JSON array")
+    else:
+        refusal = pytest.raises(json.JSONDecodeError, match="Expecting value")
+    with refusal:
         importer.validate_bank_archive(archive, included)
 
 
@@ -258,7 +263,8 @@ def test_preflight_refuses_unsupported_entries_up_front(monkeypatch: pytest.Monk
     archive = _unsupported_zip(_synthetic_archive(), defect)
     read = MagicMock(side_effect=AssertionError("must refuse before any entry is read"))
     monkeypatch.setattr(zipfile.ZipFile, "open", read)
-    with pytest.raises(ValueError):
+    refusal = "encrypted entry 'banks.json'" if defect == "encrypted" else "unsupported compression for 'banks.json'"
+    with pytest.raises(ValueError, match=refusal):
         importer.validate_bank_archive(archive)
     read.assert_not_called()
 
@@ -501,7 +507,7 @@ async def test_cleanup_failure_retains_original_error_and_recovery_note(
     monkeypatch.setattr(
         unit_engine, "_discard_half_restored_bank", AsyncMock(side_effect=RuntimeError("cleanup failure"))
     )
-    with pytest.raises(ValueError) as error:
+    with pytest.raises(ValueError, match="original failure") as error:
         await unit_engine.import_bank_async(_synthetic_archive(), request_context, target_bank_id="atomic-target")
     assert error.value is original
     notes = " ".join(error.value.__notes__)

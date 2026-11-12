@@ -638,17 +638,13 @@ class ParsedBankArchive:
     # Attachment rows paired with the archive entries holding their bytes.
     attachments: list[TransferAttachment] = field(default_factory=list)
 
-    @property
-    def scope(self) -> TransferScope:
-        """What the producer put in the archive.
-
-        A pre-scope archive carried data and bank config, and declared its history
-        through ``includes_history`` — so that is what it reads back as.
-        """
-        return _archive_scope(self.manifest)
-
 
 def _archive_scope(manifest: TransferManifest) -> TransferScope:
+    """What the producer put in the archive.
+
+    A pre-scope archive carried data and bank config, and declared its history
+    through ``includes_history`` — so that is what it reads back as.
+    """
     declared = manifest.scope
     if declared is None:
         return TransferScope(data=True, bank_config=True, history=manifest.includes_history)

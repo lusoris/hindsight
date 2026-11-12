@@ -23,6 +23,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 import pytest_asyncio
 from asyncpg import DataError
+from pydantic import ValidationError
 
 from hindsight_api import MemoryEngine, RequestContext
 from hindsight_api.engine import memory_engine as engine_module
@@ -134,6 +135,15 @@ def _bad_section(archive: bytes, section: str) -> bytes:
     raise AssertionError(section)
 
 
+# The model each planted row must fail on. Matching it keeps a refusal raised for
+# another reason (a JSON or archive-shape error is also a ValueError) from passing.
+_BAD_SECTION_MODEL = {
+    "observation": "TransferObservation",
+    "document": "TransferDocument",
+    "knowledge_page": "TransferKnowledgePage",
+}
+
+
 @pytest_asyncio.fixture
 async def exported_bank(memory: MemoryEngine, request_context: RequestContext) -> AsyncIterator[_BankArchive]:
     source = _unique_bank("atomic_source")
@@ -166,7 +176,7 @@ async def test_bad_section_submit_leaves_no_bank_or_operation(
     target = _unique_bank("atomic_rejected")
     monkeypatch.setattr(memory, "_operation_validator", None)
     try:
-        with pytest.raises(ValueError):
+        with pytest.raises(ValidationError, match=_BAD_SECTION_MODEL[section]):
             await memory.submit_bank_import_async(
                 exported_bank.source, _bad_section(exported_bank.data, section), request_context, target_bank_id=target
             )
@@ -301,7 +311,7 @@ def unit_engine(monkeypatch: pytest.MonkeyPatch) -> MemoryEngine:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("section", ["observation", "document", "knowledge_page"])
 async def test_submit_rejects_bad_section_before_stash_or_queue(unit_engine, request_context, section):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValidationError, match=_BAD_SECTION_MODEL[section]):
         await unit_engine.submit_bank_import_async(
             "atomic-source",
             _bad_section(_synthetic_archive(), section),
@@ -401,7 +411,8 @@ async def test_only_marked_stashed_tasks_skip_preflight(unit_engine, monkeypatch
 )
 @pytest.mark.parametrize("payload", [b'[{"bank_id":"atomic-source"},', b"[17]"])
 def test_preflight_validates_each_streamed_row_section(name: str, payload: bytes) -> None:
-    with pytest.raises(ValueError):
+    refusal = "is not a complete JSON array" if payload.startswith(b"[{") else "row 0 is not a JSON object"
+    with pytest.raises(ValueError, match=refusal):
         importer.validate_bank_archive(_rewrite(_synthetic_archive(), name, payload))
 
 
@@ -569,7 +580,8 @@ async def test_bank_row_conflicts_are_never_silently_adopted():
 )
 @pytest.mark.parametrize("payload", [b"{}", b"[17]"])
 def test_preflight_rejects_bad_bank_level_rows(name: str, payload: bytes) -> None:
-    with pytest.raises(ValueError):
+    refusal = "is not a JSON array" if payload == b"{}" else "row 0 is not a JSON object"
+    with pytest.raises(ValueError, match=refusal):
         importer.validate_bank_archive(_rewrite(_synthetic_archive(), name, payload))
 
 
