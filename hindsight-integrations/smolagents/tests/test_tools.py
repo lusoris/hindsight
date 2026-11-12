@@ -1,5 +1,6 @@
 """Unit tests for Hindsight SmolAgents tools."""
 
+import inspect
 import logging
 from unittest.mock import MagicMock, patch
 
@@ -255,6 +256,18 @@ class TestToolConstruction:
     def test_all_tools_require_bank_id(self, tool_cls):
         with pytest.raises(TypeError, match="bank_id"):
             tool_cls(client=_mock_client())
+
+    @pytest.mark.parametrize("tool_cls", [HindsightRetainTool, HindsightRecallTool, HindsightReflectTool])
+    def test_all_tools_expose_connection_args_in_signature(self, tool_cls):
+        # The shared arguments must stay visible to inspect.signature (IDE help, type
+        # checkers), not vanish into **kwargs. smolagents wraps __init__ with
+        # functools.wraps, so the signature resolves to the tool's own __init__.
+        params = inspect.signature(tool_cls).parameters
+        assert params["bank_id"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert params["bank_id"].default is inspect.Parameter.empty
+        for name in ("client", "hindsight_api_url", "api_key"):
+            assert params[name].kind is inspect.Parameter.KEYWORD_ONLY
+            assert params[name].default is None
 
 
 # ---------------------------------------------------------------------------

@@ -58,6 +58,11 @@ def _resolve_client(
 # inputs, output_type) and the forward signature, all defined on the concrete
 # class. _HindsightTool itself has none of them and fails validation if
 # instantiated directly.
+#
+# Each concrete tool still declares bank_id, client, hindsight_api_url and
+# api_key in its own __init__ and forwards them here. Folding them into
+# **kwargs hid the required bank_id from inspect.signature, IDE help and type
+# checkers (review of this refactor, PR 42).
 class _HindsightTool(Tool):
     """Base class that resolves the Hindsight bank and client for each tool.
 
@@ -92,10 +97,12 @@ class HindsightRetainTool(_HindsightTool):
     or any information that should be remembered across conversations.
 
     Args:
+        bank_id: The Hindsight memory bank to operate on.
+        client: Pre-configured Hindsight client (preferred).
+        hindsight_api_url: API URL (used if no client provided).
+        api_key: API key (used if no client provided).
         tags: Tags applied when storing memories (defaults to configured ``tags``).
-        **kwargs: Shared connection arguments (``bank_id``, ``client``,
-            ``hindsight_api_url``, ``api_key``; see :class:`_HindsightTool`) and
-            any ``Tool`` keyword arguments.
+        **kwargs: Additional keyword arguments forwarded to ``Tool``.
     """
 
     name = "hindsight_retain"
@@ -111,8 +118,17 @@ class HindsightRetainTool(_HindsightTool):
         },
     }
 
-    def __init__(self, *, tags: list[str] | None = None, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
+    def __init__(
+        self,
+        *,
+        bank_id: str,
+        client: Hindsight | None = None,
+        hindsight_api_url: str | None = None,
+        api_key: str | None = None,
+        tags: list[str] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(bank_id=bank_id, client=client, hindsight_api_url=hindsight_api_url, api_key=api_key, **kwargs)
         self._created_banks: set[str] = set()
 
         config = get_config()
@@ -154,13 +170,15 @@ class HindsightRecallTool(_HindsightTool):
     Returns a numbered list of matching memories.
 
     Args:
+        bank_id: The Hindsight memory bank to operate on.
+        client: Pre-configured Hindsight client (preferred).
+        hindsight_api_url: API URL (used if no client provided).
+        api_key: API key (used if no client provided).
         budget: Recall budget level (low/mid/high).
         max_tokens: Maximum tokens for recall results.
         recall_tags: Tags to filter when searching memories.
         recall_tags_match: Tag matching mode (any/all/any_strict/all_strict).
-        **kwargs: Shared connection arguments (``bank_id``, ``client``,
-            ``hindsight_api_url``, ``api_key``; see :class:`_HindsightTool`) and
-            any ``Tool`` keyword arguments.
+        **kwargs: Additional keyword arguments forwarded to ``Tool``.
     """
 
     name = "hindsight_recall"
@@ -179,13 +197,17 @@ class HindsightRecallTool(_HindsightTool):
     def __init__(
         self,
         *,
+        bank_id: str,
+        client: Hindsight | None = None,
+        hindsight_api_url: str | None = None,
+        api_key: str | None = None,
         budget: str | None = None,
         max_tokens: int | None = None,
         recall_tags: list[str] | None = None,
         recall_tags_match: str | None = None,
         **kwargs: Any,
     ) -> None:
-        super().__init__(**kwargs)
+        super().__init__(bank_id=bank_id, client=client, hindsight_api_url=hindsight_api_url, api_key=api_key, **kwargs)
 
         config = get_config()
         # None means omitted; explicit built-in defaults must still override configuration.
@@ -228,10 +250,12 @@ class HindsightReflectTool(_HindsightTool):
     about what you know, rather than raw memory facts.
 
     Args:
+        bank_id: The Hindsight memory bank to operate on.
+        client: Pre-configured Hindsight client (preferred).
+        hindsight_api_url: API URL (used if no client provided).
+        api_key: API key (used if no client provided).
         budget: Reflect budget level (low/mid/high).
-        **kwargs: Shared connection arguments (``bank_id``, ``client``,
-            ``hindsight_api_url``, ``api_key``; see :class:`_HindsightTool`) and
-            any ``Tool`` keyword arguments.
+        **kwargs: Additional keyword arguments forwarded to ``Tool``.
     """
 
     name = "hindsight_reflect"
@@ -247,8 +271,17 @@ class HindsightReflectTool(_HindsightTool):
         },
     }
 
-    def __init__(self, *, budget: str | None = None, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
+    def __init__(
+        self,
+        *,
+        bank_id: str,
+        client: Hindsight | None = None,
+        hindsight_api_url: str | None = None,
+        api_key: str | None = None,
+        budget: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(bank_id=bank_id, client=client, hindsight_api_url=hindsight_api_url, api_key=api_key, **kwargs)
 
         config = get_config()
         self._budget = budget if budget is not None else (config.budget if config else "mid")
