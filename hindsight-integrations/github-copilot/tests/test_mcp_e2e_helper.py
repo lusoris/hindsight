@@ -97,7 +97,12 @@ class StubServer:
         default_factory=lambda: {
             "jsonrpc": "2.0",
             "id": 2,
-            "result": {"tools": [{"name": "recall"}, {"name": "retain"}]},
+            "result": {
+                "tools": [
+                    {"name": "recall", "inputSchema": {"type": "object", "properties": {}}},
+                    {"name": "retain", "inputSchema": {"type": "object", "properties": {}}},
+                ]
+            },
         }
     )
     initialized_reply: StubReply = field(
@@ -506,6 +511,23 @@ def test_tools_list_requires_exact_tool_names(stub_server: StubServer, tools: ob
     """Text that mentions recall/retain without tools of those exact names does not pass."""
     stub_server.tools_payload = {"jsonrpc": "2.0", "id": 2, "result": {"tools": tools}}
     with pytest.raises(AssertionError, match=f"did not surface memory tools {re.escape(missing)}"):
+        mcp_e2e.assert_lists_memory_tools(f"{stub_server.base_url}/mcp/", "copilot-e2e")
+
+
+@pytest.mark.parametrize(
+    ("recall_tool", "lacking"),
+    [
+        ({"name": "recall"}, "['recall']"),
+        ({"name": "recall", "inputSchema": None}, "['recall']"),
+        ({"name": "recall", "inputSchema": {"type": "string"}}, "['recall']"),
+        ({"name": "recall", "inputSchema": '{"type": "object"}'}, "['recall']"),
+    ],
+)
+def test_tools_list_requires_object_input_schema(stub_server: StubServer, recall_tool: object, lacking: str) -> None:
+    """A memory tool listed without the object inputSchema MCP requires is not loadable and fails."""
+    retain_tool = {"name": "retain", "inputSchema": {"type": "object", "properties": {}}}
+    stub_server.tools_payload = {"jsonrpc": "2.0", "id": 2, "result": {"tools": [recall_tool, retain_tool]}}
+    with pytest.raises(AssertionError, match=f"memory tools {re.escape(lacking)} lack an object inputSchema"):
         mcp_e2e.assert_lists_memory_tools(f"{stub_server.base_url}/mcp/", "copilot-e2e")
 
 

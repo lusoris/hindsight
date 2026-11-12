@@ -298,12 +298,20 @@ def _assert_notification_accepted(resp: RpcResponse) -> None:
         raise AssertionError(f"MCP notification rejected (error={decoded['error']!r}): {raw_json[:300]}")
 
 
-def _tool_names(result: object) -> frozenset[str]:
-    """The ``name`` of every tool in a ``tools/list`` result, ignoring malformed entries."""
+def _tools_by_name(result: object) -> Mapping[str, Mapping[str, object]]:
+    """Every tool in a ``tools/list`` result keyed by its ``name``, ignoring malformed entries."""
     tools = result.get("tools") if isinstance(result, Mapping) else None
     if not isinstance(tools, list):
-        return frozenset()
-    return frozenset(tool["name"] for tool in tools if isinstance(tool, Mapping) and isinstance(tool.get("name"), str))
+        return MappingProxyType({})
+    return MappingProxyType(
+        {tool["name"]: tool for tool in tools if isinstance(tool, Mapping) and isinstance(tool.get("name"), str)}
+    )
+
+
+def _has_object_input_schema(tool: Mapping[str, object]) -> bool:
+    """Whether ``tool`` carries the ``inputSchema`` object the MCP ``Tool`` type requires."""
+    schema = tool.get("inputSchema")
+    return isinstance(schema, Mapping) and schema.get("type") == "object"
 
 
 def assert_lists_memory_tools(url: str, client_name: str) -> None:
@@ -336,9 +344,15 @@ def assert_lists_memory_tools(url: str, client_name: str) -> None:
         raise AssertionError(f"MCP tools/list failed (error={tools_reply.error!r}, result={tools_reply.result!r})")
     # Exact tool names rather than a substring search of the body, so a description
     # or error text mentioning "recall" cannot stand in for the tool itself.
-    names = _tool_names(tools_reply.result)
-    missing = sorted(_MEMORY_TOOLS - names)
+    tools = _tools_by_name(tools_reply.result)
+    missing = sorted(_MEMORY_TOOLS.difference(tools))
     # Raise AssertionError explicitly because this helper module does not match
     # test_*.py (pytest skips assertion rewriting here and Bandit B101 flags assert).
     if missing:
-        raise AssertionError(f"tools/list did not surface memory tools {missing}; listed: {sorted(names)}")
+        raise AssertionError(f"tools/list did not surface memory tools {missing}; listed: {sorted(tools)}")
+    # A name alone does not make a tool usable: the MCP 2025-03-26 schema (the
+    # protocolVersion sent above) requires Tool.inputSchema, an object-typed JSON
+    # Schema a client builds the call from, so a listing without it cannot be loaded.
+    no_schema = sorted(name for name in _MEMORY_TOOLS if not _has_object_input_schema(tools[name]))
+    if no_schema:
+        raise AssertionError(f"tools/list memory tools {no_schema} lack an object inputSchema")
