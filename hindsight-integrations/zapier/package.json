@@ -16,7 +16,7 @@
   },
   "main": "index.js",
   "scripts": {
-    "test": "mocha --recursive -t 10000 test",
+    "test": "mocha --recursive -t 10000 \"test/**/*.test.js\"",
     "validate": "zapier-platform validate",
     "build": "zapier-platform build",
     "push": "zapier-platform push"
