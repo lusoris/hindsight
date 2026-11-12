@@ -728,6 +728,8 @@ def validate_bank_archive(archive: Archive, scope: TransferScope | None = None) 
     Streaming sections stay streamed during this extra pass. Database constraints
     still require the restore's independent rollback barrier.
     """
+    # One helper per restore section keeps each check next to the section it guards;
+    # the single function they replaced grew past the complexity bound Codacy holds.
     with _open_archive(archive, produced_by="the bank export endpoint") as zf:
         try:
             parsed = parse_bank_archive(zf, scope)
@@ -736,34 +738,44 @@ def validate_bank_archive(archive: Archive, scope: TransferScope | None = None) 
             for table, rows in parsed.bank_rows.items():
                 _check_archive_rows(f"{table}.json", rows, source_bank_id=source)
             if restoring.bank_config:
-                banks = parsed.bank_rows.get("banks", [])
-                if len(banks) != 1 or banks[0].get("bank_id") != source:
-                    raise ValueError("Invalid transfer archive: banks.json must contain exactly the source bank row")
+                _validate_bank_row(parsed, source)
             if restoring.data:
-                for row in parsed.bank_rows.get("mental_models", []):
-                    if "id" not in row:
-                        raise ValueError("Invalid transfer archive: mental_models.json row has no id")
-                for _document in _iter_documents(zf, source_bank_id=source):
-                    pass
-                for observation in _iter_json_array(zf, "observations.json"):
-                    _check_archive_rows("observations.json", [observation], source_bank_id=source)
-                    TransferObservation.model_validate(observation)
-                for table in (*OPERATIONAL_TABLES, "invalidated_memory_units"):
-                    name = f"data/{table}.json"
-                    _check_archive_rows(name, _iter_json_array(zf, name), source_bank_id=source)
-                for attachment in parsed.attachments:
-                    if attachment.bank_id != source:
-                        raise ValueError(
-                            "Invalid transfer archive: attachments.json bank_id differs from source_bank_id"
-                        )
-                    for _chunk in _validated_attachment_chunks(zf, attachment):
-                        pass
+                _validate_data_sections(zf, parsed, source)
+                _validate_attachments(zf, parsed.attachments, source)
             if restoring.history:
                 for table in HISTORY_TABLES:
                     name = f"history/{table}.json"
                     _check_archive_rows(name, _iter_json_array(zf, name), source_bank_id=source)
         except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError) as error:
             raise ValueError(f"Invalid transfer archive: an entry is corrupt ({error})") from error
+
+
+def _validate_bank_row(parsed: ParsedBankArchive, source: str) -> None:
+    banks = parsed.bank_rows.get("banks", [])
+    if len(banks) != 1 or banks[0].get("bank_id") != source:
+        raise ValueError("Invalid transfer archive: banks.json must contain exactly the source bank row")
+
+
+def _validate_data_sections(zf: zipfile.ZipFile, parsed: ParsedBankArchive, source: str) -> None:
+    for row in parsed.bank_rows.get("mental_models", []):
+        if "id" not in row:
+            raise ValueError("Invalid transfer archive: mental_models.json row has no id")
+    for _document in _iter_documents(zf, source_bank_id=source):
+        pass
+    for observation in _iter_json_array(zf, "observations.json"):
+        _check_archive_rows("observations.json", [observation], source_bank_id=source)
+        TransferObservation.model_validate(observation)
+    for table in (*OPERATIONAL_TABLES, "invalidated_memory_units"):
+        name = f"data/{table}.json"
+        _check_archive_rows(name, _iter_json_array(zf, name), source_bank_id=source)
+
+
+def _validate_attachments(zf: zipfile.ZipFile, attachments: Iterable[TransferAttachment], source: str) -> None:
+    for attachment in attachments:
+        if attachment.bank_id != source:
+            raise ValueError("Invalid transfer archive: attachments.json bank_id differs from source_bank_id")
+        for _chunk in _validated_attachment_chunks(zf, attachment):
+            pass
 
 
 def _resolve_bank_rows_json_encoding(manifest: TransferManifest) -> BankRowsJSONEncoding:

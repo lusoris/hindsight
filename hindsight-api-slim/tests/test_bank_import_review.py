@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import inspect
 import io
 import json
 import struct
@@ -25,8 +26,12 @@ from hindsight_api.engine.retain import bank_utils
 from hindsight_api.engine.transfer import TransferScope, importer
 from hindsight_api.engine.transfer.schema import TransferAttachment, TransferManifest, TransferScopeManifest
 from hindsight_api.extensions.operation_validator import OperationValidationError, ValidationResult
-from tests.test_bank_import_atomic import _invalid_streamed_timestamp, _rewrite, _synthetic_archive
-from tests.test_bank_import_atomic import unit_engine as unit_engine
+from tests.test_bank_import_atomic import _invalid_streamed_timestamp, _rewrite, _stub_engine, _synthetic_archive
+
+
+@pytest.fixture
+def unit_engine(monkeypatch: pytest.MonkeyPatch) -> MemoryEngine:
+    return _stub_engine(monkeypatch)
 
 
 def _with_history(archive: bytes) -> bytes:
@@ -582,13 +587,21 @@ def test_atomic_batch_wrapper_passes_backend_explicitly_and_uses_public_counts()
         for node in ast.walk(module)
         if isinstance(node, ast.AsyncFunctionDef) and node.name == "record_committed_batch"
     )
-    assert "backend" in [arg.arg for arg in wrapper.args.kwonlyargs]
+    # Every mandatory keyword of the real batch function is named, not only `backend`:
+    # pylint (E1125) cannot see through a `**kwargs` pass-through to a required keyword.
+    required = {
+        name
+        for name, parameter in inspect.signature(importer._import_document_batch).parameters.items()
+        if parameter.kind is inspect.Parameter.KEYWORD_ONLY and parameter.default is inspect.Parameter.empty
+    }
+    assert required >= {"backend", "entity_resolver", "bank_id"}
+    assert required <= {arg.arg for arg in wrapper.args.kwonlyargs}
     call = next(
         node
         for node in ast.walk(wrapper)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "original_batch"
     )
-    assert "backend" in [keyword.arg for keyword in call.keywords]
+    assert required <= {keyword.arg for keyword in call.keywords}
     for name in ("test_bad_section_submit_leaves_no_bank_or_operation", "record_committed_batch"):
         function = next(
             node for node in ast.walk(module) if isinstance(node, ast.AsyncFunctionDef) and node.name == name

@@ -198,8 +198,25 @@ async def test_rollback_alone_removes_committed_document_batches(memory, request
     monkeypatch.setattr(importer, "validate_bank_archive", lambda archive, scope=None: None)
     monkeypatch.setattr(importer, "_DOCUMENT_BATCH_SIZE", 1)
 
-    async def record_committed_batch(*, backend: Any, **kwargs: Any) -> Any:
-        result = await original_batch(backend=backend, **kwargs)
+    async def record_committed_batch(
+        *,
+        backend: Any,
+        entity_resolver: Any,
+        config: Any,
+        bank_id: str,
+        prepared: Any,
+        ops: Any,
+        **kwargs: Any,
+    ) -> Any:
+        result = await original_batch(
+            backend=backend,
+            entity_resolver=entity_resolver,
+            config=config,
+            bank_id=bank_id,
+            prepared=prepared,
+            ops=ops,
+            **kwargs,
+        )
         # A public read uses its own connection, so this observes earlier committed
         # batches between the restore's transactions, before rollback removes them.
         documents = await memory.list_documents(target, limit=0, request_context=request_context)
@@ -286,9 +303,13 @@ async def test_rollback_keeps_a_preexisting_bank(memory, request_context, export
     assert await bank_utils.get_bank_profile_if_exists(await memory._get_backend(), exported_bank.source) is not None
 
 
-@pytest.fixture
-def unit_engine(monkeypatch: pytest.MonkeyPatch) -> MemoryEngine:
-    """Stub the DB boundary, keeping the real engine submission and rollback methods."""
+def _stub_engine(monkeypatch: pytest.MonkeyPatch) -> MemoryEngine:
+    """Stub the DB boundary, keeping the real engine submission and rollback methods.
+
+    A plain function rather than a shared fixture: test_bank_import_review.py builds
+    its own `unit_engine` fixture from it, where importing the fixture object itself
+    reads as an unused import to pyflakes.
+    """
     engine = MemoryEngine.__new__(MemoryEngine)
     engine._operation_validator = None
     engine.embeddings = _FixtureEmbeddings()
@@ -306,6 +327,11 @@ def unit_engine(monkeypatch: pytest.MonkeyPatch) -> MemoryEngine:
         monkeypatch.setattr(engine, name, AsyncMock())
     monkeypatch.setattr(bank_utils, "get_bank_profile_if_exists", AsyncMock(return_value=None))
     return engine
+
+
+@pytest.fixture
+def unit_engine(monkeypatch: pytest.MonkeyPatch) -> MemoryEngine:
+    return _stub_engine(monkeypatch)
 
 
 @pytest.mark.asyncio
