@@ -3723,9 +3723,6 @@ class HindsightConfig:
     store_document_text: bool  # When False, store NULL original_text / empty chunk_text
     enable_document_export_api: bool
     enable_document_import_api: bool
-    transfer_import_max_entry_size_mb: int
-    transfer_import_max_total_size_mb: int
-    transfer_import_max_entries: int
 
     # Observations settings (consolidated knowledge from facts)
     enable_observations: bool
@@ -3949,6 +3946,12 @@ class HindsightConfig:
     file_parser_markitdown_ocr_model: str | None = None
     file_parser_markitdown_ocr_prompt: str = DEFAULT_FILE_PARSER_MARKITDOWN_OCR_PROMPT
     file_parser_markitdown_ocr_default_headers: dict | None = None
+    # Transfer archive import ceilings (static). Defaulted here, not beside the
+    # document transfer flags above, so callers that build HindsightConfig directly
+    # keep working; from_env() still reads each one from its env var.
+    transfer_import_max_entry_size_mb: int = DEFAULT_TRANSFER_IMPORT_MAX_ENTRY_SIZE_MB
+    transfer_import_max_total_size_mb: int = DEFAULT_TRANSFER_IMPORT_MAX_TOTAL_SIZE_MB
+    transfer_import_max_entries: int = DEFAULT_TRANSFER_IMPORT_MAX_ENTRIES
 
     # Multi-LLM chains (static, server-level). Index 0 of each chain is the
     # corresponding unindexed/base LLM config above; these hold the extra indexed
@@ -5421,14 +5424,22 @@ class HindsightConfig:
                 ENV_ENABLE_DOCUMENT_IMPORT_API, str(DEFAULT_ENABLE_DOCUMENT_IMPORT_API)
             ).lower()
             == "true",
-            transfer_import_max_entry_size_mb=int(
-                os.getenv(ENV_TRANSFER_IMPORT_MAX_ENTRY_SIZE_MB, str(DEFAULT_TRANSFER_IMPORT_MAX_ENTRY_SIZE_MB))
+            # A zero ceiling would refuse every archive (even its manifest) at import
+            # time; refuse it at startup instead, where the operator sees the cause.
+            transfer_import_max_entry_size_mb=_parse_positive_int(
+                ENV_TRANSFER_IMPORT_MAX_ENTRY_SIZE_MB,
+                os.getenv(ENV_TRANSFER_IMPORT_MAX_ENTRY_SIZE_MB),
+                DEFAULT_TRANSFER_IMPORT_MAX_ENTRY_SIZE_MB,
             ),
-            transfer_import_max_total_size_mb=int(
-                os.getenv(ENV_TRANSFER_IMPORT_MAX_TOTAL_SIZE_MB, str(DEFAULT_TRANSFER_IMPORT_MAX_TOTAL_SIZE_MB))
+            transfer_import_max_total_size_mb=_parse_positive_int(
+                ENV_TRANSFER_IMPORT_MAX_TOTAL_SIZE_MB,
+                os.getenv(ENV_TRANSFER_IMPORT_MAX_TOTAL_SIZE_MB),
+                DEFAULT_TRANSFER_IMPORT_MAX_TOTAL_SIZE_MB,
             ),
-            transfer_import_max_entries=int(
-                os.getenv(ENV_TRANSFER_IMPORT_MAX_ENTRIES, str(DEFAULT_TRANSFER_IMPORT_MAX_ENTRIES))
+            transfer_import_max_entries=_parse_positive_int(
+                ENV_TRANSFER_IMPORT_MAX_ENTRIES,
+                os.getenv(ENV_TRANSFER_IMPORT_MAX_ENTRIES),
+                DEFAULT_TRANSFER_IMPORT_MAX_ENTRIES,
             ),
             # Observations settings (consolidated knowledge from facts)
             enable_observations=os.getenv(ENV_ENABLE_OBSERVATIONS, str(DEFAULT_ENABLE_OBSERVATIONS)).lower() == "true",

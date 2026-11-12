@@ -266,6 +266,20 @@ def _iter_documents(zf: zipfile.ZipFile, *, source_bank_id: str | None = None) -
         yield TransferDocument.model_validate_json(payload)
 
 
+def _utf8_exceeds(text: str, start: int, end: int, limit: int) -> bool:
+    """Whether ``text[start:end]`` encodes to more than ``limit`` UTF-8 bytes.
+
+    A character takes one to four bytes, so the length alone settles it outside
+    ``limit / 4 < n <= limit``; only that band pays for an encode.
+    """
+    n = end - start
+    if n > limit:
+        return True
+    if 4 * n <= limit:
+        return False
+    return len(text[start:end].encode("utf-8")) > limit
+
+
 def _iter_json_array(zf: zipfile.ZipFile, name: str) -> Iterator[Any]:
     """The items of a top-level JSON array entry, decoded one at a time.
 
@@ -311,10 +325,12 @@ def _iter_json_array(zf: zipfile.ZipFile, name: str) -> Iterator[Any]:
                 # A number can end at a read boundary, or decode only its integer
                 # prefix before the rest of an exponent arrives. Wait for its delimiter.
                 if end != -1 and (eof or (end < len(buf) and buf[end] in " \t\r\n,]")):
-                    # The bounded read below keeps the buffer within the limit, so
-                    # this fires only if that bound is loosened; it keeps the cap
-                    # enforced on what is decoded, not only on what is buffered.
-                    if end - pos > item_limit:
+                    # The limit is in bytes but the buffer holds characters. The read
+                    # bound below caps the character count, and one UTF-8 character
+                    # takes up to four bytes, so measure the encoded item. An item of at
+                    # most a quarter of the limit in characters cannot exceed it, so the
+                    # common small row is never re-encoded.
+                    if _utf8_exceeds(buf, pos, end, item_limit):
                         raise ValueError(item_size_error)
                     yield item
                     state, pos = "separator", end
@@ -324,10 +340,12 @@ def _iter_json_array(zf: zipfile.ZipFile, name: str) -> Iterator[Any]:
                     return
                 raise ValueError(f"Invalid transfer archive: {name} is not a complete JSON array")
             undecoded_chars = len(buf) - pos
-            # A UTF-8 character occupies at least one byte, so this character
-            # count never exceeds the byte count. Cap each undecoded item rather
-            # than the section, which can contain arbitrarily many small rows.
-            if undecoded_chars > item_limit:
+            # Cap each undecoded item in UTF-8 bytes rather than the section, which
+            # can contain arbitrarily many small rows. The character count used to
+            # stand in for the byte count, which let multi-byte text through at up
+            # to four times the limit. Reads double the buffer, so re-encoding the
+            # pending item on each pass stays linear in its size.
+            if _utf8_exceeds(buf, pos, len(buf), item_limit):
                 raise ValueError(item_size_error)
             # One extra character distinguishes an exactly-at-limit item from
             # an oversized one without letting an incomplete item double forever.
@@ -684,12 +702,23 @@ def parse_bank_archive(zf: zipfile.ZipFile, scope: TransferScope | None = None) 
     attachments = (
         [TransferAttachment.model_validate(a) for a in _read_json(zf, "attachments.json")] if restoring.data else []
     )
+    # Both import barriers read and hash each row's entry in full, so one blob named by
+    # many rows costs as much as that many blobs, though the archive holds it once.
+    # Bound the bytes the rows reference, counting a shared entry once per row. Export
+    # writes one entry per row (blobs/NNNNNN.bin), so a genuine archive's sum equals its
+    # blob bytes, which the total-size check in _open_archive already bounds.
+    referenced_limit = get_config().transfer_import_max_total_size_mb * 1024**2
+    referenced = 0
     for attachment in attachments:
-        if attachment.entry not in zf.NameToInfo:
+        info = zf.NameToInfo.get(attachment.entry)
+        if info is None:
             raise ValueError(
                 f"Invalid transfer archive: attachment {attachment.short_id} names entry "
                 f"{attachment.entry!r}, which the archive does not contain"
             )
+        referenced += info.file_size
+        if referenced > referenced_limit:
+            raise ValueError("Invalid transfer archive: attachments reference more bytes than the total size limit")
     return ParsedBankArchive(
         manifest=manifest,
         bank_rows=bank_rows,
