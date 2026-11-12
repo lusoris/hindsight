@@ -20,13 +20,18 @@ import io
 import json
 import uuid
 import zipfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import pytest
+from hindsight_client import Hindsight
 from hindsight_client_api.api.document_transfer_api import DocumentTransferApi
 
+from hindsight_system_tests import LLMStub
 from hindsight_system_tests.payloads import consolidation, extracted, fact
+
+SettleFn = Callable[[str], Awaitable[None]]
 
 pytestmark = pytest.mark.asyncio
 
@@ -65,7 +70,7 @@ EXPECTED_STALE = {STATUS_STALE: True, TTL_ELAPSED: True, TTL_FRESH: False}
 
 
 @pytest.fixture
-async def source_bank(client, llm, bank_id, settled) -> str:
+async def source_bank(client: Hindsight, llm: LLMStub, bank_id: str, settled: SettleFn) -> str:
     llm.on_step("extract_facts").returns(
         extracted(
             fact(STATUS_STALE, who="Alice", entities=["Alice", "Berlin"]),
@@ -80,7 +85,7 @@ async def source_bank(client, llm, bank_id, settled) -> str:
 
 
 @pytest.fixture
-async def destination(client) -> AsyncIterator[str]:
+async def destination(client: Hindsight) -> AsyncIterator[str]:
     bank = f"systest-{uuid.uuid4().hex[:12]}"
     yield bank
     await client.banks.delete_bank(bank)
@@ -106,9 +111,9 @@ def _stamp_contracts(archive: bytes) -> bytes:
     return out.getvalue()
 
 
-def _archived_facts(archive: bytes) -> dict[str, dict]:
+def _archived_facts(archive: bytes) -> dict[str, dict[str, Any]]:
     """Every fact in a documents archive, keyed by its CONTRACTS key."""
-    facts: dict[str, dict] = {}
+    facts: dict[str, dict[str, Any]] = {}
     with zipfile.ZipFile(io.BytesIO(archive)) as zf:
         for name in zf.namelist():
             if name.startswith("documents/") and name.endswith(".json"):
@@ -117,7 +122,7 @@ def _archived_facts(archive: bytes) -> dict[str, dict]:
     return facts
 
 
-async def _import(client, llm, bank: str, archive: bytes) -> None:
+async def _import(client: Hindsight, llm: LLMStub, bank: str, archive: bytes) -> None:
     # Silence the destination's own consolidation, as test_52 does: the import
     # leaves new facts there and auto-consolidation would otherwise run over them.
     llm.reset()
@@ -125,15 +130,17 @@ async def _import(client, llm, bank: str, archive: bytes) -> None:
     await DocumentTransferApi(client.documents.api_client).import_documents(bank, archive)
 
 
-async def _stamped_import(client, llm, source_bank: str, destination: str, settled) -> None:
+async def _stamped_import(
+    client: Hindsight, llm: LLMStub, source_bank: str, destination: str, settled: SettleFn
+) -> None:
     archive = _stamp_contracts(await client.aexport_documents(bank_id=source_bank))
     await _import(client, llm, destination, archive)
     await settled(destination)
 
 
 async def test_recall_flags_the_imported_facts_the_source_marked_stale(
-    client, llm, source_bank, destination, settled
-):
+    client: Hindsight, llm: LLMStub, source_bank: str, destination: str, settled: SettleFn
+) -> None:
     await _stamped_import(client, llm, source_bank, destination, settled)
 
     response = await client.arecall(bank_id=destination, query="Alice")
@@ -141,7 +148,9 @@ async def test_recall_flags_the_imported_facts_the_source_marked_stale(
     assert stale == EXPECTED_STALE
 
 
-async def test_an_unstamped_import_is_fresh(client, llm, source_bank, destination, settled):
+async def test_an_unstamped_import_is_fresh(
+    client: Hindsight, llm: LLMStub, source_bank: str, destination: str, settled: SettleFn
+) -> None:
     """The control. Without it the assertion above could pass on a bank that flags
     every imported fact stale, whatever its contract says."""
     await _import(client, llm, destination, await client.aexport_documents(bank_id=source_bank))
@@ -151,7 +160,9 @@ async def test_an_unstamped_import_is_fresh(client, llm, source_bank, destinatio
     assert {_contract_key(r.text): r.is_stale for r in response.results} == dict.fromkeys(CONTRACTS, False)
 
 
-async def test_a_second_export_carries_the_contract_on(client, llm, source_bank, destination, settled):
+async def test_a_second_export_carries_the_contract_on(
+    client: Hindsight, llm: LLMStub, source_bank: str, destination: str, settled: SettleFn
+) -> None:
     """A bank is moved more than once. The contract has to come back out of the
     destination exactly as it went in, not only be readable by recall there."""
     await _stamped_import(client, llm, source_bank, destination, settled)

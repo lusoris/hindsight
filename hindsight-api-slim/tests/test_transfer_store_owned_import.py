@@ -11,6 +11,7 @@ in them would otherwise ship green.
 """
 
 from datetime import datetime, timezone
+from typing import Any
 
 from hindsight_api.engine.memories.base import FactRecord, StoredMemory
 from hindsight_api.engine.retain.types import ProcessedFact, pack_embedding
@@ -125,22 +126,24 @@ class _RecordingStore(InMemoryMemories):
         super().__init__()
         self.observation_records: list[FactRecord] = []
 
-    async def upsert_observation(self, *, conn, bank_id, record):
+    async def upsert_observation(self, *, conn: Any, bank_id: str, record: FactRecord) -> None:
         self.observation_records.append(record)
         await super().upsert_observation(conn=conn, bank_id=bank_id, record=record)
 
 
-async def test_the_observation_keeps_its_archived_record_contract():
+async def test_the_observation_keeps_its_archived_record_contract() -> None:
     """A disputed observation with a TTL must not be written back as active and never expiring."""
     store = _RecordingStore()
     for row in (_source(SRC_A), _source(SRC_B)):
         store.rows[row.unit_id] = row
+    t_observed = datetime(2026, 1, 1, 10, 0, 0, tzinfo=timezone.utc)
+    t_fetched = datetime(2026, 1, 1, 10, 5, 0, tzinfo=timezone.utc)
     observation = TransferObservation(
         text=OBS_TEXT,
         provenance_class="recalled",
         write_authority="agent:lane",
-        observed_at=EARLIER,
-        fetched_at=EARLIER,
+        observed_at=t_observed,
+        fetched_at=t_fetched,
         ttl_seconds=3600,
         scope="repo",
         reset_condition="on-commit",
@@ -164,8 +167,8 @@ async def test_the_observation_keeps_its_archived_record_contract():
     [record] = store.observation_records
     assert record.provenance_class == "recalled"
     assert record.write_authority == "agent:lane"
-    assert record.observed_at == EARLIER
-    assert record.fetched_at == EARLIER
+    assert record.observed_at == t_observed
+    assert record.fetched_at == t_fetched
     assert record.ttl_seconds == 3600
     assert record.scope == "repo"
     assert record.reset_condition == "on-commit"

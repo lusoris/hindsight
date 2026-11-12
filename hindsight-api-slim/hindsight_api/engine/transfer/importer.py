@@ -295,13 +295,16 @@ def parse_archive(archive: Archive) -> ParsedArchive:
 
 
 def iter_archive_documents(archive: Archive) -> Iterator[TransferDocument]:
-    """Validate a document archive and yield its documents one at a time.
+    """Validate a document archive (manifest, documents, observations) and yield its documents one at a time.
 
-    What submission runs, so a malformed archive is a 400 rather than a failed task.
+    Observations are streamed and discarded after the documents so submission rejects a
+    malformed ``observations.json`` with a 400 before any write rather than failing the task.
     """
     with _open_archive(archive, produced_by="the document export endpoint") as zf:
         _read_manifest(zf)
         yield from _iter_documents(zf)
+        for obs in _iter_json_array(zf, "observations.json"):
+            TransferObservation.model_validate(obs)
 
 
 def read_bank_manifest(archive: Archive) -> TransferManifest:

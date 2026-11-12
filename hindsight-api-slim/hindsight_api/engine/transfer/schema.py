@@ -143,6 +143,9 @@ class TransferRecordContract(BaseModel):
     reset_condition: str | None = None
     record_status: RecordStatus = "active"
 
+    # External archives send offsetless ISO-8601, and open-bound year 1/9999 archives map to None (#5820).
+    _normalize_contract_dates = field_validator("observed_at", "fetched_at")(finite_utc)
+
 
 class TransferCausalRelation(BaseModel):
     """A causal edge from this fact to an earlier fact in the same document.

@@ -1,18 +1,26 @@
 """Tests pinning the transfer record contract schema and import behaviour.
 
-Pins TransferFact / TransferObservation default and validation behaviour,
-synchronisation between schema Literal types and engine valid tuple constants,
-and field propagation by _apply_record_contract.
+Pins TransferFact / TransferObservation default, date-normalisation and validation
+behaviour, synchronisation between schema Literal types and engine valid tuple
+constants, and field propagation by _apply_record_contract and build_fact_records.
 """
 
 import typing
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Any
 
 import pydantic
 import pytest
 
-from hindsight_api.engine.memories.base import VALID_PROVENANCE_CLASSES, VALID_RECORD_STATUSES
+from hindsight_api.engine.memories.base import (
+    VALID_PROVENANCE_CLASSES,
+    VALID_RECORD_STATUSES,
+    build_fact_records,
+)
+from hindsight_api.engine.memories.pg import transfer as pg_transfer
 from hindsight_api.engine.retain.types import ProcessedFact, pack_embedding
+from hindsight_api.engine.transfer.export import _UnitLocation
 from hindsight_api.engine.transfer.importer import _apply_record_contract
 from hindsight_api.engine.transfer.schema import (
     ProvenanceClass,
@@ -53,6 +61,60 @@ def test_record_contract_validation() -> None:
 
     with pytest.raises(pydantic.ValidationError):
         TransferFact.model_validate({"text": "t", "fact_type": "world", "provenance_class": "guessed"})
+
+
+def test_record_contract_dates_normalized_on_fact_and_observation() -> None:
+    """Offsetless ISO-8601 strings become aware UTC and year-9999 placeholders become None
+    on both TransferFact and TransferObservation (not shadowed by _drop_placeholder_dates).
+    """
+    expected_observed = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+    expected_fetched = datetime(2026, 3, 1, 10, 5, 0, tzinfo=timezone.utc)
+
+    fact = TransferFact.model_validate(
+        {
+            "text": "t",
+            "fact_type": "world",
+            "observed_at": "2026-03-01T10:00:00",
+            "fetched_at": "2026-03-01T10:05:00",
+        }
+    )
+    assert fact.observed_at == expected_observed
+    assert fact.observed_at.tzinfo == timezone.utc
+    assert fact.fetched_at == expected_fetched
+    assert fact.fetched_at.tzinfo == timezone.utc
+
+    obs = TransferObservation.model_validate(
+        {
+            "text": "t",
+            "observed_at": "2026-03-01T10:00:00",
+            "fetched_at": "2026-03-01T10:05:00",
+        }
+    )
+    assert obs.observed_at == expected_observed
+    assert obs.observed_at.tzinfo == timezone.utc
+    assert obs.fetched_at == expected_fetched
+    assert obs.fetched_at.tzinfo == timezone.utc
+
+    fact_placeholder = TransferFact.model_validate(
+        {
+            "text": "t",
+            "fact_type": "world",
+            "observed_at": "9999-12-31T23:59:59Z",
+            "fetched_at": "9999-01-01T00:00:00",
+        }
+    )
+    assert fact_placeholder.observed_at is None
+    assert fact_placeholder.fetched_at is None
+
+    obs_placeholder = TransferObservation.model_validate(
+        {
+            "text": "t",
+            "observed_at": "9999-12-31T23:59:59Z",
+            "fetched_at": "9999-01-01T00:00:00",
+        }
+    )
+    assert obs_placeholder.observed_at is None
+    assert obs_placeholder.fetched_at is None
 
 
 def test_record_contract_literals_in_sync_with_base_tuples() -> None:
@@ -97,3 +159,96 @@ def test_apply_record_contract_copies_all_eight_fields() -> None:
     assert processed.scope == "repo"
     assert processed.reset_condition == "on-commit"
     assert processed.record_status == "stale"
+
+
+def test_build_fact_records_copies_all_eight_fields() -> None:
+    """build_fact_records copies all eight non-default contract fields onto FactRecord."""
+    t_observed = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+    t_fetched = datetime(2026, 3, 1, 10, 5, 0, tzinfo=timezone.utc)
+
+    processed = ProcessedFact(
+        fact_text="Alice works at Google.",
+        fact_type="world",
+        embedding=pack_embedding([0.1, 0.2]),
+        occurred_start=None,
+        occurred_end=None,
+        mentioned_at=None,
+        context="",
+        metadata={},
+        provenance_class="tool-run",
+        write_authority="agent:lane",
+        observed_at=t_observed,
+        fetched_at=t_fetched,
+        ttl_seconds=60,
+        scope="repo",
+        reset_condition="on-commit",
+        record_status="stale",
+    )
+
+    [record] = build_fact_records(["unit-1"], [processed], document_id="doc-1")
+
+    assert record.provenance_class == "tool-run"
+    assert record.write_authority == "agent:lane"
+    assert record.observed_at == t_observed
+    assert record.fetched_at == t_fetched
+    assert record.ttl_seconds == 60
+    assert record.scope == "repo"
+    assert record.reset_condition == "on-commit"
+    assert record.record_status == "stale"
+
+
+@dataclass
+class _StubConn:
+    rows: list[dict[str, Any]]
+
+    async def fetch(self, _sql: str, *_args: Any) -> list[dict[str, Any]]:
+        return self.rows
+
+
+@pytest.mark.asyncio
+async def test_pg_load_observations_carries_all_eight_fields() -> None:
+    """pg.transfer.load_observations carries all eight non-default contract columns."""
+    t_observed = datetime(2026, 3, 2, 11, 0, 0, tzinfo=timezone.utc)
+    t_fetched = datetime(2026, 3, 2, 11, 15, 0, tzinfo=timezone.utc)
+    src_id = "00000000-0000-0000-0000-0000000000a1"
+    conn = _StubConn(
+        rows=[
+            {
+                "id": "00000000-0000-0000-0000-0000000000b1",
+                "text": "Alice and Bob are colleagues.",
+                "tags": ["team"],
+                "created_at": t_observed,
+                "event_date": t_observed,
+                "occurred_start": None,
+                "occurred_end": None,
+                "mentioned_at": t_observed,
+                "observation_scopes": None,
+                "proof_count": 2,
+                "source_memory_ids": [src_id],
+                "provenance_class": "recalled",
+                "write_authority": "consolidator:v1",
+                "observed_at": t_observed,
+                "fetched_at": t_fetched,
+                "ttl_seconds": 3600,
+                "scope": "team",
+                "reset_condition": "on-reorg",
+                "record_status": "disputed",
+            }
+        ]
+    )
+
+    [obs] = await pg_transfer.load_observations(
+        conn=conn,
+        fq_table=lambda name: name,
+        bank_id="bank-1",
+        unit_index={src_id: _UnitLocation(document_id="doc-1", ordinal=0)},
+    )
+
+    assert obs.provenance_class == "recalled"
+    assert obs.write_authority == "consolidator:v1"
+    assert obs.observed_at == t_observed
+    assert obs.fetched_at == t_fetched
+    assert obs.ttl_seconds == 3600
+    assert obs.scope == "team"
+    assert obs.reset_condition == "on-reorg"
+    assert obs.record_status == "disputed"

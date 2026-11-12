@@ -9,14 +9,17 @@ import io
 import json
 import uuid
 import zipfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import quote
 
 import httpx
+import pydantic
 import pytest
 import pytest_asyncio
 
+from hindsight_api import MemoryEngine, RequestContext
 from hindsight_api.api import create_app
 from hindsight_api.engine.chunk_ids import build_chunk_id
 from hindsight_api.engine.consolidation.consolidator import (
@@ -24,7 +27,7 @@ from hindsight_api.engine.consolidation.consolidator import (
     _embed_observation_texts,
 )
 from hindsight_api.engine.db_utils import acquire_with_retry
-from hindsight_api.engine.memories.base import MemoriesExtension
+from hindsight_api.engine.memories.base import MemoriesExtension, ScanPage
 from hindsight_api.engine.memories.postgres import PostgresMemories
 from hindsight_api.engine.retain import bank_utils
 from hindsight_api.engine.schema import fq_store_table
@@ -33,6 +36,8 @@ from hindsight_api.engine.transfer import import_documents
 from hindsight_api.engine.transfer.importer import (
     _EMBED_BATCH_SIZE,
     _embed_in_batches,
+    _prepare_documents,
+    iter_archive_documents,
     parse_archive,
     parse_bank_archive,
 )
@@ -45,6 +50,7 @@ from hindsight_api.engine.transfer.schema import (
     TransferManifest,
     TransferObservation,
     TransferObservationSource,
+    TransferRecordContract,
 )
 from hindsight_api.extensions import (
     BankWriteContext,
@@ -218,6 +224,66 @@ async def test_import_filters_degenerate_fact_without_shifting_archive_ordinals(
             ("caused_by", later_text, middle_text),
             ("causes", later_text, middle_text),
         }
+    finally:
+        await memory.delete_bank(dst, request_context=request_context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.memory_backend_incompatible
+async def test_import_degenerate_fact_at_index_zero_preserves_next_fact_record_contract(
+    memory: MemoryEngine, request_context: RequestContext
+) -> None:
+    """When archive fact 0 is degenerate and filtered, fact 1 keeps fact 1's record contract."""
+    dst = _unique_bank("transfer_degenerate_contract")
+    t_observed = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+    t_fetched = datetime(2026, 3, 1, 10, 5, 0, tzinfo=timezone.utc)
+    surviving_text = "Surviving fact after degenerate index zero"
+    document = TransferDocument(
+        id="doc-degenerate-contract",
+        original_text="Two extracted facts where the first is degenerate.",
+        chunks=[TransferChunk(chunk_index=0, chunk_text="chunk-0"), TransferChunk(chunk_index=1, chunk_text="chunk-1")],
+        facts=[
+            TransferFact(text="...", fact_type="world", chunk_index=0),
+            TransferFact(
+                text=surviving_text,
+                fact_type="world",
+                chunk_index=1,
+                provenance_class="tool-run",
+                write_authority="agent:lane",
+                observed_at=t_observed,
+                fetched_at=t_fetched,
+                ttl_seconds=60,
+                scope="repo",
+                reset_condition="on-commit",
+                record_status="stale",
+            ),
+        ],
+    )
+    manifest = TransferManifest(source_bank_id="source", document_count=1, fact_count=2)
+    archive_buffer = io.BytesIO()
+    with zipfile.ZipFile(archive_buffer, "w") as archive:
+        archive.writestr("manifest.json", manifest.model_dump_json())
+        archive.writestr("documents/000000.json", document.model_dump_json())
+
+    try:
+        result = await _import(memory, dst, archive_buffer.getvalue(), request_context)
+        assert result["facts_imported"] == 1
+
+        rows = [r for r in await _record_contract(memory, dst) if r.fact_type != "observation"]
+        assert rows == [
+            _RecordContractRow(
+                text=surviving_text,
+                fact_type="world",
+                provenance_class="tool-run",
+                write_authority="agent:lane",
+                observed_at=t_observed,
+                fetched_at=t_fetched,
+                ttl_seconds=60,
+                scope="repo",
+                reset_condition="on-commit",
+                record_status="stale",
+            )
+        ]
     finally:
         await memory.delete_bank(dst, request_context=request_context)
 
@@ -626,10 +692,24 @@ async def _fact_lifecycle(memory, bank_id):
     return sorted((r["text"], r["created_at"], r["consolidated_at"], r["consolidation_failed_at"]) for r in rows)
 
 
-async def _record_contract(memory, bank_id):
-    """Sorted (text, fact_type, provenance_class, write_authority, observed_at,
-    fetched_at, ttl_seconds, scope, reset_condition, record_status) for every row
-    of the bank in memory_units."""
+@dataclass(frozen=True, order=True)
+class _RecordContractRow:
+    text: str
+    fact_type: str
+    provenance_class: str
+    write_authority: str | None
+    observed_at: datetime | None
+    fetched_at: datetime | None
+    ttl_seconds: int | None
+    scope: str | None
+    reset_condition: str | None
+    record_status: str
+
+
+async def _record_contract(memory: MemoryEngine, bank_id: str) -> list[_RecordContractRow]:
+    """Sorted record-contract rows for every memory_units row in ``bank_id``."""
+    # Direct SQL because neither MemoryEngine.list_memory_units nor get_memory_unit
+    # selects or returns the eight record-contract columns (memories/pg/curation.py).
     backend = await memory._get_backend()
     async with acquire_with_retry(backend) as conn:
         rows = await conn.fetch(
@@ -640,17 +720,17 @@ async def _record_contract(memory, bank_id):
             bank_id,
         )
     return sorted(
-        (
-            r["text"],
-            r["fact_type"],
-            r["provenance_class"],
-            r["write_authority"],
-            r["observed_at"],
-            r["fetched_at"],
-            r["ttl_seconds"],
-            r["scope"],
-            r["reset_condition"],
-            r["record_status"],
+        _RecordContractRow(
+            text=r["text"],
+            fact_type=r["fact_type"],
+            provenance_class=r["provenance_class"],
+            write_authority=r["write_authority"],
+            observed_at=r["observed_at"],
+            fetched_at=r["fetched_at"],
+            ttl_seconds=r["ttl_seconds"],
+            scope=r["scope"],
+            reset_condition=r["reset_condition"],
+            record_status=r["record_status"],
         )
         for r in rows
     )
@@ -780,7 +860,7 @@ async def test_bank_import_preserves_consolidation_lifecycle(memory, request_con
 
 @pytest.mark.asyncio
 @pytest.mark.memory_backend_incompatible
-async def test_bank_roundtrip_preserves_record_contract(memory, request_context):
+async def test_bank_roundtrip_preserves_record_contract(memory: MemoryEngine, request_context: RequestContext) -> None:
     """Whole-bank import restores each fact and observation's record contract verbatim."""
     bank = _unique_bank("bank_record_contract")
     try:
@@ -802,32 +882,32 @@ async def test_bank_roundtrip_preserves_record_contract(memory, request_context)
             )
 
         async with acquire_with_retry(backend) as conn:
-            wf_ids = [
-                r["id"]
-                for r in await conn.fetch(
-                    f"SELECT id FROM {fq_store_table('memory_units')} "
-                    f"WHERE bank_id = $1 AND fact_type IN ('world', 'experience') ORDER BY created_at, id",
-                    bank,
-                )
-            ]
-        assert len(wf_ids) >= 3, "need enough facts"
+            wf_rows = await conn.fetch(
+                f"SELECT id, text, fact_type FROM {fq_store_table('memory_units')} "
+                f"WHERE bank_id = $1 AND fact_type IN ('world', 'experience') ORDER BY created_at, id",
+                bank,
+            )
+        assert len(wf_rows) >= 3, "need enough facts"
 
         # One surviving observation over the first two facts.
-        obs_source_ids = [uuid.UUID(str(i)) for i in wf_ids[:2]]
+        obs_source_ids = [uuid.UUID(str(r["id"])) for r in wf_rows[:2]]
+        obs_text = "Alice and Bob are colleagues."
         await _seed_observation(
             pool=backend,
             memory=memory,
             bank_id=bank,
             source_memory_ids=obs_source_ids,
-            observation_text="Alice and Bob are colleagues.",
+            observation_text=obs_text,
         )
 
         t_observed = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
         t_fetched = datetime(2026, 3, 1, 10, 5, 0, tzinfo=timezone.utc)
+        obs_observed = datetime(2026, 3, 2, 11, 0, 0, tzinfo=timezone.utc)
+        obs_fetched = datetime(2026, 3, 2, 11, 15, 0, tzinfo=timezone.utc)
 
-        fact_1_id = wf_ids[0]
-        fact_2_id = wf_ids[1]
-        # fact 3 (wf_ids[2]) left at defaults
+        fact_1_id = wf_rows[0]["id"]
+        fact_2_id = wf_rows[1]["id"]
+        # fact 3 (wf_rows[2]) left at defaults
 
         async with acquire_with_retry(backend) as conn:
             await conn.execute(
@@ -862,11 +942,18 @@ async def test_bank_roundtrip_preserves_record_contract(memory, request_context)
                 f"""
                 UPDATE {fq_store_table("memory_units")}
                 SET provenance_class = 'recalled',
-                    record_status = 'disputed',
-                    ttl_seconds = 3600
+                    write_authority = 'consolidator:v1',
+                    observed_at = $2,
+                    fetched_at = $3,
+                    ttl_seconds = 3600,
+                    scope = 'team',
+                    reset_condition = 'on-reorg',
+                    record_status = 'disputed'
                 WHERE bank_id = $1 AND fact_type = 'observation'
                 """,
                 bank,
+                obs_observed,
+                obs_fetched,
             )
 
         source = await _record_contract(memory, bank)
@@ -879,15 +966,41 @@ async def test_bank_roundtrip_preserves_record_contract(memory, request_context)
         await memory.delete_bank(bank, request_context=request_context)
         await memory.import_bank_async(archive, request_context)
 
-        assert await _record_contract(memory, bank) == source
+        restored = await _record_contract(memory, bank)
+        assert restored == source
+        restored_by_text = {r.text: r for r in restored}
+        assert restored_by_text[wf_rows[0]["text"]] == _RecordContractRow(
+            text=wf_rows[0]["text"],
+            fact_type=wf_rows[0]["fact_type"],
+            provenance_class="tool-run",
+            write_authority="agent:lane",
+            observed_at=t_observed,
+            fetched_at=t_fetched,
+            ttl_seconds=60,
+            scope="repo",
+            reset_condition="on-commit",
+            record_status="stale",
+        )
+        assert restored_by_text[obs_text] == _RecordContractRow(
+            text=obs_text,
+            fact_type="observation",
+            provenance_class="recalled",
+            write_authority="consolidator:v1",
+            observed_at=obs_observed,
+            fetched_at=obs_fetched,
+            ttl_seconds=3600,
+            scope="team",
+            reset_condition="on-reorg",
+            record_status="disputed",
+        )
     finally:
         await memory.delete_bank(bank, request_context=request_context)
 
 
 @pytest.mark.asyncio
 @pytest.mark.memory_backend_incompatible
-async def test_document_export_preserves_record_contract(memory, request_context):
-    """Plain document export (include_lifecycle=False) still preserves the record contract."""
+async def test_document_export_preserves_record_contract(memory: MemoryEngine, request_context: RequestContext) -> None:
+    """Plain document export (include_lifecycle=False) still preserves all eight contract fields."""
     src = _unique_bank("doc_contract_src")
     dst = _unique_bank("doc_contract_dst")
     try:
@@ -902,43 +1015,170 @@ async def test_document_export_preserves_record_contract(memory, request_context
             )
 
         async with acquire_with_retry(backend) as conn:
-            wf_ids = [
-                r["id"]
-                for r in await conn.fetch(
-                    f"SELECT id FROM {fq_store_table('memory_units')} "
-                    f"WHERE bank_id = $1 AND fact_type IN ('world', 'experience') ORDER BY created_at, id",
-                    src,
-                )
-            ]
-        assert len(wf_ids) >= 2, "need at least two facts"
+            wf_rows = await conn.fetch(
+                f"SELECT id, text, fact_type FROM {fq_store_table('memory_units')} "
+                f"WHERE bank_id = $1 AND fact_type IN ('world', 'experience') ORDER BY created_at, id",
+                src,
+            )
+        assert len(wf_rows) >= 2, "need at least two facts"
 
+        t_observed = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
         t_fetched = datetime(2026, 3, 1, 10, 5, 0, tzinfo=timezone.utc)
         async with acquire_with_retry(backend) as conn:
             await conn.execute(
                 f"""
                 UPDATE {fq_store_table("memory_units")}
-                SET record_status = 'stale',
-                    fetched_at = $2,
+                SET provenance_class = 'tool-run',
+                    write_authority = 'agent:lane',
+                    observed_at = $2,
+                    fetched_at = $3,
                     ttl_seconds = 60,
-                    provenance_class = 'tool-run'
-                WHERE bank_id = $1 AND id = $3
+                    scope = 'repo',
+                    reset_condition = 'on-commit',
+                    record_status = 'stale'
+                WHERE bank_id = $1 AND id = $4
                 """,
                 src,
+                t_observed,
                 t_fetched,
-                wf_ids[0],
+                wf_rows[0]["id"],
             )
 
         src_rows = await _record_contract(memory, src)
-        src_by_text = {r[0]: r for r in src_rows if r[1] != "observation"}
+        src_by_text = {r.text: r for r in src_rows if r.fact_type != "observation"}
         assert len(src_by_text) >= 2
 
         _, archive = await _export_async(memory, src, request_context)
         await _import(memory, dst, archive, request_context)
 
         dst_rows = await _record_contract(memory, dst)
-        dst_by_text = {r[0]: r for r in dst_rows if r[1] != "observation"}
+        dst_by_text = {r.text: r for r in dst_rows if r.fact_type != "observation"}
 
         assert dst_by_text == src_by_text
+        assert dst_by_text[wf_rows[0]["text"]] == _RecordContractRow(
+            text=wf_rows[0]["text"],
+            fact_type=wf_rows[0]["fact_type"],
+            provenance_class="tool-run",
+            write_authority="agent:lane",
+            observed_at=t_observed,
+            fetched_at=t_fetched,
+            ttl_seconds=60,
+            scope="repo",
+            reset_condition="on-commit",
+            record_status="stale",
+        )
+        assert dst_by_text[wf_rows[1]["text"]] == _RecordContractRow(
+            text=wf_rows[1]["text"],
+            fact_type=wf_rows[1]["fact_type"],
+            provenance_class="inferred",
+            write_authority=None,
+            observed_at=None,
+            fetched_at=None,
+            ttl_seconds=None,
+            scope=None,
+            reset_condition=None,
+            record_status="active",
+        )
+    finally:
+        await memory.delete_bank(src, request_context=request_context)
+        await memory.delete_bank(dst, request_context=request_context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.memory_backend_incompatible
+async def test_import_legacy_archive_without_record_contract_keys_uses_defaults(
+    memory: MemoryEngine, request_context: RequestContext
+) -> None:
+    """An archive written before the 8 record-contract keys existed imports every fact and
+    observation with provenance_class='inferred', record_status='active' and NULL elsewhere.
+    """
+    src = _unique_bank("legacy_contract_src")
+    dst = _unique_bank("legacy_contract_dst")
+    contract_keys = tuple(TransferRecordContract.model_fields)
+    try:
+        created = await _retain(memory, src, "Alice works at Google. Bob works at Microsoft.", request_context, "doc-1")
+        assert len(created) >= 2
+        backend = await memory._get_backend()
+        await _seed_observation(
+            pool=backend,
+            memory=memory,
+            bank_id=src,
+            source_memory_ids=[uuid.UUID(str(i)) for i in created[:2]],
+            observation_text="Alice and Bob are colleagues.",
+        )
+
+        # Stamp non-default contract values on every source row first so stripping the keys
+        # from the archive JSON is what produces the defaults on import.
+        t_observed = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        t_fetched = datetime(2026, 3, 1, 10, 5, 0, tzinfo=timezone.utc)
+        async with acquire_with_retry(backend) as conn:
+            await conn.execute(
+                f"""
+                UPDATE {fq_store_table("memory_units")}
+                SET provenance_class = 'tool-run',
+                    write_authority = 'agent:lane',
+                    observed_at = $2,
+                    fetched_at = $3,
+                    ttl_seconds = 60,
+                    scope = 'repo',
+                    reset_condition = 'on-commit',
+                    record_status = 'stale'
+                WHERE bank_id = $1
+                """,
+                src,
+                t_observed,
+                t_fetched,
+            )
+
+        exported = await memory.export_documents_async(src, request_context, include_observations=True)
+        legacy_buf = io.BytesIO()
+        stripped_facts = 0
+        stripped_observations = 0
+        with (
+            zipfile.ZipFile(io.BytesIO(exported)) as src_zf,
+            zipfile.ZipFile(legacy_buf, "w", zipfile.ZIP_DEFLATED) as dst_zf,
+        ):
+            for info in src_zf.infolist():
+                raw = src_zf.read(info.filename)
+                if info.filename.startswith("documents/") and info.filename.endswith(".json"):
+                    doc_payload = json.loads(raw)
+                    for fact_payload in doc_payload["facts"]:
+                        for key in contract_keys:
+                            fact_payload.pop(key, None)
+                        stripped_facts += 1
+                    raw = json.dumps(doc_payload).encode()
+                elif info.filename == "observations.json":
+                    obs_payload = json.loads(raw)
+                    for obs_entry in obs_payload:
+                        for key in contract_keys:
+                            obs_entry.pop(key, None)
+                        stripped_observations += 1
+                    raw = json.dumps(obs_payload).encode()
+                dst_zf.writestr(info, raw)
+
+        assert stripped_facts >= 2
+        assert stripped_observations >= 1
+
+        result = await _import(memory, dst, legacy_buf.getvalue(), request_context)
+        assert result["facts_imported"] >= 2
+        assert result["observations_imported"] >= 1
+
+        dst_rows = await _record_contract(memory, dst)
+        assert any(r.fact_type != "observation" for r in dst_rows)
+        assert any(r.fact_type == "observation" for r in dst_rows)
+        for row in dst_rows:
+            assert row == _RecordContractRow(
+                text=row.text,
+                fact_type=row.fact_type,
+                provenance_class="inferred",
+                write_authority=None,
+                observed_at=None,
+                fetched_at=None,
+                ttl_seconds=None,
+                scope=None,
+                reset_condition=None,
+                record_status="active",
+            )
     finally:
         await memory.delete_bank(src, request_context=request_context)
         await memory.delete_bank(dst, request_context=request_context)
@@ -2293,6 +2533,54 @@ async def test_import_rejects_unsupported_schema_version(memory, request_context
         await memory.import_documents_async("any-bank", buffer.getvalue(), request_context)
 
 
+def _archive_with_expired_observation() -> bytes:
+    manifest = TransferManifest(source_bank_id="source", document_count=1, fact_count=1, observation_count=1)
+    document = TransferDocument(
+        id="doc-1",
+        original_text="Alice works at Google.",
+        chunks=[TransferChunk(chunk_index=0, chunk_text="Alice works at Google.")],
+        facts=[TransferFact(text="Alice works at Google", fact_type="world", chunk_index=0)],
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr("manifest.json", manifest.model_dump_json())
+        zf.writestr("documents/000000.json", document.model_dump_json())
+        zf.writestr(
+            "observations.json",
+            json.dumps(
+                [
+                    {
+                        "text": "Alice works in tech.",
+                        "record_status": "expired",
+                        "sources": [{"document_id": "doc-1", "fact_index": 0}],
+                    }
+                ]
+            ),
+        )
+    return buffer.getvalue()
+
+
+def test_iter_archive_documents_rejects_invalid_observation_record_contract() -> None:
+    """iter_archive_documents validates observations.json entries after streaming documents."""
+    with pytest.raises(pydantic.ValidationError, match="record_status"):
+        list(iter_archive_documents(_archive_with_expired_observation()))
+
+
+@pytest.mark.asyncio
+@pytest.mark.memory_backend_incompatible
+async def test_import_rejects_invalid_observation_record_contract(
+    memory: MemoryEngine, request_context: RequestContext
+) -> None:
+    """An archive whose observations.json carries an invalid record_status is rejected before any write."""
+    dst = _unique_bank("reject_bad_obs_contract")
+    try:
+        with pytest.raises(pydantic.ValidationError, match="record_status"):
+            await memory.import_documents_async(dst, _archive_with_expired_observation(), request_context)
+        assert await _record_contract(memory, dst) == []
+    finally:
+        await memory.delete_bank(dst, request_context=request_context)
+
+
 def test_parse_archive_rejects_a_file_that_is_not_a_zip():
     """Garbage bytes are a caller error (400), not a zipfile.BadZipFile crash (500)."""
     with pytest.raises(ValueError, match="not a readable .zip"):
@@ -2912,19 +3200,24 @@ async def test_export_of_a_store_owned_bank_contains_its_memories():
 
 
 @pytest.mark.asyncio
-async def test_export_of_a_store_owned_bank_preserves_record_contract():
-    """A store-owned bank export carries the record contract of each memory into the archive."""
+async def test_export_of_a_store_owned_bank_preserves_record_contract() -> None:
+    """A store-owned bank export carries all eight record-contract fields of each memory."""
     from hindsight_api.engine.transfer.export import export_documents
 
+    t_observed = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
     t_fetched = datetime(2026, 3, 1, 10, 5, 0, tzinfo=timezone.utc)
 
     class _StoreWithContract(_FakeStoreOwned):
-        def __init__(self):
+        def __init__(self) -> None:
             super().__init__()
             self._cause.provenance_class = "tool-run"
-            self._cause.record_status = "stale"
-            self._cause.ttl_seconds = 60
+            self._cause.write_authority = "agent:lane"
+            self._cause.observed_at = t_observed
             self._cause.fetched_at = t_fetched
+            self._cause.ttl_seconds = 60
+            self._cause.scope = "repo"
+            self._cause.reset_condition = "on-commit"
+            self._cause.record_status = "stale"
 
     archive = await export_documents(None, "bank-x", None, memories=_StoreWithContract())
 
@@ -2937,23 +3230,37 @@ async def test_export_of_a_store_owned_bank_preserves_record_contract():
     effect_fact = next(f for f in doc["facts"] if f["text"] == "the effect")
 
     assert cause_fact["provenance_class"] == "tool-run"
-    assert cause_fact["record_status"] == "stale"
-    assert cause_fact["ttl_seconds"] == 60
+    assert cause_fact["write_authority"] == "agent:lane"
+    assert cause_fact["observed_at"] == "2026-03-01T10:00:00Z"
     assert cause_fact["fetched_at"] == "2026-03-01T10:05:00Z"
+    assert cause_fact["ttl_seconds"] == 60
+    assert cause_fact["scope"] == "repo"
+    assert cause_fact["reset_condition"] == "on-commit"
+    assert cause_fact["record_status"] == "stale"
+
     assert effect_fact["provenance_class"] == "inferred"
+    assert effect_fact["write_authority"] is None
+    assert effect_fact["observed_at"] is None
+    assert effect_fact["fetched_at"] is None
+    assert effect_fact["ttl_seconds"] is None
+    assert effect_fact["scope"] is None
+    assert effect_fact["reset_condition"] is None
     assert effect_fact["record_status"] == "active"
 
 
 @pytest.mark.asyncio
-async def test_a_store_owned_observation_export_carries_its_record_contract():
-    """A disputed observation with a TTL leaves a store-owned bank with that state, not as active."""
+async def test_a_store_owned_observation_export_carries_its_record_contract() -> None:
+    """A disputed observation with a TTL leaves a store-owned bank with all eight fields."""
     from hindsight_api.engine.memories.base import StoredMemory
     from hindsight_api.engine.transfer.export import _UnitLocation
 
+    t_observed = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
     t_fetched = datetime(2026, 3, 1, 10, 5, 0, tzinfo=timezone.utc)
 
     class _StoreWithObservation(_FakeStoreOwned):
-        async def scan_memories(self, *, bank_id, fact_types=None, page_token="", **_kw):
+        async def scan_memories(
+            self, *, bank_id: str, fact_types: list[str] | None = None, page_token: str = "", **_kw: Any
+        ) -> ScanPage:
             if fact_types and "observation" in fact_types and not page_token:
                 observation = StoredMemory(
                     unit_id="unit-obs",
@@ -2963,6 +3270,7 @@ async def test_a_store_owned_observation_export_carries_its_record_contract():
                     source_memory_ids=["unit-cause", "unit-effect"],
                     provenance_class="recalled",
                     write_authority="agent:lane",
+                    observed_at=t_observed,
                     fetched_at=t_fetched,
                     ttl_seconds=3600,
                     scope="repo",
@@ -2982,7 +3290,7 @@ async def test_a_store_owned_observation_export_carries_its_record_contract():
 
     assert observation.provenance_class == "recalled"
     assert observation.write_authority == "agent:lane"
-    assert observation.observed_at is None
+    assert observation.observed_at == t_observed
     assert observation.fetched_at == t_fetched
     assert observation.ttl_seconds == 3600
     assert observation.scope == "repo"
@@ -3094,6 +3402,48 @@ async def test_embed_in_batches_handles_empty_input():
 
     assert await _embed_in_batches(embedder, []) == []
     assert embedder.batch_sizes == []
+
+
+@pytest.mark.asyncio
+async def test_prepare_documents_applies_contract_by_original_archive_index() -> None:
+    """When archive fact 0 is degenerate, fact 1 receives fact 1's contract, not retained index 0's."""
+    t_observed = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+    t_fetched = datetime(2026, 3, 1, 10, 5, 0, tzinfo=timezone.utc)
+    document = TransferDocument(
+        id="doc-1",
+        original_text="Two facts, first degenerate.",
+        chunks=[TransferChunk(chunk_index=0, chunk_text="c0"), TransferChunk(chunk_index=1, chunk_text="c1")],
+        facts=[
+            TransferFact(text="...", fact_type="world", chunk_index=0),
+            TransferFact(
+                text="Surviving fact at archive index one",
+                fact_type="world",
+                chunk_index=1,
+                provenance_class="tool-run",
+                write_authority="agent:lane",
+                observed_at=t_observed,
+                fetched_at=t_fetched,
+                ttl_seconds=60,
+                scope="repo",
+                reset_condition="on-commit",
+                record_status="stale",
+            ),
+        ],
+    )
+
+    [prepared] = await _prepare_documents(_RecordingEmbedder(), lambda d: d.isoformat(), [(document, "doc-1")])
+
+    assert prepared.retained_index_by_original == [None, 0]
+    assert len(prepared.processed_facts) == 1
+    [fact] = prepared.processed_facts
+    assert fact.provenance_class == "tool-run"
+    assert fact.write_authority == "agent:lane"
+    assert fact.observed_at == t_observed
+    assert fact.fetched_at == t_fetched
+    assert fact.ttl_seconds == 60
+    assert fact.scope == "repo"
+    assert fact.reset_condition == "on-commit"
+    assert fact.record_status == "stale"
 
 
 @pytest.mark.asyncio
