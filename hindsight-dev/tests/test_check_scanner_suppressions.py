@@ -180,7 +180,7 @@ def test_17_real_knowledge_base_proxy_file_passes() -> None:
 
 @pytest.mark.parametrize("ids", ["B608", "B608, B110"])
 def test_23_nosec_with_ids_and_metadata_passes(ids: str) -> None:
-    text = f'sql = f"SELECT {{cols}} FROM t"  # nosec {ids} # bound values category D, expires 2027-01-01\n'
+    text = f"x = 1  # nosec {ids} # bound values category D, expires 2027-01-01\n"
     assert check_text("test.py", text, TODAY) == []
 
 
@@ -244,37 +244,43 @@ def test_27_real_importer_marker_passes() -> None:
 
 
 def test_28_wrapper_finds_nosec_markers(tmp_path: Path) -> None:
+    git_bin = shutil.which("git")
+    bash_bin = shutil.which("bash")
+    assert git_bin is not None and bash_bin is not None, "git and bash must be on PATH"
+
     # Keep inherited Git settings out of the fixture repository and ignore user/system config.
     fixture_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     fixture_env["GIT_CONFIG_GLOBAL"] = os.devnull
     fixture_env["GIT_CONFIG_NOSYSTEM"] = "1"
-    subprocess.run(["git", "init", "-q"], cwd=tmp_path, env=fixture_env, check=True)
+
+    def git(*args: str) -> None:
+        """Run git with the fixture's isolated configuration."""
+        subprocess.run([git_bin, *args], cwd=tmp_path, env=fixture_env, check=True)
+
+    def run_wrapper() -> subprocess.CompletedProcess[str]:
+        """Run the suppression wrapper in the fixture repository."""
+        return subprocess.run(
+            [bash_bin, "scripts/check-scanner-suppressions.sh"],
+            cwd=tmp_path,
+            env=fixture_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    git("init", "-q")
     scripts = tmp_path / "scripts"
     scripts.mkdir()
     for name in ("check-scanner-suppressions.py", "check-scanner-suppressions.sh"):
         shutil.copyfile(CHECKER_PATH.parent / name, scripts / name)
     bad = tmp_path / "bad.py"
     bad.write_text("x = 1  # nosec B608\n", encoding="utf-8")
-    subprocess.run(["git", "add", "-A"], cwd=tmp_path, env=fixture_env, check=True)
-    result = subprocess.run(
-        ["bash", "scripts/check-scanner-suppressions.sh"],
-        cwd=tmp_path,
-        env=fixture_env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    git("add", "-A")
+    result = run_wrapper()
     assert result.returncode == 1
     assert "bad.py:1:" in result.stderr
     expiry = datetime.datetime.now(datetime.UTC).date() + datetime.timedelta(days=30)
     bad.write_text(f"x = 1  # nosec B608 # bound values category D, expires {expiry.isoformat()}\n", encoding="utf-8")
-    subprocess.run(["git", "add", "-A"], cwd=tmp_path, env=fixture_env, check=True)
-    result = subprocess.run(
-        ["bash", "scripts/check-scanner-suppressions.sh"],
-        cwd=tmp_path,
-        env=fixture_env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    git("add", "-A")
+    result = run_wrapper()
     assert result.returncode == 0
