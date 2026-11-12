@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import re
 import socket
 import socketserver
 import threading
 import urllib.error
+import urllib.request
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -353,6 +355,52 @@ def test_redirect_303_to_get_drops_credentials_cross_origin_and_keeps_same_origi
         assert redirected.method == "GET"
         assert redirected.header("Authorization") is None
         assert redirected.header("Mcp-Session-Id") is None
+
+
+_CREDENTIAL_HEADERS = {"authorization", "mcp-session-id"}
+
+
+@pytest.mark.parametrize(("code", "method_after"), [(307, "POST"), (303, "GET")])
+@pytest.mark.parametrize(
+    ("source", "target"),
+    [
+        pytest.param("http://127.0.0.1:8888/mcp", "http://localhost:8888/mcp/", id="host-only"),
+        pytest.param("http://example.test:8443/mcp", "https://example.test:8443/mcp/", id="scheme-only"),
+    ],
+)
+def test_redirect_request_drops_credentials_when_only_host_or_scheme_changes(
+    code: int,
+    method_after: str,
+    source: str,
+    target: str,
+) -> None:
+    """A redirect changing only the host, or only the scheme, drops both credentials.
+
+    The two stub tests above change only the port: a stub listens on one host and port and
+    serves no TLS. So these call the redirect handler directly, on the 307/308 re-send and
+    on the stdlib 301/302/303 path. The same request redirected within its origin keeps
+    both headers, so the drop is not an artefact of calling the handler outside an opener.
+    """
+    request = urllib.request.Request(
+        source,
+        data=b"{}",
+        headers={
+            "Authorization": "Bearer secret-bearer-token",
+            "Mcp-Session-Id": "sess-1",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    handler = mcp_e2e._McpRedirectHandler()
+
+    def redirect_to(url: str) -> set[str]:
+        redirected = handler.redirect_request(request, io.BytesIO(), code, "redirect", http.client.HTTPMessage(), url)
+        assert redirected is not None
+        assert (redirected.full_url, redirected.get_method()) == (url, method_after)
+        return {name.lower() for name, _value in redirected.header_items()}
+
+    assert _CREDENTIAL_HEADERS <= redirect_to(f"{source}/")
+    assert not _CREDENTIAL_HEADERS & redirect_to(target)
 
 
 def test_ipv6_loopback_reaches_server_with_bracketed_host(
