@@ -1,17 +1,11 @@
 "use strict";
 
-require("should");
-const zapier = require("zapier-platform-core");
 const nock = require("nock");
 
-const App = require("../index");
-
-const appTester = zapier.createAppTester(App);
+const { App, appTester, authData } = require("./helpers");
 
 describe("authentication", () => {
   afterEach(() => nock.cleanAll());
-
-  const authData = { apiKey: "hsk_test", apiUrl: "https://api.example.com" };
 
   it("tests the credential against GET /v1/default/banks with a Bearer header", async () => {
     const scope = nock("https://api.example.com", {
