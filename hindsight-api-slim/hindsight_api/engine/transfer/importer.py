@@ -22,6 +22,7 @@ import logging
 import re
 import uuid
 import zipfile
+import zlib
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
@@ -51,6 +52,7 @@ from ..schema import fq_table
 from .schema import (
     CARRIED_HISTORY_TABLES,
     HISTORY_TABLES,
+    OPERATIONAL_TABLES,
     SCHEMA_VERSION,
     BankRowsJSONEncoding,
     TransferAttachment,
@@ -621,6 +623,53 @@ def parse_bank_archive(zf: zipfile.ZipFile) -> ParsedBankArchive:
     )
 
 
+def _check_archive_rows(name: str, rows: Iterable[Any]) -> None:
+    """Check the object shape that the verbatim-row restore's column lookups require."""
+    for position, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"Invalid transfer archive: {name} row {position} is not a JSON object")
+
+
+def validate_bank_archive(archive: Archive) -> None:
+    """Validate every section before a whole-bank import can leave a half-restored bank.
+
+    This costs one extra archive pass. It uses the restore's models and streaming
+    parsers, discarding each document, observation and data/history row as it goes;
+    nothing the restore streams is held whole here (issue #5737). Bank-level sections
+    are read by ``parse_bank_archive``, just as they are during restore. Database
+    constraints still require the restore's rollback barrier.
+    """
+    with _open_archive(archive, produced_by="the bank export endpoint") as zf:
+        try:
+            parsed = parse_bank_archive(zf)
+            for table, rows in parsed.bank_rows.items():
+                if not isinstance(rows, list):
+                    raise ValueError(f"Invalid transfer archive: {table}.json is not a JSON array")
+                _check_archive_rows(f"{table}.json", rows)
+            for row in parsed.bank_rows.get("mental_models", []):
+                # Both embedding regeneration and standalone-model selection index by id.
+                if "id" not in row:
+                    raise ValueError("Invalid transfer archive: mental_models.json row has no id")
+
+            for _document in _iter_documents(zf):
+                pass
+            for observation in _iter_json_array(zf, "observations.json"):
+                TransferObservation.model_validate(observation)
+            for table in (*OPERATIONAL_TABLES, "invalidated_memory_units"):
+                name = f"data/{table}.json"
+                _check_archive_rows(name, _iter_json_array(zf, name))
+            for table in HISTORY_TABLES:
+                name = f"history/{table}.json"
+                _check_archive_rows(name, _iter_json_array(zf, name))
+            for attachment in parsed.attachments:
+                # Read through the blob to verify its CRC without allocating the whole entry.
+                with zf.open(attachment.entry) as blob:
+                    while blob.read(_JSON_READ_CHARS):
+                        pass
+        except (zipfile.BadZipFile, zlib.error, EOFError) as error:
+            raise ValueError(f"Invalid transfer archive: an entry is corrupt ({error})") from error
+
+
 def _resolve_bank_rows_json_encoding(manifest: TransferManifest) -> BankRowsJSONEncoding:
     """Resolve row JSON provenance, including the released v1 archive contract."""
     return manifest.bank_rows_json_encoding or "decoded"
@@ -658,8 +707,9 @@ async def _restore_rows(
     fq: Callable[[str], str] = fq_table,
 ) -> int:
     """Insert verbatim rows into a bank-scoped table, coercing JSON-encoded values
-    back to the column's type (timestamps, uuids, jsonb). ``ON CONFLICT DO NOTHING``
-    keeps an import idempotent and safe to re-run against a partially-filled target.
+    back to the column's type (timestamps, uuids, jsonb). Child rows use
+    ``ON CONFLICT DO NOTHING``; the bank row must be fresh so the ownership
+    callback cannot claim a row created by a concurrent call.
 
     ``rows`` may be a stream: they are written ``_RESTORE_BATCH_SIZE`` at a time, one
     ``executemany`` per run of rows sharing a column set.
@@ -719,7 +769,10 @@ async def _restore_rows(
             values.append(value)
         # Oracle folds unquoted DDL identifiers to upper case; quoted lower case would not match.
         col_list = ", ".join(f'"{c.upper()}"' if oracle else f'"{c}"' for c in cols)
-        sql = f"INSERT INTO {fq(table)} ({col_list}) VALUES ({', '.join(placeholders)}) ON CONFLICT DO NOTHING"
+        # A concurrent bank creator must fail this restore before on_bank_created;
+        # silently adopting its row would let rollback delete somebody else's bank.
+        conflict = "" if table == "banks" else " ON CONFLICT DO NOTHING"
+        sql = f"INSERT INTO {fq(table)} ({col_list}) VALUES ({', '.join(placeholders)}){conflict}"
         if pending and (sql != pending_sql or len(pending) >= _RESTORE_BATCH_SIZE):
             await conn.executemany(cast(str, pending_sql), pending)
             pending = []
@@ -1326,7 +1379,8 @@ async def _restore_bank(
                     bank_rows_json_encoding=bank_rows_json_encoding,
                 )
             else:
-                await bank_utils.create_bank_row_on_conn(conn, bank_id, ops=ops)
+                if not await bank_utils.create_bank_row_on_conn(conn, bank_id, ops=ops):
+                    raise ValueError(f"Target bank '{bank_id}' already exists; a concurrent call created it")
             if on_bank_created is not None:
                 await on_bank_created(conn)
             # The restored banks row bypasses the fresh-INSERT gate that normally

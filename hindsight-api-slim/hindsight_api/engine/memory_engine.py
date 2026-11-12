@@ -4138,6 +4138,9 @@ class MemoryEngine(MemoryEngineInterface):
                     history=task_dict.get("include_history", False),
                 ),
                 operation_id=operation_id,
+                # Only marked submissions validated these stashed bytes. Older tasks and
+                # clones still need preflight; an operation_id alone identifies neither.
+                _archive_validated=task_dict.get("archive_validated", False),
             )
             # Restored documents are reported like imported ones. Only here, not in
             # import_bank_async: a clone reuses that restore, but copies documents the
@@ -8200,7 +8203,7 @@ class MemoryEngine(MemoryEngineInterface):
         immediate error rather than a task that fails in the background.
         """
         from .transfer import TransferScope
-        from .transfer.importer import read_bank_manifest
+        from .transfer.importer import read_bank_manifest, validate_bank_archive
 
         scope = scope or TransferScope()
         # Validate the archive synchronously: a malformed or documents-only zip is
@@ -8223,8 +8226,13 @@ class MemoryEngine(MemoryEngineInterface):
                     CreateBankContext(bank_id=target, request_context=request_context)
                 )
             )
-        # Only parse the documents when a validator will look at them: restore parses the
-        # archive again when it runs, so without a gate this would be wasted work.
+        # Barrier 1 against a half-restored bank: read every section the restore will read
+        # before anything is stashed or queued, so one bad document, observation or page is a
+        # 400 here and not a task that fails after it created the bank. Always, with or
+        # without an operation validator; the task skips its own pass (see import_bank_async).
+        # Off the event loop: it is one full pass over an archive that can be large.
+        await asyncio.to_thread(validate_bank_archive, archive)
+        # The validator's import gate needs the documents' text, so it reads them once more.
         if scope.data and self._operation_validator:
             await self._validate_import(target, archive, request_context)
 
@@ -8237,6 +8245,7 @@ class MemoryEngine(MemoryEngineInterface):
             "include_data": scope.data,
             "include_bank_config": scope.bank_config,
             "include_history": scope.history,
+            "archive_validated": True,
         }
         if request_context.tenant_id:
             task_payload["_tenant_id"] = request_context.tenant_id
@@ -8933,6 +8942,7 @@ class MemoryEngine(MemoryEngineInterface):
         target_bank_id: str | None = None,
         scope: "TransferScope | None" = None,
         operation_id: str | None = None,
+        _archive_validated: bool = False,
     ) -> "BankImportResult":
         """Restore a whole bank from an :func:`transfer.export_bank` archive.
 
@@ -8947,18 +8957,38 @@ class MemoryEngine(MemoryEngineInterface):
         mid-import) deletes the half-restored bank and starts again, rather than
         failing on a target that "already exists". A bank the operation did not
         create is never touched.
+
+        Two barriers keep a bad archive from leaving a half-restored bank. First, the whole
+        archive is validated before the first write (``validate_bank_archive``), so a bad
+        section is refused with a ``ValueError`` and nothing exists. Second, should the restore
+        still raise after it created the bank row (a value only the database rejects, a crash
+        in a later section), the bank this call created is deleted and the original error is
+        re-raised.
+
+        ``_archive_validated`` skips the first barrier for the one caller whose archive has
+        already passed it: the import task, which runs on the bytes that
+        ``submit_bank_import_async`` validated and stashed. An explicit flag rather than
+        ``operation_id`` because the clone task also carries an ``operation_id`` and its
+        archive was never validated. Every other caller (admin CLI, clone) pays the extra pass.
         """
         from .transfer import import_bank
-        from .transfer.importer import read_bank_manifest
+        from .transfer.importer import read_bank_manifest, validate_bank_archive
 
         await self._authenticate_tenant(request_context)
         backend = await self._get_backend()
         # Read the manifest up front so a bad archive fails fast and we know the target bank.
         bank_id = target_bank_id or read_bank_manifest(archive).source_bank_id
+        # Before the first write, including the discard of a previous attempt just below.
+        if not _archive_validated:
+            await asyncio.to_thread(validate_bank_archive, archive)
 
-        on_bank_created = None
+        operations = fq_table("async_operations")
+        banks = fq_table("banks")
+        # Identity of the bank row this call committed, so the rollback below can tell it
+        # from a bank someone else created under the same id. Set on the connection that
+        # creates the row; stays unset when the restore refuses before creating one.
+        created_internal_id: Any = None
         if operation_id:
-            operations = fq_table("async_operations")
             async with acquire_with_retry(backend) as conn:
                 metadata = conn.parse_json(
                     await conn.fetchval(
@@ -8973,7 +9003,9 @@ class MemoryEngine(MemoryEngineInterface):
                 logger.info("[transfer] Retrying operation %s: discarding partial restore of %s", operation_id, bank_id)
                 await self.delete_bank(bank_id, request_context=request_context)
 
-            async def on_bank_created(conn: Any) -> None:
+        async def on_bank_created(conn: Any) -> None:
+            nonlocal created_internal_id
+            if operation_id:
                 await conn.execute(
                     f"UPDATE {operations} "
                     f"SET result_metadata = COALESCE(result_metadata, '{{}}'::jsonb) || $1::jsonb "
@@ -8981,6 +9013,7 @@ class MemoryEngine(MemoryEngineInterface):
                     json.dumps({"restored_bank_id": bank_id}),
                     uuid.UUID(operation_id),
                 )
+            created_internal_id = await conn.fetchval(f"SELECT internal_id FROM {banks} WHERE bank_id = $1", bank_id)
 
         if await bank_utils.get_bank_profile_if_exists(backend, bank_id) is None:
             # Checked here rather than only at submit time: the admin CLI restores through
@@ -9002,20 +9035,54 @@ class MemoryEngine(MemoryEngineInterface):
             # an imported bank classified as regular (#3236).
             return await self._config_resolver.resolve_full_config(bank_id, request_context)
 
-        return await import_bank(
-            backend=backend,
-            embeddings_model=self.embeddings,
-            entity_resolver=self.entity_resolver,
-            resolve_config=_resolve_restored_config,
-            format_date_fn=self._format_readable_date,
-            archive=archive,
-            target_bank_id=target_bank_id,
-            scope=scope,
-            # Attachment bytes ride in the archive; the target writes them to its
-            # own storage under its own keys (see transfer._restore_attachments).
-            file_storage=self._file_storage,
-            on_bank_created=on_bank_created,
-        )
+        try:
+            return await import_bank(
+                backend=backend,
+                embeddings_model=self.embeddings,
+                entity_resolver=self.entity_resolver,
+                resolve_config=_resolve_restored_config,
+                format_date_fn=self._format_readable_date,
+                archive=archive,
+                target_bank_id=target_bank_id,
+                scope=scope,
+                # Attachment bytes ride in the archive; the target writes them to its
+                # own storage under its own keys (see transfer._restore_attachments).
+                file_storage=self._file_storage,
+                on_bank_created=on_bank_created,
+            )
+        except BaseException:
+            # Sections commit separately: even cancellation must discard this call's bank.
+            # The callback's row identity stays unset if the target already existed.
+            if created_internal_id is not None:
+                await self._discard_half_restored_bank(backend, bank_id, created_internal_id, request_context)
+            raise
+
+    async def _discard_half_restored_bank(
+        self, backend: DatabaseBackend, bank_id: str, internal_id: Any, request_context: "RequestContext"
+    ) -> None:
+        """Delete the bank a failed restore created; a cleanup error is logged so the restore's error survives.
+
+        ``internal_id`` is the identity of the row the restore committed. A bank that is gone
+        (its creating transaction rolled back) or has another identity (created by someone
+        else under the same id since) is not this restore's and is left alone.
+        """
+        try:
+            async with acquire_with_retry(backend) as conn:
+                row = await conn.fetchrow(f"SELECT internal_id FROM {fq_table('banks')} WHERE bank_id = $1", bank_id)
+            if row is None or row["internal_id"] != internal_id:
+                return
+            logger.warning("[transfer] Restore of bank %s failed; deleting the half-restored bank", bank_id)
+            await self.delete_bank(bank_id, request_context=request_context)
+        except Exception:
+            # Cleanup must preserve the restore's original error. Exception, not BaseException: a
+            # cancellation landing here must propagate (asyncio requires CancelledError to be
+            # re-raised); it carries the restore's error as __context__, and an operation-id retry
+            # still discards the bank. The first draft caught BaseException and swallowed it.
+            logger.warning(
+                "[transfer] Could not delete the half-restored bank %s; an operation-id retry can discard it",
+                bank_id,
+                exc_info=True,
+            )
 
     async def import_documents_async(
         self,
