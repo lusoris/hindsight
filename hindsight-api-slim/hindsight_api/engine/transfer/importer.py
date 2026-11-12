@@ -60,6 +60,7 @@ from .schema import (
     TransferManifest,
     TransferObservation,
     TransferObservationSource,
+    TransferRecordContract,
     TransferScope,
     standalone_mental_models,
 )
@@ -1558,6 +1559,9 @@ async def _prepare_documents(
     for (document, target_id), extracted in zip(batch, extracted_per_doc, strict=True):
         fact_batch = orchestrator._process_extracted_facts(extracted, embeddings[offset : offset + len(extracted)])
         offset += len(extracted)
+        for original_index, retained_index in enumerate(fact_batch.retained_index_by_original):
+            if retained_index is not None:
+                _apply_record_contract(fact_batch.processed_facts[retained_index], document.facts[original_index])
         prepared.append(
             _PreparedDocument(
                 document=document,
@@ -1967,8 +1971,9 @@ async def _import_observations(
         # Observations embed the raw text (matching consolidation), not the
         # date-augmented text used for facts.
         embeddings = await _embed_in_batches(embeddings_model, [obs.text for obs, _ in batch])
-        processed = [
-            ProcessedFact(
+        processed: list[ProcessedFact] = []
+        for (obs, _sources), embedding in zip(batch, embeddings):
+            fact = ProcessedFact(
                 fact_text=obs.text,
                 fact_type="observation",
                 embedding=pack_embedding(embedding),
@@ -1982,8 +1987,8 @@ async def _import_observations(
                 document_id=None,
                 chunk_id=None,
             )
-            for (obs, _sources), embedding in zip(batch, embeddings)
-        ]
+            _apply_record_contract(fact, obs)
+            processed.append(fact)
         written = await store.import_transfer_observations(
             backend=backend,
             ops=ops,
@@ -2090,6 +2095,21 @@ def _observation_mentioned_at(obs: TransferObservation) -> datetime | None:
     if obs.occurred_start is None and mentioned_at is None:
         mentioned_at = obs.event_date or datetime.now(UTC)
     return mentioned_at
+
+
+def _apply_record_contract(processed: ProcessedFact, source: TransferRecordContract) -> None:
+    """The retain pipeline builds a ProcessedFact with the column defaults; a transfer
+    import replaces them with the archived contract. The archive values were already
+    validated by the Literal types at parse time.
+    """
+    processed.provenance_class = source.provenance_class
+    processed.write_authority = source.write_authority
+    processed.observed_at = source.observed_at
+    processed.fetched_at = source.fetched_at
+    processed.ttl_seconds = source.ttl_seconds
+    processed.scope = source.scope
+    processed.reset_condition = source.reset_condition
+    processed.record_status = source.record_status
 
 
 def _to_extracted_fact(fact: TransferFact) -> ExtractedFact:

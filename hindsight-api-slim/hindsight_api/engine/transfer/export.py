@@ -1239,6 +1239,15 @@ async def _load_facts_from_store(
                 created_at=memory.created_at if include_lifecycle else None,
                 consolidated_at=memory.consolidated_at if include_lifecycle else None,
                 consolidation_failed_at=None,
+                # Record contract is carried always, not gated by include_lifecycle.
+                provenance_class=memory.provenance_class,
+                write_authority=memory.write_authority,
+                observed_at=memory.observed_at,
+                fetched_at=memory.fetched_at,
+                ttl_seconds=memory.ttl_seconds,
+                scope=memory.scope,
+                reset_condition=memory.reset_condition,
+                record_status=memory.record_status,
             )
         )
         loaded.unit_index[memory.unit_id] = _UnitLocation(document_id=memory.document_id, ordinal=ordinal)
@@ -1318,6 +1327,15 @@ async def _load_observations_from_store(
                     for loc in locations
                     if loc is not None
                 ],
+                # Record contract is carried always, not gated by include_lifecycle.
+                provenance_class=memory.provenance_class,
+                write_authority=memory.write_authority,
+                observed_at=memory.observed_at,
+                fetched_at=memory.fetched_at,
+                ttl_seconds=memory.ttl_seconds,
+                scope=memory.scope,
+                reset_condition=memory.reset_condition,
+                record_status=memory.record_status,
             )
         )
     if skipped:

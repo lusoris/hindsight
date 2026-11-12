@@ -153,7 +153,9 @@ async def load_observations(
     rows = await conn.fetch(
         f"""
         SELECT id, text, tags, created_at, event_date, occurred_start, occurred_end,
-               mentioned_at, observation_scopes, proof_count, source_memory_ids
+               mentioned_at, observation_scopes, proof_count, source_memory_ids,
+               provenance_class, write_authority, observed_at, fetched_at,
+               ttl_seconds, scope, reset_condition, record_status
         FROM {fq_table("memory_units")}
         WHERE bank_id = $1 AND fact_type = 'observation'
         ORDER BY created_at, id
@@ -188,6 +190,15 @@ async def load_observations(
                     for loc in locations
                     if loc is not None
                 ],
+                # Record contract is carried always, not gated by include_lifecycle.
+                provenance_class=row["provenance_class"],
+                write_authority=row["write_authority"],
+                observed_at=row["observed_at"],
+                fetched_at=row["fetched_at"],
+                ttl_seconds=row["ttl_seconds"],
+                scope=row["scope"],
+                reset_condition=row["reset_condition"],
+                record_status=row["record_status"],
             )
         )
     if skipped:
@@ -233,7 +244,9 @@ async def _load_facts(
         SELECT id, document_id, text, fact_type, context, event_date,
                occurred_start, occurred_end, mentioned_at, metadata,
                chunk_id, tags, observation_scopes,
-               created_at, consolidated_at, consolidation_failed_at
+               created_at, consolidated_at, consolidation_failed_at,
+               provenance_class, write_authority, observed_at, fetched_at,
+               ttl_seconds, scope, reset_condition, record_status
         FROM {fq_table("memory_units")}
         WHERE bank_id = $1
           AND document_id = ANY($2)
@@ -269,6 +282,15 @@ async def _load_facts(
             created_at=row["created_at"] if include_lifecycle else None,
             consolidated_at=row["consolidated_at"] if include_lifecycle else None,
             consolidation_failed_at=row["consolidation_failed_at"] if include_lifecycle else None,
+            # Record contract is carried always, not gated by include_lifecycle.
+            provenance_class=row["provenance_class"],
+            write_authority=row["write_authority"],
+            observed_at=row["observed_at"],
+            fetched_at=row["fetched_at"],
+            ttl_seconds=row["ttl_seconds"],
+            scope=row["scope"],
+            reset_condition=row["reset_condition"],
+            record_status=row["record_status"],
         )
         bucket.append(fact)
         loaded.unit_index[row["id"]] = _UnitLocation(document_id=doc_id, ordinal=ordinal)

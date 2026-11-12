@@ -626,6 +626,36 @@ async def _fact_lifecycle(memory, bank_id):
     return sorted((r["text"], r["created_at"], r["consolidated_at"], r["consolidation_failed_at"]) for r in rows)
 
 
+async def _record_contract(memory, bank_id):
+    """Sorted (text, fact_type, provenance_class, write_authority, observed_at,
+    fetched_at, ttl_seconds, scope, reset_condition, record_status) for every row
+    of the bank in memory_units."""
+    backend = await memory._get_backend()
+    async with acquire_with_retry(backend) as conn:
+        rows = await conn.fetch(
+            f"SELECT text, fact_type, provenance_class, write_authority, observed_at, "
+            f"fetched_at, ttl_seconds, scope, reset_condition, record_status "
+            f"FROM {fq_store_table('memory_units')} "
+            f"WHERE bank_id = $1",
+            bank_id,
+        )
+    return sorted(
+        (
+            r["text"],
+            r["fact_type"],
+            r["provenance_class"],
+            r["write_authority"],
+            r["observed_at"],
+            r["fetched_at"],
+            r["ttl_seconds"],
+            r["scope"],
+            r["reset_condition"],
+            r["record_status"],
+        )
+        for r in rows
+    )
+
+
 async def _eligible_fact_count(memory, bank_id):
     """Facts the maintenance reconciler would treat as unconsolidated backlog —
     the exact predicate of ``banks_needing_consolidation()``."""
@@ -746,6 +776,172 @@ async def test_bank_import_preserves_consolidation_lifecycle(memory, request_con
         assert await _observation_count(memory, bank) == source_obs_count
     finally:
         await memory.delete_bank(bank, request_context=request_context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.memory_backend_incompatible
+async def test_bank_roundtrip_preserves_record_contract(memory, request_context):
+    """Whole-bank import restores each fact and observation's record contract verbatim."""
+    bank = _unique_bank("bank_record_contract")
+    try:
+        await _retain(
+            memory,
+            bank,
+            "Alice works at Google. Bob works at Microsoft. Carol lives in Paris.",
+            request_context,
+            "doc-1",
+        )
+        backend = await memory._get_backend()
+
+        # Deterministic baseline: drop any auto-consolidation observations so the
+        # only observation is the one created explicitly below.
+        async with acquire_with_retry(backend) as conn:
+            await conn.execute(
+                f"DELETE FROM {fq_store_table('memory_units')} WHERE bank_id = $1 AND fact_type = 'observation'",
+                bank,
+            )
+
+        async with acquire_with_retry(backend) as conn:
+            wf_ids = [
+                r["id"]
+                for r in await conn.fetch(
+                    f"SELECT id FROM {fq_store_table('memory_units')} "
+                    f"WHERE bank_id = $1 AND fact_type IN ('world', 'experience') ORDER BY created_at, id",
+                    bank,
+                )
+            ]
+        assert len(wf_ids) >= 3, "need enough facts"
+
+        # One surviving observation over the first two facts.
+        obs_source_ids = [uuid.UUID(str(i)) for i in wf_ids[:2]]
+        await _seed_observation(
+            pool=backend,
+            memory=memory,
+            bank_id=bank,
+            source_memory_ids=obs_source_ids,
+            observation_text="Alice and Bob are colleagues.",
+        )
+
+        t_observed = datetime(2026, 3, 1, 10, 0, 0, tzinfo=timezone.utc)
+        t_fetched = datetime(2026, 3, 1, 10, 5, 0, tzinfo=timezone.utc)
+
+        fact_1_id = wf_ids[0]
+        fact_2_id = wf_ids[1]
+        # fact 3 (wf_ids[2]) left at defaults
+
+        async with acquire_with_retry(backend) as conn:
+            await conn.execute(
+                f"""
+                UPDATE {fq_store_table("memory_units")}
+                SET provenance_class = 'tool-run',
+                    write_authority = 'agent:lane',
+                    observed_at = $2,
+                    fetched_at = $3,
+                    ttl_seconds = 60,
+                    scope = 'repo',
+                    reset_condition = 'on-commit',
+                    record_status = 'stale'
+                WHERE bank_id = $1 AND id = $4
+                """,
+                bank,
+                t_observed,
+                t_fetched,
+                fact_1_id,
+            )
+            await conn.execute(
+                f"""
+                UPDATE {fq_store_table("memory_units")}
+                SET provenance_class = 'file-read',
+                    record_status = 'tombstoned'
+                WHERE bank_id = $1 AND id = $2
+                """,
+                bank,
+                fact_2_id,
+            )
+            await conn.execute(
+                f"""
+                UPDATE {fq_store_table("memory_units")}
+                SET provenance_class = 'recalled',
+                    record_status = 'disputed',
+                    ttl_seconds = 3600
+                WHERE bank_id = $1 AND fact_type = 'observation'
+                """,
+                bank,
+            )
+
+        source = await _record_contract(memory, bank)
+
+        from hindsight_api.engine.transfer import export_bank
+
+        async with acquire_with_retry(backend) as conn:
+            archive = await export_bank(conn, bank)
+
+        await memory.delete_bank(bank, request_context=request_context)
+        await memory.import_bank_async(archive, request_context)
+
+        assert await _record_contract(memory, bank) == source
+    finally:
+        await memory.delete_bank(bank, request_context=request_context)
+
+
+@pytest.mark.asyncio
+@pytest.mark.memory_backend_incompatible
+async def test_document_export_preserves_record_contract(memory, request_context):
+    """Plain document export (include_lifecycle=False) still preserves the record contract."""
+    src = _unique_bank("doc_contract_src")
+    dst = _unique_bank("doc_contract_dst")
+    try:
+        await _retain(memory, src, "Alice works at Google. Bob works at Microsoft.", request_context, "doc-1")
+        backend = await memory._get_backend()
+
+        # Delete any auto-consolidation observations so we test only the retained facts.
+        async with acquire_with_retry(backend) as conn:
+            await conn.execute(
+                f"DELETE FROM {fq_store_table('memory_units')} WHERE bank_id = $1 AND fact_type = 'observation'",
+                src,
+            )
+
+        async with acquire_with_retry(backend) as conn:
+            wf_ids = [
+                r["id"]
+                for r in await conn.fetch(
+                    f"SELECT id FROM {fq_store_table('memory_units')} "
+                    f"WHERE bank_id = $1 AND fact_type IN ('world', 'experience') ORDER BY created_at, id",
+                    src,
+                )
+            ]
+        assert len(wf_ids) >= 2, "need at least two facts"
+
+        t_fetched = datetime(2026, 3, 1, 10, 5, 0, tzinfo=timezone.utc)
+        async with acquire_with_retry(backend) as conn:
+            await conn.execute(
+                f"""
+                UPDATE {fq_store_table("memory_units")}
+                SET record_status = 'stale',
+                    fetched_at = $2,
+                    ttl_seconds = 60,
+                    provenance_class = 'tool-run'
+                WHERE bank_id = $1 AND id = $3
+                """,
+                src,
+                t_fetched,
+                wf_ids[0],
+            )
+
+        src_rows = await _record_contract(memory, src)
+        src_by_text = {r[0]: r for r in src_rows if r[1] != "observation"}
+        assert len(src_by_text) >= 2
+
+        _, archive = await _export_async(memory, src, request_context)
+        await _import(memory, dst, archive, request_context)
+
+        dst_rows = await _record_contract(memory, dst)
+        dst_by_text = {r[0]: r for r in dst_rows if r[1] != "observation"}
+
+        assert dst_by_text == src_by_text
+    finally:
+        await memory.delete_bank(src, request_context=request_context)
+        await memory.delete_bank(dst, request_context=request_context)
 
 
 @pytest.mark.asyncio
@@ -2713,6 +2909,85 @@ async def test_export_of_a_store_owned_bank_contains_its_memories():
     assert doc["facts"][0]["entities"] == ["Ada Lovelace"], doc["facts"][0]
     # And the causal edge has to survive as an ordinal into this document's fact list.
     assert doc["facts"][1]["causal_relations"] == [{"relation_type": "caused_by", "target_fact_index": 0}]
+
+
+@pytest.mark.asyncio
+async def test_export_of_a_store_owned_bank_preserves_record_contract():
+    """A store-owned bank export carries the record contract of each memory into the archive."""
+    from hindsight_api.engine.transfer.export import export_documents
+
+    t_fetched = datetime(2026, 3, 1, 10, 5, 0, tzinfo=timezone.utc)
+
+    class _StoreWithContract(_FakeStoreOwned):
+        def __init__(self):
+            super().__init__()
+            self._cause.provenance_class = "tool-run"
+            self._cause.record_status = "stale"
+            self._cause.ttl_seconds = 60
+            self._cause.fetched_at = t_fetched
+
+    archive = await export_documents(None, "bank-x", None, memories=_StoreWithContract())
+
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        doc_names = [n for n in zf.namelist() if n.startswith("documents/")]
+        assert doc_names
+        doc = json.loads(zf.read(doc_names[0]))
+
+    cause_fact = next(f for f in doc["facts"] if f["text"] == "the cause")
+    effect_fact = next(f for f in doc["facts"] if f["text"] == "the effect")
+
+    assert cause_fact["provenance_class"] == "tool-run"
+    assert cause_fact["record_status"] == "stale"
+    assert cause_fact["ttl_seconds"] == 60
+    assert cause_fact["fetched_at"] == "2026-03-01T10:05:00Z"
+    assert effect_fact["provenance_class"] == "inferred"
+    assert effect_fact["record_status"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_a_store_owned_observation_export_carries_its_record_contract():
+    """A disputed observation with a TTL leaves a store-owned bank with that state, not as active."""
+    from hindsight_api.engine.memories.base import StoredMemory
+    from hindsight_api.engine.transfer.export import _UnitLocation
+
+    t_fetched = datetime(2026, 3, 1, 10, 5, 0, tzinfo=timezone.utc)
+
+    class _StoreWithObservation(_FakeStoreOwned):
+        async def scan_memories(self, *, bank_id, fact_types=None, page_token="", **_kw):
+            if fact_types and "observation" in fact_types and not page_token:
+                observation = StoredMemory(
+                    unit_id="unit-obs",
+                    text="the cause led to the effect",
+                    fact_type="observation",
+                    created_at=self._t0,
+                    source_memory_ids=["unit-cause", "unit-effect"],
+                    provenance_class="recalled",
+                    write_authority="agent:lane",
+                    fetched_at=t_fetched,
+                    ttl_seconds=3600,
+                    scope="repo",
+                    reset_condition="on-commit",
+                    record_status="disputed",
+                )
+                return self._page(memories=[observation], next_page_token="")
+            return await super().scan_memories(bank_id=bank_id, fact_types=fact_types, page_token=page_token, **_kw)
+
+    unit_index = {
+        "unit-cause": _UnitLocation(document_id="doc-1", ordinal=0),
+        "unit-effect": _UnitLocation(document_id="doc-1", ordinal=1),
+    }
+    [observation] = await _StoreWithObservation().load_transfer_observations(
+        conn=None, fq_table=None, bank_id="bank-x", unit_index=unit_index
+    )
+
+    assert observation.provenance_class == "recalled"
+    assert observation.write_authority == "agent:lane"
+    assert observation.observed_at is None
+    assert observation.fetched_at == t_fetched
+    assert observation.ttl_seconds == 3600
+    assert observation.scope == "repo"
+    assert observation.reset_condition == "on-commit"
+    assert observation.record_status == "disputed"
 
 
 class _CountsItsScans(_FakeStoreOwned):

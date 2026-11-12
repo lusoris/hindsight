@@ -4465,6 +4465,15 @@ class MemoriesExtension(Extension, ABC):
                     occurred_end=obs.occurred_end,
                     mentioned_at=fact.mentioned_at,
                     created_at=obs.created_at,
+                    # The archived record contract, copied onto ``fact`` by the importer.
+                    provenance_class=fact.provenance_class,
+                    write_authority=fact.write_authority,
+                    observed_at=fact.observed_at,
+                    fetched_at=fact.fetched_at,
+                    ttl_seconds=fact.ttl_seconds,
+                    scope=fact.scope,
+                    reset_condition=fact.reset_condition,
+                    record_status=fact.record_status,
                 ),
             )
             marked.update(sources)

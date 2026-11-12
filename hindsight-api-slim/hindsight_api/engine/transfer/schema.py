@@ -119,7 +119,29 @@ class TransferAttachment(BaseModel):
 
 
 ObservationScopes = Literal["per_tag", "combined", "all_combinations", "shared"] | list[list[str]]
+ProvenanceClass = Literal["tool-run", "file-read", "recalled", "inferred"]
+RecordStatus = Literal["active", "stale", "disputed", "tombstoned"]
 BankRowsJSONEncoding = Literal["decoded", "serialized"]
+
+
+class TransferRecordContract(BaseModel):
+    """The record contract (provenance and freshness) of one memory, carried by every
+    transfer so a stale, disputed or tombstoned record, or one with a TTL, keeps that
+    state on the target.
+    """
+
+    # Absent in archives produced before these fields were added, so such an
+    # archive imports every record as `active` / `inferred` with no expiry,
+    # which is exactly what those records were on the source (the columns did
+    # not exist).
+    provenance_class: ProvenanceClass = "inferred"
+    write_authority: str | None = None
+    observed_at: datetime | None = None
+    fetched_at: datetime | None = None
+    ttl_seconds: int | None = None
+    scope: str | None = None
+    reset_condition: str | None = None
+    record_status: RecordStatus = "active"
 
 
 class TransferCausalRelation(BaseModel):
@@ -133,7 +155,7 @@ class TransferCausalRelation(BaseModel):
     target_fact_index: int
 
 
-class TransferFact(BaseModel):
+class TransferFact(TransferRecordContract):
     """One extracted fact (memory unit) without its embedding or database id.
 
     Everything here is reused verbatim on import except the embedding, which is
@@ -197,7 +219,7 @@ class TransferObservationSource(BaseModel):
     fact_index: int
 
 
-class TransferObservation(BaseModel):
+class TransferObservation(TransferRecordContract):
     """A consolidated observation (``fact_type='observation'``).
 
     Observations are bank-level (not tied to one document), carry no embedding
