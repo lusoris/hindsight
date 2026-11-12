@@ -5,6 +5,26 @@
 set -e
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# Prettier must run only the binary npm ci installs from the root package-lock.json (hindsight-control-plane
+# declares ^3.7.4; the lock held 3.7.4 when this was written). This used to be `npx prettier`: npm exec with
+# no local package assumes --yes when stdin is not a TTY or CI is set, so a checkout without node_modules
+# fetched the newest prettier from the registry and reformatted files (drift incidents 2026-11-08 and 2026-11-12).
+PRETTIER="$REPO_ROOT/node_modules/.bin/prettier"
+if [ ! -x "$PRETTIER" ]; then
+    echo "❌ Error: $PRETTIER not found or not executable; run npm ci at the repository root." >&2
+    exit 1
+fi
+# The binary must also be the version the lock pins: a node_modules left from an older lock passes the -x check
+# above and would format with that older prettier.
+PRETTIER_LOCKED=$(node -p 'require(process.argv[1]).packages?.["node_modules/prettier"]?.version ?? ""' \
+    "$REPO_ROOT/package-lock.json" 2>/dev/null || true)
+PRETTIER_INSTALLED=$("$PRETTIER" --version 2>/dev/null || true)
+if [ -z "$PRETTIER_LOCKED" ] || [ "$PRETTIER_INSTALLED" != "$PRETTIER_LOCKED" ]; then
+    echo "❌ Error: $PRETTIER is ${PRETTIER_INSTALLED:-unknown}, package-lock.json pins ${PRETTIER_LOCKED:-nothing}; run npm ci at the repository root." >&2
+    exit 1
+fi
+
 TEMP_DIR=$(mktemp -d)
 trap "rm -rf $TEMP_DIR" EXIT
 
@@ -16,11 +36,13 @@ run_task() {
     local name="$1"
     local dir="$2"
     shift 2
-    local cmd="$@"
 
     (
         cd "$dir"
-        if OUTPUT=$($cmd 2>&1); then
+        # The command arrives as separate words and runs as "$@", so a checkout path holding a space stays one
+        # argument. It used to arrive as one string expanded unquoted, which split "$PRETTIER" and
+        # "--project $REPO_ROOT" under such a path.
+        if OUTPUT=$("$@" 2>&1); then
             echo "OK" > "$TEMP_DIR/$name.status"
         else
             echo "FAIL" > "$TEMP_DIR/$name.status"
@@ -41,36 +63,36 @@ uv sync --frozen --quiet
 echo "  Running lints in parallel..."
 
 # Node/TypeScript tasks
-run_task "eslint" "$REPO_ROOT/hindsight-control-plane" "npm run lint -- --fix"
-run_task "prettier" "$REPO_ROOT/hindsight-control-plane" "npx prettier --write src/**/*.{ts,tsx}"
-run_task "prettier-ts-client" "$REPO_ROOT/hindsight-clients/typescript" "npx --yes prettier --write --config $REPO_ROOT/.prettierrc.json --ignore-path $REPO_ROOT/.gitignore ."
-run_task "prettier-all-npm" "$REPO_ROOT/hindsight-all-npm" "npx --yes prettier --write --config $REPO_ROOT/.prettierrc.json --ignore-path $REPO_ROOT/.gitignore ."
+run_task "eslint" "$REPO_ROOT/hindsight-control-plane" npm run lint -- --fix
+run_task "prettier" "$REPO_ROOT/hindsight-control-plane" "$PRETTIER" --write "src/**/*.{ts,tsx}"
+run_task "prettier-ts-client" "$REPO_ROOT/hindsight-clients/typescript" "$PRETTIER" --write --config "$REPO_ROOT/.prettierrc.json" --ignore-path "$REPO_ROOT/.gitignore" .
+run_task "prettier-all-npm" "$REPO_ROOT/hindsight-all-npm" "$PRETTIER" --write --config "$REPO_ROOT/.prettierrc.json" --ignore-path "$REPO_ROOT/.gitignore" .
 
 # Python hindsight-api-slim tasks
-run_task "ruff-api-check" "$REPO_ROOT/hindsight-api-slim" "uv run --frozen ruff check --fix ."
-run_task "ruff-api-format" "$REPO_ROOT/hindsight-api-slim" "uv run --frozen ruff format ."
-run_task "ty-api" "$REPO_ROOT/hindsight-api-slim" "uv run --frozen ty check hindsight_api"
+run_task "ruff-api-check" "$REPO_ROOT/hindsight-api-slim" uv run --frozen ruff check --fix .
+run_task "ruff-api-format" "$REPO_ROOT/hindsight-api-slim" uv run --frozen ruff format .
+run_task "ty-api" "$REPO_ROOT/hindsight-api-slim" uv run --frozen ty check hindsight_api
 
 # Python hindsight-dev tasks
-run_task "ruff-dev-check" "$REPO_ROOT/hindsight-dev" "uv run --frozen ruff check --fix ."
-run_task "ruff-dev-format" "$REPO_ROOT/hindsight-dev" "uv run --frozen ruff format ."
-run_task "ty-dev" "$REPO_ROOT/hindsight-dev" "uv run --frozen ty check hindsight_dev benchmarks"
+run_task "ruff-dev-check" "$REPO_ROOT/hindsight-dev" uv run --frozen ruff check --fix .
+run_task "ruff-dev-format" "$REPO_ROOT/hindsight-dev" uv run --frozen ruff format .
+run_task "ty-dev" "$REPO_ROOT/hindsight-dev" uv run --frozen ty check hindsight_dev benchmarks
 
 # Python hindsight-embed tasks
-run_task "ruff-embed-check" "$REPO_ROOT/hindsight-embed" "uv run --frozen ruff check --fix ."
-run_task "ruff-embed-format" "$REPO_ROOT/hindsight-embed" "uv run --frozen ruff format ."
-run_task "ty-embed" "$REPO_ROOT/hindsight-embed" "uv run --frozen ty check hindsight_embed"
+run_task "ruff-embed-check" "$REPO_ROOT/hindsight-embed" uv run --frozen ruff check --fix .
+run_task "ruff-embed-format" "$REPO_ROOT/hindsight-embed" uv run --frozen ruff format .
+run_task "ty-embed" "$REPO_ROOT/hindsight-embed" uv run --frozen ty check hindsight_embed
 
 # osv-scanner exception files (osv-scanner skips an unparseable one silently)
-run_task "osv-config" "$REPO_ROOT" "scripts/check-osv-config.sh"
+run_task "osv-config" "$REPO_ROOT" scripts/check-osv-config.sh
 
 # Inline semgrep suppressions name the rule, a reason, a category and an unexpired date
-run_task "scanner-suppressions" "$REPO_ROOT" "scripts/check-scanner-suppressions.sh"
+run_task "scanner-suppressions" "$REPO_ROOT" scripts/check-scanner-suppressions.sh
 
 # Repo scripts had no local lint; naive dates (DTZ) and complexity (C90) are what Codacy reported on the first one.
 # The workspace venv synced above, not --no-project: that one takes an active VIRTUAL_ENV or the ruff on PATH, a
 # different version from the lock (0.17.2 vs the pinned 0.14.9 when this was written).
-run_task "ruff-scripts" "$REPO_ROOT" "uv run --frozen --no-sync ruff check --config ruff.toml --extend-select DTZ,C90 scripts"
+run_task "ruff-scripts" "$REPO_ROOT" uv run --frozen --no-sync ruff check --config ruff.toml --extend-select DTZ,C90 scripts
 
 # Integrations: lint packages with modifications vs HEAD locally; lint all in CI.
 # Python integrations use shared ruff.toml; Node integrations use shared .prettierrc.json.
@@ -96,17 +118,19 @@ if [ -d "$INTEGRATIONS_DIR" ] && { [ "$LINT_ALL" = "1" ] || [ -n "$CHANGED_FILES
         integration_changed "$name" || continue
 
         if [ -f "$dir/pyproject.toml" ]; then
-            run_task "ruff-int-$name-check" "$dir" "uv run --no-project ruff check --fix --config $REPO_ROOT/ruff.toml ."
-            run_task "ruff-int-$name-format" "$dir" "uv run --no-project ruff format --config $REPO_ROOT/ruff.toml ."
+            # Run ruff using root lockfile pin; --no-project from an integration directory resolves
+            # to an integration-local .venv or a user-level ruff on PATH, causing cross-machine version drift.
+            run_task "ruff-int-$name-check" "$dir" uv run --frozen --no-sync --project "$REPO_ROOT" ruff check --fix --config "$REPO_ROOT/ruff.toml" .
+            run_task "ruff-int-$name-format" "$dir" uv run --frozen --no-sync --project "$REPO_ROOT" ruff format --config "$REPO_ROOT/ruff.toml" .
         elif [ -f "$dir/package.json" ]; then
-            run_task "prettier-int-$name" "$dir" "npx --yes prettier --write --config $REPO_ROOT/.prettierrc.json --ignore-path $REPO_ROOT/.gitignore ."
+            run_task "prettier-int-$name" "$dir" "$PRETTIER" --write --config "$REPO_ROOT/.prettierrc.json" --ignore-path "$REPO_ROOT/.gitignore" .
         fi
     done
 fi
 
 # Generated integration copies match their shared source; Codacy exceptions carry a category and live dates
-run_task "integration-config-sync" "$REPO_ROOT" "scripts/sync-integration-config.py --check"
-run_task "codacy-config" "$REPO_ROOT" "scripts/check-codacy-config.py"
+run_task "integration-config-sync" "$REPO_ROOT" scripts/sync-integration-config.py --check
+run_task "codacy-config" "$REPO_ROOT" scripts/check-codacy-config.py
 
 # Wait for all tasks to complete
 for pid in "${PIDS[@]}"; do

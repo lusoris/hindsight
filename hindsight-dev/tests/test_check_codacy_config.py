@@ -34,8 +34,15 @@ TODAY = datetime.date(2026, 11, 8)
 
 
 def test_real_repo_codacy_config_passes():
-    """The real repo .codacy.yml passes with today 2026-11-08."""
-    assert check_mod.main(["--root", str(REPO_ROOT)], today=TODAY) == 0
+    """The real repo .codacy.yml passes as of the real current date.
+
+    The synthetic cases below pin ``TODAY`` so their date arithmetic stays fixed, but
+    this test reads the live file and so checks it against the clock the CI gate uses
+    (``main`` without ``today`` takes the UTC date). It used to pin ``TODAY`` too. That
+    refused every entry added after 2026-11-08 as "in the future" and would never have
+    caught an entry expiring, which is the point of the expiry date.
+    """
+    assert check_mod.main(["--root", str(REPO_ROOT)]) == 0
 
 
 def _setup_tmp_codacy(tmp_path: Path, codacy_text: str) -> Path:
