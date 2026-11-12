@@ -4,6 +4,7 @@ import logging
 from unittest.mock import MagicMock, patch
 
 import pytest
+from smolagents import Tool
 
 from hindsight_smolagents import (
     HindsightRecallTool,
@@ -15,7 +16,7 @@ from hindsight_smolagents import (
     reset_config,
 )
 from hindsight_smolagents.errors import HindsightError
-from hindsight_smolagents.tools import _USER_AGENT, _resolve_client
+from hindsight_smolagents.tools import _USER_AGENT, _HindsightTool, _resolve_client
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +195,66 @@ class TestToolConstruction:
                 user_agent=_USER_AGENT,
                 api_key="secret",
             )
+
+    def test_base_class_not_instantiable_directly(self):
+        client = _mock_client()
+        with pytest.raises(TypeError, match="attribute"):
+            _HindsightTool(bank_id="test", client=client)
+
+    @pytest.mark.parametrize("tool_cls", [HindsightRetainTool, HindsightRecallTool, HindsightReflectTool])
+    def test_all_tools_resolve_explicit_client_and_subclass_base(self, tool_cls):
+        client = _mock_client()
+        tool = tool_cls(bank_id="bank-1", client=client)
+        assert isinstance(tool, Tool)
+        assert isinstance(tool, _HindsightTool)
+        assert tool.output_type == "string"
+        assert tool._bank_id == "bank-1"
+        assert tool._client is client
+
+    @pytest.mark.parametrize("tool_cls", [HindsightRetainTool, HindsightRecallTool, HindsightReflectTool])
+    def test_all_tools_accept_url_and_api_key(self, tool_cls):
+        with patch("hindsight_smolagents.tools.Hindsight") as mock_cls:
+            mock_cls.return_value = _mock_client()
+            tool = tool_cls(
+                bank_id="bank-2",
+                hindsight_api_url="http://localhost:8888",
+                api_key="secret",
+            )
+            assert tool._bank_id == "bank-2"
+            assert tool._client is mock_cls.return_value
+            mock_cls.assert_called_once_with(
+                base_url="http://localhost:8888",
+                timeout=30.0,
+                user_agent=_USER_AGENT,
+                api_key="secret",
+            )
+
+    @pytest.mark.parametrize("tool_cls", [HindsightRetainTool, HindsightRecallTool, HindsightReflectTool])
+    def test_all_tools_explicit_connection_overrides_config(self, tool_cls):
+        configure(hindsight_api_url="http://config:8888", api_key="config-key")
+        with patch("hindsight_smolagents.tools.Hindsight") as mock_cls:
+            mock_cls.return_value = _mock_client()
+            tool_cls(
+                bank_id="test",
+                hindsight_api_url="http://explicit:9999",
+                api_key="explicit-key",
+            )
+            mock_cls.assert_called_once_with(
+                base_url="http://explicit:9999",
+                timeout=30.0,
+                user_agent=_USER_AGENT,
+                api_key="explicit-key",
+            )
+
+    @pytest.mark.parametrize("tool_cls", [HindsightRetainTool, HindsightRecallTool, HindsightReflectTool])
+    def test_all_tools_raise_without_client_or_config(self, tool_cls):
+        with pytest.raises(HindsightError, match="No Hindsight API URL"):
+            tool_cls(bank_id="test")
+
+    @pytest.mark.parametrize("tool_cls", [HindsightRetainTool, HindsightRecallTool, HindsightReflectTool])
+    def test_all_tools_require_bank_id(self, tool_cls):
+        with pytest.raises(TypeError, match="bank_id"):
+            tool_cls(client=_mock_client())
 
 
 # ---------------------------------------------------------------------------
@@ -695,3 +756,41 @@ class TestConfiguredDefaults:
             tool = HindsightReflectTool(bank_id="test", client=client, budget="mid")
         assert tool(query="preferences") == "explicit reflection"
         client.reflect.assert_called_once_with(bank_id="test", query="preferences", budget="mid")
+
+    @pytest.mark.parametrize("use_factory", [False, True])
+    def test_explicit_retain_tags_override_configuration(self, use_factory: bool) -> None:
+        configure(tags=["configured-tag"])
+        client = _mock_client()
+        if use_factory:
+            tool = next(
+                t
+                for t in create_hindsight_tools(bank_id="test", client=client, tags=["explicit-tag"])
+                if t.name == "hindsight_retain"
+            )
+        else:
+            tool = HindsightRetainTool(bank_id="test", client=client, tags=["explicit-tag"])
+        assert tool(content="remember this") == "Memory stored successfully."
+        client.retain.assert_called_once_with(bank_id="test", content="remember this", tags=["explicit-tag"])
+
+    @pytest.mark.parametrize("use_factory", [False, True])
+    def test_explicit_recall_tags_override_configuration(self, use_factory: bool) -> None:
+        configure(recall_tags=["team"], recall_tags_match="all")
+        client = _mock_client()
+        client.recall.return_value = _mock_recall_response(["explicit tag fact"])
+        if use_factory:
+            tool = next(
+                t
+                for t in create_hindsight_tools(bank_id="test", client=client, recall_tags=["personal"])
+                if t.name == "hindsight_recall"
+            )
+        else:
+            tool = HindsightRecallTool(bank_id="test", client=client, recall_tags=["personal"])
+        assert tool(query="preferences") == "1. explicit tag fact"
+        client.recall.assert_called_once_with(
+            bank_id="test",
+            query="preferences",
+            budget="mid",
+            max_tokens=4096,
+            tags=["personal"],
+            tags_match="all",
+        )

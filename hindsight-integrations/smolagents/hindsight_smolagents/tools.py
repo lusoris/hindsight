@@ -49,11 +49,53 @@ def _resolve_client(
     return Hindsight(**kwargs)
 
 
-class HindsightRetainTool(Tool):
+# Shared connection setup for the three Hindsight tools. smolagents'
+# Tool.__init_subclass__ wraps every subclass __init__ (this base included)
+# with validate_after_init -> self.validate_arguments(), so a concrete tool is
+# validated twice: once when this __init__ returns, before the subclass has set
+# its own options, and again when the subclass __init__ returns. That is safe
+# because validate_arguments reads only class attributes (name, description,
+# inputs, output_type) and the forward signature, all defined on the concrete
+# class. _HindsightTool itself has none of them and fails validation if
+# instantiated directly.
+class _HindsightTool(Tool):
+    """Base class that resolves the Hindsight bank and client for each tool.
+
+    Args:
+        bank_id: The Hindsight memory bank to operate on.
+        client: Pre-configured Hindsight client (preferred).
+        hindsight_api_url: API URL (used if no client provided).
+        api_key: API key (used if no client provided).
+        **kwargs: Additional keyword arguments forwarded to ``Tool``.
+    """
+
+    output_type = "string"
+
+    def __init__(
+        self,
+        *,
+        bank_id: str,
+        client: Hindsight | None = None,
+        hindsight_api_url: str | None = None,
+        api_key: str | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(**kwargs)
+        self._bank_id = bank_id
+        self._client = _resolve_client(client, hindsight_api_url, api_key)
+
+
+class HindsightRetainTool(_HindsightTool):
     """Store information to long-term memory for later retrieval.
 
     Use this to save important facts, user preferences, decisions,
     or any information that should be remembered across conversations.
+
+    Args:
+        tags: Tags applied when storing memories (defaults to configured ``tags``).
+        **kwargs: Shared connection arguments (``bank_id``, ``client``,
+            ``hindsight_api_url``, ``api_key``; see :class:`_HindsightTool`) and
+            any ``Tool`` keyword arguments.
     """
 
     name = "hindsight_retain"
@@ -68,21 +110,9 @@ class HindsightRetainTool(Tool):
             "description": "The information to store in memory.",
         },
     }
-    output_type = "string"
 
-    def __init__(
-        self,
-        *,
-        bank_id: str,
-        client: Hindsight | None = None,
-        hindsight_api_url: str | None = None,
-        api_key: str | None = None,
-        tags: list[str] | None = None,
-        **kwargs: Any,
-    ):
+    def __init__(self, *, tags: list[str] | None = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._bank_id = bank_id
-        self._client = _resolve_client(client, hindsight_api_url, api_key)
         self._created_banks: set[str] = set()
 
         config = get_config()
@@ -117,11 +147,20 @@ class HindsightRetainTool(Tool):
             raise HindsightError(f"Retain failed: {e}") from e
 
 
-class HindsightRecallTool(Tool):
+class HindsightRecallTool(_HindsightTool):
     """Search long-term memory for relevant information.
 
     Use this to find previously stored facts, preferences, or context.
     Returns a numbered list of matching memories.
+
+    Args:
+        budget: Recall budget level (low/mid/high).
+        max_tokens: Maximum tokens for recall results.
+        recall_tags: Tags to filter when searching memories.
+        recall_tags_match: Tag matching mode (any/all/any_strict/all_strict).
+        **kwargs: Shared connection arguments (``bank_id``, ``client``,
+            ``hindsight_api_url``, ``api_key``; see :class:`_HindsightTool`) and
+            any ``Tool`` keyword arguments.
     """
 
     name = "hindsight_recall"
@@ -136,24 +175,17 @@ class HindsightRecallTool(Tool):
             "description": "The search query to find relevant memories.",
         },
     }
-    output_type = "string"
 
     def __init__(
         self,
         *,
-        bank_id: str,
-        client: Hindsight | None = None,
-        hindsight_api_url: str | None = None,
-        api_key: str | None = None,
         budget: str | None = None,
         max_tokens: int | None = None,
         recall_tags: list[str] | None = None,
         recall_tags_match: str | None = None,
         **kwargs: Any,
-    ):
+    ) -> None:
         super().__init__(**kwargs)
-        self._bank_id = bank_id
-        self._client = _resolve_client(client, hindsight_api_url, api_key)
 
         config = get_config()
         # None means omitted; explicit built-in defaults must still override configuration.
@@ -189,11 +221,17 @@ class HindsightRecallTool(Tool):
             raise HindsightError(f"Recall failed: {e}") from e
 
 
-class HindsightReflectTool(Tool):
+class HindsightReflectTool(_HindsightTool):
     """Synthesize a thoughtful answer from long-term memories.
 
     Use this when you need a coherent summary or reasoned response
     about what you know, rather than raw memory facts.
+
+    Args:
+        budget: Reflect budget level (low/mid/high).
+        **kwargs: Shared connection arguments (``bank_id``, ``client``,
+            ``hindsight_api_url``, ``api_key``; see :class:`_HindsightTool`) and
+            any ``Tool`` keyword arguments.
     """
 
     name = "hindsight_reflect"
@@ -208,21 +246,9 @@ class HindsightReflectTool(Tool):
             "description": "The question to reflect on using stored memories.",
         },
     }
-    output_type = "string"
 
-    def __init__(
-        self,
-        *,
-        bank_id: str,
-        client: Hindsight | None = None,
-        hindsight_api_url: str | None = None,
-        api_key: str | None = None,
-        budget: str | None = None,
-        **kwargs: Any,
-    ):
+    def __init__(self, *, budget: str | None = None, **kwargs: Any) -> None:
         super().__init__(**kwargs)
-        self._bank_id = bank_id
-        self._client = _resolve_client(client, hindsight_api_url, api_key)
 
         config = get_config()
         self._budget = budget if budget is not None else (config.budget if config else "mid")
