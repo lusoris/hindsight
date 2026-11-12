@@ -411,8 +411,11 @@ class ProcessedFact:
     observation_scopes: Literal["per_tag", "combined", "all_combinations", "shared"] | list[list[str]] | None = None
 
     # Record contract (memory_units columns of the same names). The defaults are the
-    # migration's column defaults; nothing in the retain pipeline sets them yet, so a
-    # retained fact is stored as an active, inferred record with no expiry.
+    # migration's column defaults. The retain pipeline still leaves them, so a retained
+    # fact is stored as an active, inferred record with no expiry. A transfer import is
+    # the one writer that sets them: importer._apply_record_contract copies the archived
+    # values over these defaults after __post_init__ (the archive schema's Literals have
+    # already validated them).
     provenance_class: str = "inferred"
     write_authority: str | None = None
     observed_at: datetime | None = None
