@@ -205,6 +205,7 @@ jobs:
             - 'hindsight-integrations/coding-agents/**'
           integrations-github-copilot:
             - 'hindsight-integrations/github-copilot/**'
+            - 'hindsight-integrations/_shared/integration_testing/**'
           integrations-continue:
             - 'hindsight-integrations/continue/**'
           extensions-supabase-tenant:
@@ -260,8 +261,10 @@ jobs:
             - 'hindsight-integrations/openai-agents/**'
           integrations-openhands:
             - 'hindsight-integrations/openhands/**'
+            - 'hindsight-integrations/_shared/integration_testing/**'
           integrations-devin-desktop:
             - 'hindsight-integrations/devin-desktop/**'
+            - 'hindsight-integrations/_shared/integration_testing/**'
           integrations-pipecat:
             - 'hindsight-integrations/pipecat/**'
           integrations-agentcore:
