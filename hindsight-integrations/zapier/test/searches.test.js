@@ -1,13 +1,8 @@
 "use strict";
 
-require("should");
-const zapier = require("zapier-platform-core");
 const nock = require("nock");
 
-const App = require("../index");
-
-const appTester = zapier.createAppTester(App);
-const authData = { apiKey: "hsk_test", apiUrl: "https://api.example.com" };
+const { App, appTester, authData } = require("./helpers");
 
 describe("searches.recall", () => {
   afterEach(() => nock.cleanAll());
