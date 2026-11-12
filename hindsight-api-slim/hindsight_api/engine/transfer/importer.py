@@ -206,10 +206,46 @@ class _ArchiveEndRecord:
 class _ArchiveDirectory:
     entries: int
     size: int
+    start: int
+
+
+_DIRECTORY_CHUNK = 1024**2
+
+
+@dataclass
+class _ArchiveDirectoryReader:
+    """Read central-directory record headers in chunks of at most _DIRECTORY_CHUNK bytes."""
+
+    archive: Archive
+    directory: _ArchiveDirectory
+    chunk_offset: int = -1
+    chunk: bytes = b""
+
+    def read_header(self, position: int) -> bytes:
+        """Assemble a header across bounded chunks without reading outside the directory."""
+        if position + 46 > self.directory.size:
+            raise ValueError("Invalid transfer archive: malformed central directory")
+        header = bytearray()
+        while len(header) < 46:
+            current = position + len(header)
+            offset = current // _DIRECTORY_CHUNK * _DIRECTORY_CHUNK
+            if offset != self.chunk_offset:
+                self.chunk = _read_archive_range(
+                    self.archive, self.directory.start + offset, min(_DIRECTORY_CHUNK, self.directory.size - offset)
+                )
+                self.chunk_offset = offset
+            # Reuse the current chunk; only a header crossing its boundary needs
+            # another read. Variable-length fields can skip entire chunks.
+            relative = current - offset
+            part = self.chunk[relative : relative + 46 - len(header)]
+            if not part:
+                raise ValueError("Invalid transfer archive: malformed central directory")
+            header.extend(part)
+        return bytes(header)
 
 
 def _read_archive_range(archive: Archive, offset: int, size: int) -> bytes:
-    """Read a bounded end-record range, resetting seekable uploads for ZipFile."""
+    """Read a bounded archive range, resetting seekable uploads for ZipFile."""
     if isinstance(archive, bytes):
         return archive[offset : offset + size]
     try:
@@ -226,8 +262,10 @@ def _find_archive_end_record(archive: Archive) -> _ArchiveEndRecord | None:
     else:
         archive.seek(0, io.SEEK_END)
         archive_size = archive.tell()
-    tail_offset = max(0, archive_size - 22 - 65535)
-    tail = _read_archive_range(archive, tail_offset, 22 + 65535)
+    # Match CPython's _EndRecData window: one byte less let an end record
+    # followed by 65536 bytes pass unseen while ZipFile still found it.
+    tail_offset = max(0, archive_size - 22 - (1 << 16))
+    tail = _read_archive_range(archive, tail_offset, 22 + (1 << 16))
     if len(tail) >= 22 and tail[-22:-18] == b"PK\x05\x06" and tail[-2:] == b"\x00\x00":
         start = len(tail) - 22
     else:
@@ -240,20 +278,65 @@ def _find_archive_end_record(archive: Archive) -> _ArchiveEndRecord | None:
 
 
 def _read_zip64_directory(archive: Archive, end: _ArchiveEndRecord) -> _ArchiveDirectory | None:
-    """Read the fixed ZIP64 end record and locator immediately before the classic record."""
-    if end.record_offset < 76:
+    """Accept only ZIP64 layouts that patched and unpatched CPython read identically."""
+    if end.record_offset < 20:
         return None
-    # Read these fixed 76 bytes separately: a maximum-length comment can push
-    # them outside the bounded classic-EOCD search tail.
-    data = _read_archive_range(archive, end.record_offset - 76, 76)
-    if len(data) != 76 or data[:4] != b"PK\x06\x06" or data[56:60] != b"PK\x06\x07":
+    data = _read_archive_range(archive, end.record_offset - 20, 20)
+    if data[:4] != b"PK\x06\x07":
         return None
-    # PKWARE APPNOTE 4.3.14-4.3.15: ZIP64 EOCD and locator, little-endian.
+    # PKWARE APPNOTE 4.3.14-4.3.15: ZIP64 EOCD locator, little-endian.
+    locator = struct.unpack_from("<4sLQL", data)
+    if locator[1] != 0 or locator[3] > 1:
+        raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+    # Unpatched CPython reads at EOCD-76; patched CPython uses the locator's
+    # offset. Equality makes both read the record checked here. CPython's writer
+    # (used for Hindsight exports) writes these records adjacent to each other.
+    if locator[2] != end.record_offset - 76:
+        raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+    return _read_zip64_end_record(archive, locator[2])
+
+
+def _read_zip64_end_record(archive: Archive, offset: int) -> _ArchiveDirectory:
+    """Validate the shared fixed ZIP64 record, including patched CPython's invariants."""
+    data = _read_archive_range(archive, offset, 56)
+    if len(data) != 56 or data[:4] != b"PK\x06\x06":
+        raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+    # PKWARE APPNOTE 4.3.14-4.3.15: ZIP64 EOCD, little-endian.
     record = struct.unpack_from("<4sQ2H2L4Q", data)
-    locator = struct.unpack_from("<4sLQL", data, 56)
-    if record[1] != 44 or locator[1] != 0 or locator[3] > 1:
-        return None
-    return _ArchiveDirectory(record[7], record[8])
+    # At this adjacent position patched CPython requires no extensible data;
+    # unpatched CPython ignores the size field, so enforce the stricter reading.
+    if record[1] != 44:
+        raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+    if record[9] + record[8] != offset:
+        raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+    return _ArchiveDirectory(entries=record[7], size=record[8], start=offset - record[8])
+
+
+def _classic_archive_directory(end: _ArchiveEndRecord) -> _ArchiveDirectory:
+    """Locate the directory from a classic end record; ZIP64 sentinels without ZIP64 records fail closed."""
+    if end.entries == 0xFFFF or end.directory_size == 0xFFFFFFFF or end.directory_offset == 0xFFFFFFFF:
+        raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+    # CPython's concat arithmetic cancels the declared offset, including for
+    # archives with prepended data: start_dir is location minus size_cd.
+    return _ArchiveDirectory(end.entries, end.directory_size, end.record_offset - end.directory_size)
+
+
+def _walk_archive_directory(archive: Archive, directory: _ArchiveDirectory, config: StaticConfigProxy) -> None:
+    """Bound the actual records without decoding names, extra fields or comments."""
+    # F2: understated counts passed the old barrier; CPython builds one ZipInfo
+    # per record inside size_cd and ignores the declared counts.
+    reader = _ArchiveDirectoryReader(archive, directory)
+    position = 0
+    count = 0
+    while position < directory.size:
+        header = reader.read_header(position)
+        if header[:4] != b"PK\x01\x02":
+            raise ValueError("Invalid transfer archive: malformed central directory")
+        name_size, extra_size, comment_size = struct.unpack_from("<3H", header, 28)
+        position += 46 + name_size + extra_size + comment_size
+        count += 1
+        if count > config.transfer_import_max_entries:
+            raise ValueError("Invalid transfer archive: entry count exceeds the transfer import limit")
 
 
 def _check_archive_directory(archive: Archive, config: StaticConfigProxy) -> None:
@@ -263,9 +346,7 @@ def _check_archive_directory(archive: Archive, config: StaticConfigProxy) -> Non
         return  # Preserve ZipFile's existing BadZipFile diagnosis for missing end records.
     directory = _read_zip64_directory(archive, end)
     if directory is None:
-        if end.entries == 0xFFFF or end.directory_size == 0xFFFFFFFF or end.directory_offset == 0xFFFFFFFF:
-            raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
-        directory = _ArchiveDirectory(end.entries, end.directory_size)
+        directory = _classic_archive_directory(end)
     if directory.entries > config.transfer_import_max_entries:
         raise ValueError("Invalid transfer archive: entry count exceeds the transfer import limit")
     # ZipFile reads the directory whole, so apply the same cap as a non-streamed
@@ -274,6 +355,9 @@ def _check_archive_directory(archive: Archive, config: StaticConfigProxy) -> Non
         raise ValueError("Invalid transfer archive: central directory exceeds the entry size limit")
     if directory.entries * 46 > directory.size:
         raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+    if directory.start < 0:
+        raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+    _walk_archive_directory(archive, directory, config)
 
 
 def _check_archive_entry(info: zipfile.ZipInfo, streamed: set[str], config: StaticConfigProxy) -> None:
