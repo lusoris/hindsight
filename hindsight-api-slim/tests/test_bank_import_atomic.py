@@ -28,10 +28,8 @@ from hindsight_api import MemoryEngine, RequestContext
 from hindsight_api.engine import memory_engine as engine_module
 from hindsight_api.engine import transfer
 from hindsight_api.engine.cross_encoder import RRFPassthroughCrossEncoder
-from hindsight_api.engine.db_utils import acquire_with_retry
 from hindsight_api.engine.embeddings import Embeddings
 from hindsight_api.engine.retain import bank_utils
-from hindsight_api.engine.schema import fq_table
 from hindsight_api.engine.transfer import TransferScope, importer, stream_export_bank
 from hindsight_api.engine.transfer.schema import (
     HISTORY_TABLES,
@@ -227,19 +225,27 @@ async def test_invalid_streamed_value_passes_preflight_and_rolls_back(
 
 @pytest.mark.asyncio
 async def test_delete_body_checks_identity_before_removing_bank_and_memories(
-    memory: MemoryEngine, request_context: RequestContext
+    memory: MemoryEngine, request_context: RequestContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bank = _unique_bank("atomic_delete_identity")
+    # The profile helpers omit internal_id, so take it where the bank row is
+    # created (the per-bank index hook receives it) instead of querying for it;
+    # the deletion's effects are then checked through public reads.
+    created: list[uuid.UUID] = []
+    create_indexes = bank_utils.create_bank_vector_indexes
+
+    async def record_internal_id(conn: Any, bank_id: str, internal_id: str, *, ops: Any) -> None:
+        if bank_id == bank:
+            created.append(uuid.UUID(internal_id))
+        await create_indexes(conn, bank_id, internal_id, ops=ops)
+
+    monkeypatch.setattr(bank_utils, "create_bank_vector_indexes", record_internal_id)
     try:
         unit_ids = await _retain(memory, bank, "Alice owns a bicycle.", request_context, "doc-identity")
         assert unit_ids
+        assert len(created) == 1
+        internal_id = created[0]
         backend = await memory._get_backend()
-        # The profile helpers omit internal_id. Read only the bank row for the
-        # identity token; verify the deletion's effects through public reads.
-        async with acquire_with_retry(backend) as conn:
-            internal_id = uuid.UUID(
-                str(await conn.fetchval(f"SELECT internal_id FROM {fq_table('banks')} WHERE bank_id = $1", bank))
-            )
         before = await memory.list_memory_units(bank, limit=100, request_context=request_context)
         assert before["total"] > 0
         refused = await memory._delete_bank_body(

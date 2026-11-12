@@ -190,14 +190,27 @@ async def test_restore_checks_attachment_before_storing(defect: str) -> None:
     conn.execute.assert_not_awaited()
 
 
-@pytest.mark.parametrize("payload", ["[1 2]", "[1,,2]", "[,1]", "[1,]", "[] false", "[] ]"])
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    [
+        ("[1 2]", "missing a comma"),
+        ("[1,,2]", "unexpected separator"),
+        ("[,1]", "unexpected separator"),
+        ("[1,]", "unexpected separator"),
+        ("[] false", "data after the JSON array"),
+        ("[] ]", "data after the JSON array"),
+        # Only the trailing-data check refuses this one: without it the row after
+        # the first ']' is decoded and the second ']' closes the array again.
+        ("[] {}]", "data after the JSON array"),
+    ],
+)
 @pytest.mark.parametrize("read_chars", [1, 2, 1 << 20])
 def test_streaming_json_rejects_invalid_separators_and_trailing_data(
-    monkeypatch: pytest.MonkeyPatch, payload: str, read_chars: int
+    monkeypatch: pytest.MonkeyPatch, payload: str, error: str, read_chars: int
 ) -> None:
     monkeypatch.setattr(importer, "_JSON_READ_CHARS", read_chars)
     archive = _rewrite(_synthetic_archive(), "rows.json", payload.encode())
-    with zipfile.ZipFile(io.BytesIO(archive)) as zf, pytest.raises(ValueError):
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf, pytest.raises(ValueError, match=error):
         list(importer._iter_json_array(zf, "rows.json"))
 
 
