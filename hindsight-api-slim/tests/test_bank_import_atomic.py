@@ -8,6 +8,7 @@ batches, while orchestration cases keep both barriers testable without local ML.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import io
 import json
 import tracemalloc
@@ -26,10 +27,8 @@ from hindsight_api import MemoryEngine, RequestContext
 from hindsight_api.engine import memory_engine as engine_module
 from hindsight_api.engine import transfer
 from hindsight_api.engine.cross_encoder import RRFPassthroughCrossEncoder
-from hindsight_api.engine.db_utils import acquire_with_retry
 from hindsight_api.engine.embeddings import Embeddings
 from hindsight_api.engine.retain import bank_utils
-from hindsight_api.engine.schema import fq_store_table, fq_table
 from hindsight_api.engine.transfer import TransferScope, importer, stream_export_bank
 from hindsight_api.engine.transfer.schema import (
     HISTORY_TABLES,
@@ -76,7 +75,10 @@ def _synthetic_archive() -> bytes:
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(
-            "manifest.json", TransferManifest(source_bank_id="atomic-source", archive_type="bank").model_dump_json()
+            "manifest.json",
+            TransferManifest(
+                source_bank_id="atomic-source", archive_type="bank", includes_history=True
+            ).model_dump_json(),
         )
         zf.writestr("banks.json", '[{"bank_id":"atomic-source"}]')
         for index in range(4):
@@ -153,14 +155,10 @@ async def test_bad_section_submit_leaves_no_bank_or_operation(
             )
         backend = await memory._get_backend()
         assert await bank_utils.get_bank_profile_if_exists(backend, target) is None
-        async with acquire_with_retry(backend) as conn:
-            queued = await conn.fetchval(
-                f"SELECT count(*) FROM {fq_table('async_operations')} "
-                "WHERE bank_id = $1 AND operation_type = 'import_bank' AND task_payload->>'target_bank_id' = $2",
-                exported_bank.source,
-                target,
-            )
-        assert queued == 0
+        queued = await memory.list_operations(
+            exported_bank.source, task_type="import_bank", limit=0, request_context=request_context
+        )
+        assert queued["total"] == 0
     finally:
         await memory.delete_bank(target, request_context=request_context)
 
@@ -170,18 +168,15 @@ async def test_rollback_alone_removes_committed_document_batches(memory, request
     target = _unique_bank("atomic_rollback")
     committed: list[int] = []
     original_batch = importer._import_document_batch
-    monkeypatch.setattr(importer, "validate_bank_archive", lambda archive: None)
+    monkeypatch.setattr(importer, "validate_bank_archive", lambda archive, scope=None: None)
     monkeypatch.setattr(importer, "_DOCUMENT_BATCH_SIZE", 1)
 
-    async def record_committed_batch(**kwargs: Any) -> Any:
-        result = await original_batch(**kwargs)
-        # Raw count on purpose: it must observe committed rows between the restore's own
-        # transactions, mid-call, which no engine read API can do; afterwards the bank is gone.
-        backend = await memory._get_backend()
-        async with acquire_with_retry(backend) as conn:
-            committed.append(
-                await conn.fetchval(f"SELECT count(*) FROM {fq_store_table('documents')} WHERE bank_id = $1", target)
-            )
+    async def record_committed_batch(*, backend: Any, **kwargs: Any) -> Any:
+        result = await original_batch(backend=backend, **kwargs)
+        # A public read uses its own connection, so this observes earlier committed
+        # batches between the restore's transactions, before rollback removes them.
+        documents = await memory.list_documents(target, limit=0, request_context=request_context)
+        committed.append(documents["total"])
         return result
 
     monkeypatch.setattr(importer, "_import_document_batch", record_committed_batch)
@@ -198,7 +193,7 @@ async def test_rollback_alone_removes_committed_document_batches(memory, request
 
 @pytest.mark.asyncio
 async def test_rollback_keeps_a_preexisting_bank(memory, request_context, exported_bank, monkeypatch):
-    monkeypatch.setattr(importer, "validate_bank_archive", lambda archive: None)
+    monkeypatch.setattr(importer, "validate_bank_archive", lambda archive, scope=None: None)
     delete = AsyncMock(wraps=memory.delete_bank)
     monkeypatch.setattr(memory, "delete_bank", delete)
     with pytest.raises(ValueError, match="already exists"):
@@ -214,6 +209,7 @@ def unit_engine(monkeypatch: pytest.MonkeyPatch) -> MemoryEngine:
     engine._operation_validator = None
     engine.embeddings = _FixtureEmbeddings()
     engine.entity_resolver = MagicMock()
+    engine._config_resolver = MagicMock(resolve_full_config=AsyncMock())
     engine._file_storage = MagicMock(delete=AsyncMock())
     for name in (
         "_authenticate_tenant",
@@ -230,15 +226,13 @@ def unit_engine(monkeypatch: pytest.MonkeyPatch) -> MemoryEngine:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("section", ["observation", "document", "knowledge_page"])
-@pytest.mark.parametrize("scope", [TransferScope(), TransferScope(data=False, bank_config=True)])
-async def test_submit_rejects_bad_section_before_stash_or_queue(unit_engine, request_context, section, scope):
+async def test_submit_rejects_bad_section_before_stash_or_queue(unit_engine, request_context, section):
     with pytest.raises(ValueError):
         await unit_engine.submit_bank_import_async(
             "atomic-source",
             _bad_section(_synthetic_archive(), section),
             request_context,
             target_bank_id="atomic-target",
-            scope=scope,
         )
     unit_engine._stash_archive.assert_not_awaited()
     unit_engine._submit_async_operation.assert_not_awaited()
@@ -261,7 +255,7 @@ async def test_inline_preflight_refuses_before_the_restore(unit_engine, request_
 async def test_rollback_orchestration_preserves_the_original_error(
     unit_engine, request_context, monkeypatch, operation_id, cleanup_fails
 ):
-    monkeypatch.setattr(importer, "validate_bank_archive", lambda archive: None)
+    monkeypatch.setattr(importer, "validate_bank_archive", lambda archive, scope=None: None)
     internal_id = uuid.uuid4()
     conn = MagicMock()
     conn.parse_json.side_effect = lambda value: value
@@ -289,7 +283,7 @@ async def test_rollback_orchestration_preserves_the_original_error(
 
     monkeypatch.setattr(transfer, "import_bank", replay)
     delete = AsyncMock(side_effect=RuntimeError("cleanup failed") if cleanup_fails else None)
-    monkeypatch.setattr(unit_engine, "delete_bank", delete)
+    monkeypatch.setattr(unit_engine, "_delete_bank_body", delete)
     with pytest.raises(ValueError, match="ttl_seconds") as error:
         await unit_engine.import_bank_async(
             _bad_section(_synthetic_archive(), "document"),
@@ -299,7 +293,7 @@ async def test_rollback_orchestration_preserves_the_original_error(
         )
     assert created_documents == ["doc-0", "doc-1", "doc-2"]
     assert error.value is raised[0]
-    delete.assert_awaited_once_with("atomic-target", request_context=request_context)
+    delete.assert_awaited_once_with("atomic-target", expected_internal_id=internal_id, request_context=request_context)
 
 
 @pytest.mark.asyncio
@@ -395,11 +389,11 @@ def test_preflight_large_bank_stays_below_the_5737_streaming_bound(tmp_path, rec
 
 @pytest.mark.asyncio
 async def test_failure_before_on_bank_created_does_not_delete_existing_bank(unit_engine, request_context, monkeypatch):
-    monkeypatch.setattr(importer, "validate_bank_archive", lambda archive: None)
+    monkeypatch.setattr(importer, "validate_bank_archive", lambda archive, scope=None: None)
     monkeypatch.setattr(bank_utils, "get_bank_profile_if_exists", AsyncMock(return_value=object()))
     monkeypatch.setattr(transfer, "import_bank", AsyncMock(side_effect=ValueError("target already exists")))
     delete = AsyncMock()
-    monkeypatch.setattr(unit_engine, "delete_bank", delete)
+    monkeypatch.setattr(unit_engine, "_delete_bank_body", delete)
     with pytest.raises(ValueError, match="already exists"):
         await unit_engine.import_bank_async(_synthetic_archive(), request_context, target_bank_id="atomic-target")
     delete.assert_not_awaited()
@@ -408,17 +402,23 @@ async def test_failure_before_on_bank_created_does_not_delete_existing_bank(unit
 @pytest.mark.asyncio
 @pytest.mark.parametrize("row", [None, {"internal_id": uuid.uuid4()}])
 async def test_rollback_never_deletes_a_missing_or_replaced_bank(unit_engine, request_context, monkeypatch, row):
-    conn = MagicMock(fetchrow=AsyncMock(return_value=row))
+    conn = MagicMock(fetchrow=AsyncMock(return_value=row), execute=AsyncMock())
+
+    @asynccontextmanager
+    async def transaction() -> AsyncIterator[None]:
+        yield
+
+    conn.transaction = transaction
 
     @asynccontextmanager
     async def acquire(backend: Any) -> AsyncIterator[Any]:
         yield conn
 
     monkeypatch.setattr(engine_module, "acquire_with_retry", acquire)
-    delete = AsyncMock()
-    monkeypatch.setattr(unit_engine, "delete_bank", delete)
-    await unit_engine._discard_half_restored_bank(object(), "atomic-target", uuid.uuid4(), request_context)
-    delete.assert_not_awaited()
+    files = AsyncMock()
+    monkeypatch.setattr(unit_engine, "_delete_files_quietly", files)
+    await unit_engine._discard_half_restored_bank("atomic-target", uuid.uuid4(), request_context)
+    files.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -443,7 +443,7 @@ async def test_cancelled_restore_also_rolls_back_its_own_bank(unit_engine, reque
 @pytest.mark.asyncio
 async def test_rollback_lets_a_cancellation_during_cleanup_propagate(unit_engine, request_context, monkeypatch):
     """Cleanup swallows its own errors, but never a cancellation: asyncio needs it re-raised."""
-    monkeypatch.setattr(importer, "validate_bank_archive", lambda archive: None)
+    monkeypatch.setattr(importer, "validate_bank_archive", lambda archive, scope=None: None)
     internal_id = uuid.uuid4()
     conn = MagicMock()
     conn.fetchval = AsyncMock(return_value=internal_id)
@@ -462,11 +462,11 @@ async def test_rollback_lets_a_cancellation_during_cleanup_propagate(unit_engine
 
     monkeypatch.setattr(transfer, "import_bank", fail_after_creation)
     delete = AsyncMock(side_effect=asyncio.CancelledError())
-    monkeypatch.setattr(unit_engine, "delete_bank", delete)
+    monkeypatch.setattr(unit_engine, "_delete_bank_body", delete)
     with pytest.raises(asyncio.CancelledError) as error:
         await unit_engine.import_bank_async(_synthetic_archive(), request_context, target_bank_id="atomic-target")
     assert error.value.__context__ is restore_error
-    delete.assert_awaited_once_with("atomic-target", request_context=request_context)
+    delete.assert_awaited_once_with("atomic-target", expected_internal_id=internal_id, request_context=request_context)
 
 
 @pytest.mark.asyncio
@@ -511,7 +511,7 @@ def test_preflight_reads_attachment_bytes_and_reports_bad_crc_as_a_value_error()
     attachment = TransferAttachment(
         bank_id="atomic-source",
         document_id="doc-0",
-        attachment_hash="hash",
+        attachment_hash=hashlib.sha256(content).hexdigest(),
         short_id="short",
         media_type="text/plain",
         byte_size=len(content),

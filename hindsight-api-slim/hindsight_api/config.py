@@ -939,6 +939,9 @@ ENV_STORE_DOCUMENT_TEXT = "HINDSIGHT_API_STORE_DOCUMENT_TEXT"
 # Document transfer (export/import documents between banks without re-running the LLM)
 ENV_ENABLE_DOCUMENT_EXPORT_API = "HINDSIGHT_API_ENABLE_DOCUMENT_EXPORT_API"
 ENV_ENABLE_DOCUMENT_IMPORT_API = "HINDSIGHT_API_ENABLE_DOCUMENT_IMPORT_API"
+ENV_BANK_IMPORT_MAX_ENTRY_SIZE_MB = "HINDSIGHT_API_BANK_IMPORT_MAX_ENTRY_SIZE_MB"
+ENV_BANK_IMPORT_MAX_TOTAL_SIZE_MB = "HINDSIGHT_API_BANK_IMPORT_MAX_TOTAL_SIZE_MB"
+ENV_BANK_IMPORT_MAX_ENTRIES = "HINDSIGHT_API_BANK_IMPORT_MAX_ENTRIES"
 
 # Observations settings (consolidated knowledge from facts)
 ENV_ENABLE_OBSERVATIONS = "HINDSIGHT_API_ENABLE_OBSERVATIONS"
@@ -1889,6 +1892,12 @@ DEFAULT_STORE_DOCUMENT_TEXT = True  # Persist raw source text in documents.origi
 # Document transfer defaults (export/import enabled by default; gated independently)
 DEFAULT_ENABLE_DOCUMENT_EXPORT_API = True
 DEFAULT_ENABLE_DOCUMENT_IMPORT_API = True
+# Generous server-side ceilings leave room for large document/attachment exports
+# (512 MiB each, 8 GiB overall, a million entries), while streaming log sections
+# use only the total-size cap. Operators can raise these for larger migrations.
+DEFAULT_BANK_IMPORT_MAX_ENTRY_SIZE_MB = 512
+DEFAULT_BANK_IMPORT_MAX_TOTAL_SIZE_MB = 8192
+DEFAULT_BANK_IMPORT_MAX_ENTRIES = 1_000_000
 
 # Observations defaults (consolidated knowledge from facts)
 DEFAULT_ENABLE_OBSERVATIONS = True  # Observations enabled by default
@@ -3714,6 +3723,9 @@ class HindsightConfig:
     store_document_text: bool  # When False, store NULL original_text / empty chunk_text
     enable_document_export_api: bool
     enable_document_import_api: bool
+    bank_import_max_entry_size_mb: int
+    bank_import_max_total_size_mb: int
+    bank_import_max_entries: int
 
     # Observations settings (consolidated knowledge from facts)
     enable_observations: bool
@@ -5409,6 +5421,13 @@ class HindsightConfig:
                 ENV_ENABLE_DOCUMENT_IMPORT_API, str(DEFAULT_ENABLE_DOCUMENT_IMPORT_API)
             ).lower()
             == "true",
+            bank_import_max_entry_size_mb=int(
+                os.getenv(ENV_BANK_IMPORT_MAX_ENTRY_SIZE_MB, str(DEFAULT_BANK_IMPORT_MAX_ENTRY_SIZE_MB))
+            ),
+            bank_import_max_total_size_mb=int(
+                os.getenv(ENV_BANK_IMPORT_MAX_TOTAL_SIZE_MB, str(DEFAULT_BANK_IMPORT_MAX_TOTAL_SIZE_MB))
+            ),
+            bank_import_max_entries=int(os.getenv(ENV_BANK_IMPORT_MAX_ENTRIES, str(DEFAULT_BANK_IMPORT_MAX_ENTRIES))),
             # Observations settings (consolidated knowledge from facts)
             enable_observations=os.getenv(ENV_ENABLE_OBSERVATIONS, str(DEFAULT_ENABLE_OBSERVATIONS)).lower() == "true",
             enable_auto_consolidation=os.getenv(

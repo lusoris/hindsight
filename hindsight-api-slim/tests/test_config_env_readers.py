@@ -33,3 +33,25 @@ def test_bad_value_raises_instead_of_falling_back(monkeypatch):
     monkeypatch.setenv(VAR, "not-a-number")
     with pytest.raises(ValueError):
         _env_int(VAR)
+
+
+@pytest.mark.parametrize(
+    "field,default",
+    [
+        ("bank_import_max_entry_size_mb", 512),
+        ("bank_import_max_total_size_mb", 8192),
+        ("bank_import_max_entries", 1_000_000),
+    ],
+)
+def test_bank_import_limits_are_static_and_environment_backed(
+    monkeypatch: pytest.MonkeyPatch, field: str, default: int
+) -> None:
+    from hindsight_api.config import HindsightConfig, StaticConfigProxy
+
+    variable = "HINDSIGHT_API_" + field.upper()
+    monkeypatch.delenv(variable, raising=False)
+    assert getattr(HindsightConfig.from_env(), field) == default
+    monkeypatch.setenv(variable, "3")
+    config = HindsightConfig.from_env()
+    assert getattr(StaticConfigProxy(config), field) == 3
+    assert field not in HindsightConfig.get_configurable_fields()

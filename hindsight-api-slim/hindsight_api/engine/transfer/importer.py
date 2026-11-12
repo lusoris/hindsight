@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import IO, TYPE_CHECKING, Any, Literal, cast
 
+from ...config import get_config
 from ...schema_context import get_current_schema
 from ..causal_links import CANONICAL_CAUSAL_LINK_TYPE, LEGACY_CAUSAL_LINK_TYPES
 from ..db.ops_postgresql import pg_search_vector_expr
@@ -209,6 +210,33 @@ def _open_archive(archive: Archive, *, produced_by: str) -> zipfile.ZipFile:
         zf = zipfile.ZipFile(io.BytesIO(archive) if isinstance(archive, bytes) else archive, "r")
     except zipfile.BadZipFile as e:
         raise ValueError(f"Invalid transfer archive: the uploaded file is not a readable .zip ({e})") from e
+    # Inspect the central directory before reading even the manifest. ZipExtFile
+    # bounds output by file_size, so declared sizes also bound decompression.
+    # Only the explicitly streamed row sections are exempt from the whole-read cap.
+    try:
+        config = get_config()
+        entries = zf.infolist()
+        if len(entries) > config.bank_import_max_entries:
+            raise ValueError("Invalid transfer archive: entry count exceeds the bank import limit")
+        if sum(info.file_size for info in entries) > config.bank_import_max_total_size_mb * 1024**2:
+            raise ValueError("Invalid transfer archive: total size exceeds the bank import limit")
+        streamed = {
+            "observations.json",
+            *(f"data/{table}.json" for table in (*OPERATIONAL_TABLES, "invalidated_memory_units")),
+            *(f"history/{table}.json" for table in HISTORY_TABLES),
+        }
+        for info in entries:
+            if info.flag_bits & 0x1:
+                raise ValueError(f"Invalid transfer archive: encrypted entry {info.filename!r}")
+            # Export writes deflated JSON and stored blobs; no other codecs are part
+            # of the archive contract, even when the local zipfile supports them.
+            if info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
+                raise ValueError(f"Invalid transfer archive: unsupported compression for {info.filename!r}")
+            if info.filename not in streamed and info.file_size > config.bank_import_max_entry_size_mb * 1024**2:
+                raise ValueError(f"Invalid transfer archive: {info.filename!r} exceeds the entry size limit")
+    except BaseException:
+        zf.close()
+        raise
     if "manifest.json" not in zf.NameToInfo:
         zf.close()
         raise ValueError(
@@ -229,10 +257,13 @@ def _read_manifest(zf: zipfile.ZipFile) -> TransferManifest:
     return manifest
 
 
-def _iter_documents(zf: zipfile.ZipFile) -> Iterator[TransferDocument]:
+def _iter_documents(zf: zipfile.ZipFile, *, source_bank_id: str | None = None) -> Iterator[TransferDocument]:
     """The archive's documents in entry order, one parsed at a time."""
     for name in sorted(n for n in zf.NameToInfo if n.startswith("documents/") and n.endswith(".json")):
-        yield TransferDocument.model_validate_json(zf.read(name))
+        payload = zf.read(name)
+        if source_bank_id is not None:
+            _check_archive_rows(name, [json.loads(payload)], source_bank_id=source_bank_id)
+        yield TransferDocument.model_validate_json(payload)
 
 
 def _iter_json_array(zf: zipfile.ZipFile, name: str) -> Iterator[Any]:
@@ -245,32 +276,46 @@ def _iter_json_array(zf: zipfile.ZipFile, name: str) -> Iterator[Any]:
         return
     decoder = json.JSONDecoder()
     with zf.open(name) as raw, io.TextIOWrapper(raw, encoding="utf-8") as text:
-        buf, pos, opened, eof = "", 0, False, False
+        buf, pos, eof = "", 0, False
+        state = "start"
         while True:
-            while pos < len(buf) and (buf[pos].isspace() or (opened and buf[pos] == ",")):
+            while pos < len(buf) and buf[pos] in " \t\r\n":
                 pos += 1
-            if pos < len(buf) and not opened:
-                if buf[pos] != "[":
-                    raise ValueError(f"Invalid transfer archive: {name} is not a JSON array")
-                opened = True
-                pos += 1
-                continue
-            if pos < len(buf) and buf[pos] == "]":
-                return
             if pos < len(buf):
+                char = buf[pos]
+                if state == "start":
+                    if char != "[":
+                        raise ValueError(f"Invalid transfer archive: {name} is not a JSON array")
+                    state, pos = "first", pos + 1
+                    continue
+                if state == "finished":
+                    raise ValueError(f"Invalid transfer archive: {name} has data after the JSON array")
+                if char == "]" and state in {"first", "separator"}:
+                    # Do not return at ']': read through EOF to reject trailing data
+                    # and let ZipExtFile verify the CRC, including trailing whitespace.
+                    state, pos = "finished", pos + 1
+                    continue
+                if state == "separator":
+                    if char != ",":
+                        raise ValueError(f"Invalid transfer archive: {name} is missing a comma")
+                    state, pos = "value", pos + 1
+                    continue
+                if char in {",", "]"}:
+                    raise ValueError(f"Invalid transfer archive: {name} has an unexpected separator")
                 try:
                     item, end = decoder.raw_decode(buf, pos)
                 except json.JSONDecodeError:
                     item, end = None, -1
-                # An item ending exactly at the buffer's end may be a number cut short.
-                if end != -1 and (end < len(buf) or eof):
+                # A number can end at a read boundary, or decode only its integer
+                # prefix before the rest of an exponent arrives. Wait for its delimiter.
+                if end != -1 and (eof or (end < len(buf) and buf[end] in " \t\r\n,]")):
                     yield item
-                    pos = end
+                    state, pos = "separator", end
                     continue
             if eof:
+                if state == "finished":
+                    return
                 raise ValueError(f"Invalid transfer archive: {name} is not a complete JSON array")
-            # Read at least as much as is buffered, so an item larger than one read
-            # costs a few re-parses rather than one per read.
             chunk = text.read(max(_JSON_READ_CHARS, len(buf) - pos))
             eof = not chunk
             buf, pos = buf[pos:] + chunk, 0
@@ -278,7 +323,10 @@ def _iter_json_array(zf: zipfile.ZipFile, name: str) -> Iterator[Any]:
 
 def _read_json(zf: zipfile.ZipFile, name: str) -> list[Any]:
     """A small JSON array entry read whole (mental models, the knowledge tree), or [] when absent."""
-    return json.loads(zf.read(name)) if name in zf.NameToInfo else []
+    rows = json.loads(zf.read(name)) if name in zf.NameToInfo else []
+    if not isinstance(rows, list):
+        raise ValueError(f"Invalid transfer archive: {name} is not a JSON array")
+    return rows
 
 
 def parse_archive(archive: Archive) -> ParsedArchive:
@@ -532,14 +580,6 @@ def _document_batches(documents: Iterable[TransferDocument]) -> Iterator[list[Tr
         yield batch
 
 
-# Bank-level config/state tables restored verbatim from a whole-bank archive.
-# Order matters for foreign keys: banks (parent) is restored before any child.
-_BANK_CHILD_TABLES = ("mental_models", "directives", "webhooks")
-# Child-history carried verbatim; restored after its parent (mental_models) so the
-# foreign key resolves. Surrogate ids were dropped on export (the target reassigns
-# them), so these restore via fresh IDENTITY values.
-
-
 @dataclass
 class BankImportResult:
     """Outcome of importing a whole-bank archive."""
@@ -590,25 +630,49 @@ class ParsedBankArchive:
         A pre-scope archive carried data and bank config, and declared its history
         through ``includes_history`` — so that is what it reads back as.
         """
-        declared = self.manifest.scope
-        if declared is None:
-            return TransferScope(data=True, bank_config=True, history=self.manifest.includes_history)
-        return TransferScope(data=declared.data, bank_config=declared.bank_config, history=declared.history)
+        return _archive_scope(self.manifest)
 
 
-def parse_bank_archive(zf: zipfile.ZipFile) -> ParsedBankArchive:
-    """Parse the bank-level sections of a whole-bank archive (``archive_type='bank'``)."""
+def _archive_scope(manifest: TransferManifest) -> TransferScope:
+    declared = manifest.scope
+    if declared is None:
+        return TransferScope(data=True, bank_config=True, history=manifest.includes_history)
+    return TransferScope(data=declared.data, bank_config=declared.bank_config, history=declared.history)
+
+
+def _restore_scope(manifest: TransferManifest, scope: TransferScope | None) -> TransferScope:
+    """One intersection for preflight, section parsing and restore."""
+    archive_scope = _archive_scope(manifest)
+    requested = scope or archive_scope
+    return TransferScope(
+        data=requested.data and archive_scope.data,
+        bank_config=requested.bank_config and archive_scope.bank_config,
+        history=requested.history and archive_scope.history,
+    )
+
+
+def parse_bank_archive(zf: zipfile.ZipFile, scope: TransferScope | None = None) -> ParsedBankArchive:
+    """Parse only the bank-level sections the requested restore will consume."""
     manifest = _read_manifest(zf)
     if manifest.archive_type != "bank":
         raise ValueError(
             f"Not a whole-bank archive (archive_type={manifest.archive_type!r}); use import_documents instead"
         )
-    bank_rows = {
-        table: _read_json(zf, f"{table}.json") for table in ("banks", *_BANK_CHILD_TABLES, *CARRIED_HISTORY_TABLES)
-    }
-    # Typed tree — absent on pre-tree archives, which restore with no pages.
-    knowledge_pages = [TransferKnowledgePage.model_validate(p) for p in _read_json(zf, "knowledge_pages.json")]
-    attachments = [TransferAttachment.model_validate(a) for a in _read_json(zf, "attachments.json")]
+    restoring = _restore_scope(manifest, scope)
+    tables = []
+    if restoring.bank_config:
+        tables.extend(("banks", "directives", "webhooks"))
+    if restoring.data:
+        tables.extend(("mental_models", *CARRIED_HISTORY_TABLES))
+    bank_rows = {table: _read_json(zf, f"{table}.json") for table in tables}
+    # Validate bank ownership before typed models discard extra fields such as bank_id.
+    # Verbatim table columns are intentionally dynamic across schema versions.
+    knowledge_rows = _read_json(zf, "knowledge_pages.json") if restoring.data else []
+    _check_archive_rows("knowledge_pages.json", knowledge_rows, source_bank_id=manifest.source_bank_id)
+    knowledge_pages = [TransferKnowledgePage.model_validate(p) for p in knowledge_rows]
+    attachments = (
+        [TransferAttachment.model_validate(a) for a in _read_json(zf, "attachments.json")] if restoring.data else []
+    )
     for attachment in attachments:
         if attachment.entry not in zf.NameToInfo:
             raise ValueError(
@@ -623,50 +687,71 @@ def parse_bank_archive(zf: zipfile.ZipFile) -> ParsedBankArchive:
     )
 
 
-def _check_archive_rows(name: str, rows: Iterable[Any]) -> None:
-    """Check the object shape that the verbatim-row restore's column lookups require."""
+def _check_archive_rows(name: str, rows: Iterable[Any], *, source_bank_id: str | None = None) -> None:
+    """Check dynamic table row shape and ownership before any restore writes."""
     for position, row in enumerate(rows):
         if not isinstance(row, dict):
             raise ValueError(f"Invalid transfer archive: {name} row {position} is not a JSON object")
+        if source_bank_id is not None and "bank_id" in row and row["bank_id"] != source_bank_id:
+            raise ValueError(f"Invalid transfer archive: {name} row {position} bank_id differs from source_bank_id")
 
 
-def validate_bank_archive(archive: Archive) -> None:
-    """Validate every section before a whole-bank import can leave a half-restored bank.
+def _validated_attachment_chunks(zf: zipfile.ZipFile, attachment: TransferAttachment) -> Iterator[bytes]:
+    """Verify size and content address as well as ZIP CRC, at both import barriers."""
+    if zf.getinfo(attachment.entry).file_size > get_config().bank_import_max_entry_size_mb * 1024**2:
+        raise ValueError(f"Invalid transfer archive: attachment {attachment.short_id} exceeds the entry size limit")
+    digest = hashlib.sha256()
+    size = 0
+    with zf.open(attachment.entry) as blob:
+        while chunk := blob.read(_JSON_READ_CHARS):
+            digest.update(chunk)
+            size += len(chunk)
+            yield chunk
+    if size != attachment.byte_size or digest.hexdigest() != attachment.attachment_hash:
+        raise ValueError(f"Invalid transfer archive: attachment {attachment.short_id} hash or byte_size mismatch")
 
-    This costs one extra archive pass. It uses the restore's models and streaming
-    parsers, discarding each document, observation and data/history row as it goes;
-    nothing the restore streams is held whole here (issue #5737). Bank-level sections
-    are read by ``parse_bank_archive``, just as they are during restore. Database
-    constraints still require the restore's rollback barrier.
+
+def validate_bank_archive(archive: Archive, scope: TransferScope | None = None) -> None:
+    """Validate just the sections restore will read, before it can create a bank.
+
+    Streaming sections stay streamed during this extra pass. Database constraints
+    still require the restore's independent rollback barrier.
     """
     with _open_archive(archive, produced_by="the bank export endpoint") as zf:
         try:
-            parsed = parse_bank_archive(zf)
+            parsed = parse_bank_archive(zf, scope)
+            restoring = _restore_scope(parsed.manifest, scope)
+            source = parsed.manifest.source_bank_id
             for table, rows in parsed.bank_rows.items():
-                if not isinstance(rows, list):
-                    raise ValueError(f"Invalid transfer archive: {table}.json is not a JSON array")
-                _check_archive_rows(f"{table}.json", rows)
-            for row in parsed.bank_rows.get("mental_models", []):
-                # Both embedding regeneration and standalone-model selection index by id.
-                if "id" not in row:
-                    raise ValueError("Invalid transfer archive: mental_models.json row has no id")
-
-            for _document in _iter_documents(zf):
-                pass
-            for observation in _iter_json_array(zf, "observations.json"):
-                TransferObservation.model_validate(observation)
-            for table in (*OPERATIONAL_TABLES, "invalidated_memory_units"):
-                name = f"data/{table}.json"
-                _check_archive_rows(name, _iter_json_array(zf, name))
-            for table in HISTORY_TABLES:
-                name = f"history/{table}.json"
-                _check_archive_rows(name, _iter_json_array(zf, name))
-            for attachment in parsed.attachments:
-                # Read through the blob to verify its CRC without allocating the whole entry.
-                with zf.open(attachment.entry) as blob:
-                    while blob.read(_JSON_READ_CHARS):
+                _check_archive_rows(f"{table}.json", rows, source_bank_id=source)
+            if restoring.bank_config:
+                banks = parsed.bank_rows.get("banks", [])
+                if len(banks) != 1 or banks[0].get("bank_id") != source:
+                    raise ValueError("Invalid transfer archive: banks.json must contain exactly the source bank row")
+            if restoring.data:
+                for row in parsed.bank_rows.get("mental_models", []):
+                    if "id" not in row:
+                        raise ValueError("Invalid transfer archive: mental_models.json row has no id")
+                for _document in _iter_documents(zf, source_bank_id=source):
+                    pass
+                for observation in _iter_json_array(zf, "observations.json"):
+                    _check_archive_rows("observations.json", [observation], source_bank_id=source)
+                    TransferObservation.model_validate(observation)
+                for table in (*OPERATIONAL_TABLES, "invalidated_memory_units"):
+                    name = f"data/{table}.json"
+                    _check_archive_rows(name, _iter_json_array(zf, name), source_bank_id=source)
+                for attachment in parsed.attachments:
+                    if attachment.bank_id != source:
+                        raise ValueError(
+                            "Invalid transfer archive: attachments.json bank_id differs from source_bank_id"
+                        )
+                    for _chunk in _validated_attachment_chunks(zf, attachment):
                         pass
-        except (zipfile.BadZipFile, zlib.error, EOFError) as error:
+            if restoring.history:
+                for table in HISTORY_TABLES:
+                    name = f"history/{table}.json"
+                    _check_archive_rows(name, _iter_json_array(zf, name), source_bank_id=source)
+        except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError) as error:
             raise ValueError(f"Invalid transfer archive: an entry is corrupt ({error})") from error
 
 
@@ -998,12 +1083,12 @@ def _drop_ids(rows: list[dict], column: str = "id") -> None:
         row.pop(column, None)
 
 
-def _retargeted_history(rows: Iterable[dict], bank_id: str) -> Iterator[dict]:
-    """History rows moved to ``bank_id``, their schema-wide ids dropped (see :func:`_drop_ids`)."""
+def _retargeted_history(rows: Iterable[dict], bank_id: str, *, drop_ids: bool = True) -> Iterator[dict]:
+    """Pin history to the destination; drop schema-wide ids only when retargeting."""
     for row in rows:
-        if "bank_id" in row:
-            row["bank_id"] = bank_id
-        row.pop("id", None)
+        row["bank_id"] = bank_id
+        if drop_ids:
+            row.pop("id", None)
         yield row
 
 
@@ -1014,8 +1099,7 @@ def _iter_data_rows(zf: zipfile.ZipFile, table: str, bank_id: str) -> Iterator[d
     so they are never read whole (#5737). Absent on pre-scope archives: empty.
     """
     for row in _iter_json_array(zf, f"data/{table}.json"):
-        if "bank_id" in row:
-            row["bank_id"] = bank_id
+        row["bank_id"] = bank_id
         yield row
 
 
@@ -1080,7 +1164,8 @@ async def _restore_attachments(
         document_id = document_id_map.get(attachment.document_id, attachment.document_id)
         key = attachment_storage_key(bank_id, document_id, attachment.attachment_hash)
         await file_storage.store(
-            file_data=zf.read(attachment.entry),
+            # Consume and verify the whole stream before the first external write.
+            file_data=b"".join(_validated_attachment_chunks(zf, attachment)),
             key=key,
             metadata={"content_type": attachment.media_type, "bank_id": bank_id},
         )
@@ -1301,28 +1386,19 @@ async def _restore_bank(
     on_bank_created: Callable[[Any], Awaitable[None]] | None,
 ) -> BankImportResult:
     """:func:`import_bank`, reading the archive from the open ``zf``."""
-    parsed = parse_bank_archive(zf)
-    archive_scope = parsed.scope
-    requested = scope or archive_scope
-    # The intersection: what was asked for, of what is actually in the archive.
-    restoring = TransferScope(
-        data=requested.data and archive_scope.data,
-        bank_config=requested.bank_config and archive_scope.bank_config,
-        history=requested.history and archive_scope.history,
-    )
+    parsed = parse_bank_archive(zf, scope)
+    restoring = _restore_scope(parsed.manifest, scope)
     bank_rows_json_encoding = _resolve_bank_rows_json_encoding(parsed.manifest)
     source_bank_id = parsed.manifest.source_bank_id
     bank_id = target_bank_id or source_bank_id
 
-    # Remapping to a different id: rewrite the carried bank_id on every row so FKs
-    # and PKs line up with the (also-remapped) documents/facts.
+    # Independent of preflight: every verbatim write belongs to the destination,
+    # even when it has the source's name. Never trust a carried bank_id here.
+    # Streamed rows receive the same treatment below.
+    for rows in parsed.bank_rows.values():
+        for row in rows:
+            row["bank_id"] = bank_id
     if bank_id != source_bank_id:
-        # History and data rows get the same treatment as they stream in (_retargeted_history,
-        # _iter_data_rows).
-        for rows in parsed.bank_rows.values():
-            for row in rows:
-                if "bank_id" in row:
-                    row["bank_id"] = bank_id
         # Ids that are unique across the whole schema rather than within the bank.
         # Their source rows are still present on a same-instance transfer, where
         # ON CONFLICT DO NOTHING would silently skip the copy (see _drop_ids).
@@ -1525,8 +1601,7 @@ async def _restore_bank(
         if restoring.history:
             for table in HISTORY_TABLES:
                 rows: Iterable[dict] = _iter_json_array(zf, f"history/{table}.json")
-                if bank_id != source_bank_id:
-                    rows = _retargeted_history(rows, bank_id)
+                rows = _retargeted_history(rows, bank_id, drop_ids=bank_id != source_bank_id)
                 result.history_rows_imported += await _restore_rows(
                     conn,
                     table,

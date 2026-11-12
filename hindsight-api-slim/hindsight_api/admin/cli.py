@@ -1500,7 +1500,13 @@ def import_bank_command(
     target_schema = schema or config.database_schema or DEFAULT_DATABASE_SCHEMA
     typer.echo(f"Importing bank archive '{archive}' into schema '{target_schema}'...")
 
-    result = asyncio.run(_run_import_bank(archive, target_schema, target_bank, include_history))
+    try:
+        result = asyncio.run(_run_import_bank(archive, target_schema, target_bank, include_history))
+    except Exception as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        for note in getattr(exc, "__notes__", ()):
+            typer.echo(note, err=True)
+        raise typer.Exit(1) from exc
 
     typer.echo(
         f"Imported bank '{result.bank_id}': {result.documents_imported} doc(s), "
