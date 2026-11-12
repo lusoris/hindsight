@@ -53,19 +53,25 @@ ALLOWED_PRETTIER_PREFIXES = ("$PRETTIER --write",)
 ALLOWED_PROCESS_ATTRS = {"subprocess": {"run", "CompletedProcess"}, "os": {"environ", "devnull", "pathsep"}}
 
 
-def _recorder(version: str) -> str:
+def _recorder(version: str, python: str = sys.executable) -> str:
     """A stub tool: appends its call as one JSON line, so a run's tool calls read back as typed records.
 
     It answers `--version` with `version`, which is how lint.sh asks prettier what it is.
+
+    The stub is a /bin/sh launcher that execs `python` on the recording program. It used to name `python` in its
+    `#!` line, but that line has no quoting: the kernel ends the interpreter path at the first space or tab, so an
+    interpreter under such a path (a checkout or virtualenv in a directory with a space) never started. shlex.quote
+    keeps the path one word; "$0" hands the program the stub's own path for the record, and "$@" every argument as is.
     """
-    return f"""#!{sys.executable}
-import json, os, sys
+    program = f"""import json, os, sys
+stub, args = sys.argv[1], sys.argv[2:]
 with open(os.environ["DEV_SCRIPT_CALLS"], "a") as f:
-    f.write(json.dumps({{"command": os.path.basename(sys.argv[0]), "path": os.path.abspath(sys.argv[0]), "args": sys.argv[1:], "cwd": os.getcwd()}}) + "\\n")
-if sys.argv[1:] == ["--version"]:
+    record = {{"command": os.path.basename(stub), "path": os.path.abspath(stub), "args": args, "cwd": os.getcwd()}}
+    f.write(json.dumps(record) + "\\n")
+if args == ["--version"]:
     print({version!r})
-sys.exit(0)
 """
+    return f'#!/bin/sh\nexec {shlex.quote(python)} -c {shlex.quote(program)} "$0" "$@"\n'
 
 
 @dataclass
@@ -151,6 +157,35 @@ def _run_task_commands(script_text: str) -> list[str]:
     """The command of every run_task line: its words after the task name and directory, shell quotes removed."""
     return [
         " ".join(shlex.split(line)[3:]) for line in _code_lines(script_text) if line.lstrip().startswith("run_task ")
+    ]
+
+
+def test_recorder_stub_runs_under_an_interpreter_path_with_a_space(tmp_path: Path) -> None:
+    """A stub whose Python lives under a path with a space starts, records itself, and forwards arguments intact.
+
+    The stubs once named their interpreter in a `#!` line, which cannot quote, so under such a path they never ran.
+    """
+    python = tmp_path / "py with space" / "python"
+    python.parent.mkdir()
+    python.symlink_to(sys.executable)
+    stub = tmp_path / "tool"
+    stub.write_text(_recorder("9.9.9", python=str(python)))
+    stub.chmod(0o755)
+    env = {**os.environ, "DEV_SCRIPT_CALLS": str(tmp_path / "calls.jsonl")}
+
+    version = subprocess.run(
+        [str(stub), "--version"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10, check=False
+    )
+    spaced = subprocess.run(
+        [str(stub), "a b", "", "$HOME"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10, check=False
+    )
+
+    assert (version.returncode, version.stdout) == (0, "9.9.9\n"), version
+    assert (spaced.returncode, spaced.stdout) == (0, ""), spaced
+    cwd = str(tmp_path.resolve())
+    assert _read_calls(env) == [
+        RecordedCall(command="tool", path=str(stub), args=["--version"], cwd=cwd),
+        RecordedCall(command="tool", path=str(stub), args=["a b", "", "$HOME"], cwd=cwd),
     ]
 
 
