@@ -909,7 +909,7 @@ async def _restore_rows(
         # A concurrent bank creator must fail this restore before on_bank_created;
         # silently adopting its row would let rollback delete somebody else's bank.
         conflict = "" if table == "banks" else " ON CONFLICT DO NOTHING"
-        sql = f"INSERT INTO {fq(table)} ({col_list}) VALUES ({', '.join(placeholders)}){conflict}"
+        sql = f"INSERT INTO {fq(table)} ({col_list}) VALUES ({', '.join(placeholders)}){conflict}"  # nosec B608 # values bound as $n; identifiers from the internal table list and live catalog columns; category D, entry 2026-11-12, expires 2027-03-12
         if pending and (sql != pending_sql or len(pending) >= _RESTORE_BATCH_SIZE):
             await conn.executemany(cast(str, pending_sql), pending)
             pending = []
