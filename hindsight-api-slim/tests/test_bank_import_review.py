@@ -11,6 +11,7 @@ import uuid
 import zipfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -24,7 +25,7 @@ from hindsight_api.engine.retain import bank_utils
 from hindsight_api.engine.transfer import TransferScope, importer
 from hindsight_api.engine.transfer.schema import TransferAttachment, TransferManifest, TransferScopeManifest
 from hindsight_api.extensions.operation_validator import OperationValidationError, ValidationResult
-from tests.test_bank_import_atomic import _rewrite, _synthetic_archive
+from tests.test_bank_import_atomic import _invalid_streamed_timestamp, _rewrite, _synthetic_archive
 from tests.test_bank_import_atomic import unit_engine as unit_engine
 
 
@@ -281,7 +282,7 @@ def test_preflight_maps_unimplemented_zip_reads_to_value_error(monkeypatch: pyte
 
 
 @pytest.mark.parametrize(
-    "limit", ["bank_import_max_entry_size_mb", "bank_import_max_total_size_mb", "bank_import_max_entries"]
+    "limit", ["transfer_import_max_entry_size_mb", "transfer_import_max_total_size_mb", "transfer_import_max_entries"]
 )
 @pytest.mark.parametrize("path", ["preflight", "restore"])
 @pytest.mark.asyncio
@@ -306,6 +307,79 @@ async def test_archive_limits_precede_all_entry_reads(monkeypatch: pytest.Monkey
                 resolve_config=AsyncMock(),
                 format_date_fn=str,
             )
+    read.assert_not_called()
+
+
+def test_preflight_accepts_invalid_streamed_timestamp() -> None:
+    # This is the same invalid DB value as the real rollback test, verified here
+    # independently of pg0 so a stricter preflight cannot make that test vacuous.
+    importer.validate_bank_archive(_invalid_streamed_timestamp(_synthetic_archive(), "atomic-source"))
+
+
+@dataclass
+class _StreamedOperationRow:
+    error_message: str
+    bank_id: str = "atomic-source"
+    operation_type: str = "retain"
+    status: str = "failed"
+
+
+@pytest.mark.parametrize("read_chars", [64 * 1024, 4 * 1024**2])
+def test_streamed_item_size_is_bounded(monkeypatch: pytest.MonkeyPatch, read_chars: int) -> None:
+    from hindsight_api.config import HindsightConfig
+
+    config = HindsightConfig.from_env()
+    config.transfer_import_max_entry_size_mb = 1
+    monkeypatch.setattr(importer, "get_config", lambda: config)
+    # Exercise configured read chunks both below and above the cap; the parser
+    # previously allowed a large chunk to decode an oversized item in one read.
+    monkeypatch.setattr(importer, "_JSON_READ_CHARS", read_chars)
+    name = "data/async_operations.json"
+    row = _StreamedOperationRow(error_message="x" * 1024**2)
+    archive = _rewrite(_synthetic_archive(), name, json.dumps([asdict(row)]).encode())
+    with pytest.raises(ValueError, match=f"{name} has an item larger than the entry size limit"):
+        importer.validate_bank_archive(archive)
+
+
+def test_streamed_items_below_cap_can_exceed_it_in_total(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hindsight_api.config import HindsightConfig
+
+    config = HindsightConfig.from_env()
+    config.transfer_import_max_entry_size_mb = 1
+    monkeypatch.setattr(importer, "get_config", lambda: config)
+    # Small rows must pass even when the combined section exceeds the whole-read
+    # entry cap, because the section is decoded one row at a time.
+    rows = [_StreamedOperationRow(error_message="x" * (512 * 1024)) for _ in range(3)]
+    payload = json.dumps([asdict(row) for row in rows]).encode()
+    assert len(payload) > 1024**2
+    importer.validate_bank_archive(_rewrite(_synthetic_archive(), "data/async_operations.json", payload))
+
+
+@pytest.mark.asyncio
+async def test_document_import_entry_limit_precedes_all_entry_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    from hindsight_api.config import HindsightConfig
+
+    config = HindsightConfig.from_env()
+    config.transfer_import_max_entry_size_mb = 1
+    monkeypatch.setattr(importer, "get_config", lambda: config)
+    archive = _rewrite(
+        _synthetic_archive(),
+        "manifest.json",
+        TransferManifest(source_bank_id="atomic-source", archive_type="documents").model_dump_json().encode(),
+    )
+    archive = _rewrite(archive, "documents/000000.json", b" " * (1024**2 + 1))
+    read = MagicMock(side_effect=AssertionError("limit must precede any entry read"))
+    monkeypatch.setattr(zipfile.ZipFile, "open", read)
+    with pytest.raises(ValueError, match="entry size limit"):
+        await importer.import_documents(
+            archive=archive,
+            bank_id="document-target",
+            backend=MagicMock(),
+            embeddings_model=MagicMock(),
+            entity_resolver=MagicMock(),
+            config=config,
+            format_date_fn=str,
+        )
     read.assert_not_called()
 
 
@@ -586,7 +660,7 @@ async def test_streamed_entry_used_as_attachment_still_has_a_whole_read_cap(monk
     )
     archive = _rewrite(_synthetic_archive(), attachment.entry, content)
     config = HindsightConfig.from_env()
-    config.bank_import_max_entry_size_mb = 1
+    config.transfer_import_max_entry_size_mb = 1
     monkeypatch.setattr(importer, "get_config", lambda: config)
     store = MagicMock(store=AsyncMock())
     with importer._open_archive(archive, produced_by="test export") as zf, pytest.raises(ValueError, match="limit"):

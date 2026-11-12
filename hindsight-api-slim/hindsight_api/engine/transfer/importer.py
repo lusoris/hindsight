@@ -216,10 +216,10 @@ def _open_archive(archive: Archive, *, produced_by: str) -> zipfile.ZipFile:
     try:
         config = get_config()
         entries = zf.infolist()
-        if len(entries) > config.bank_import_max_entries:
-            raise ValueError("Invalid transfer archive: entry count exceeds the bank import limit")
-        if sum(info.file_size for info in entries) > config.bank_import_max_total_size_mb * 1024**2:
-            raise ValueError("Invalid transfer archive: total size exceeds the bank import limit")
+        if len(entries) > config.transfer_import_max_entries:
+            raise ValueError("Invalid transfer archive: entry count exceeds the transfer import limit")
+        if sum(info.file_size for info in entries) > config.transfer_import_max_total_size_mb * 1024**2:
+            raise ValueError("Invalid transfer archive: total size exceeds the transfer import limit")
         streamed = {
             "observations.json",
             *(f"data/{table}.json" for table in (*OPERATIONAL_TABLES, "invalidated_memory_units")),
@@ -232,7 +232,7 @@ def _open_archive(archive: Archive, *, produced_by: str) -> zipfile.ZipFile:
             # of the archive contract, even when the local zipfile supports them.
             if info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
                 raise ValueError(f"Invalid transfer archive: unsupported compression for {info.filename!r}")
-            if info.filename not in streamed and info.file_size > config.bank_import_max_entry_size_mb * 1024**2:
+            if info.filename not in streamed and info.file_size > config.transfer_import_max_entry_size_mb * 1024**2:
                 raise ValueError(f"Invalid transfer archive: {info.filename!r} exceeds the entry size limit")
     except BaseException:
         zf.close()
@@ -274,6 +274,8 @@ def _iter_json_array(zf: zipfile.ZipFile, name: str) -> Iterator[Any]:
     """
     if name not in zf.NameToInfo:
         return
+    item_limit = get_config().transfer_import_max_entry_size_mb * 1024**2
+    item_size_error = f"Invalid transfer archive: {name} has an item larger than the entry size limit"
     decoder = json.JSONDecoder()
     with zf.open(name) as raw, io.TextIOWrapper(raw, encoding="utf-8") as text:
         buf, pos, eof = "", 0, False
@@ -309,6 +311,11 @@ def _iter_json_array(zf: zipfile.ZipFile, name: str) -> Iterator[Any]:
                 # A number can end at a read boundary, or decode only its integer
                 # prefix before the rest of an exponent arrives. Wait for its delimiter.
                 if end != -1 and (eof or (end < len(buf) and buf[end] in " \t\r\n,]")):
+                    # The bounded read below keeps the buffer within the limit, so
+                    # this fires only if that bound is loosened; it keeps the cap
+                    # enforced on what is decoded, not only on what is buffered.
+                    if end - pos > item_limit:
+                        raise ValueError(item_size_error)
                     yield item
                     state, pos = "separator", end
                     continue
@@ -316,7 +323,15 @@ def _iter_json_array(zf: zipfile.ZipFile, name: str) -> Iterator[Any]:
                 if state == "finished":
                     return
                 raise ValueError(f"Invalid transfer archive: {name} is not a complete JSON array")
-            chunk = text.read(max(_JSON_READ_CHARS, len(buf) - pos))
+            undecoded_chars = len(buf) - pos
+            # A UTF-8 character occupies at least one byte, so this character
+            # count never exceeds the byte count. Cap each undecoded item rather
+            # than the section, which can contain arbitrarily many small rows.
+            if undecoded_chars > item_limit:
+                raise ValueError(item_size_error)
+            # One extra character distinguishes an exactly-at-limit item from
+            # an oversized one without letting an incomplete item double forever.
+            chunk = text.read(min(max(_JSON_READ_CHARS, undecoded_chars), item_limit + 1 - undecoded_chars))
             eof = not chunk
             buf, pos = buf[pos:] + chunk, 0
 
@@ -698,7 +713,7 @@ def _check_archive_rows(name: str, rows: Iterable[Any], *, source_bank_id: str |
 
 def _validated_attachment_chunks(zf: zipfile.ZipFile, attachment: TransferAttachment) -> Iterator[bytes]:
     """Verify size and content address as well as ZIP CRC, at both import barriers."""
-    if zf.getinfo(attachment.entry).file_size > get_config().bank_import_max_entry_size_mb * 1024**2:
+    if zf.getinfo(attachment.entry).file_size > get_config().transfer_import_max_entry_size_mb * 1024**2:
         raise ValueError(f"Invalid transfer archive: attachment {attachment.short_id} exceeds the entry size limit")
     digest = hashlib.sha256()
     size = 0

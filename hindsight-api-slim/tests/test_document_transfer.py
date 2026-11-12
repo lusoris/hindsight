@@ -3624,7 +3624,7 @@ async def test_attachment_bytes_travel_with_the_bank(memory, request_context):
     point the copy at the source's blob — which deleting the source bank then
     sweeps out from under it.
     """
-    from hindsight_api.engine.retain.attachment_content import RetainAttachment
+    from hindsight_api.engine.retain.attachment_content import RetainAttachment, compute_attachment_hash
     from hindsight_api.engine.retain.attachment_store import store_images
     from hindsight_api.engine.transfer import export_bank
 
@@ -3642,7 +3642,7 @@ async def test_attachment_bytes_travel_with_the_bank(memory, request_context):
                 "doc-1",
                 [
                     RetainAttachment(
-                        attachment_hash="a" * 64,
+                        attachment_hash=compute_attachment_hash(payload),
                         media_type="image/png",
                         data=payload,
                         block_index=0,

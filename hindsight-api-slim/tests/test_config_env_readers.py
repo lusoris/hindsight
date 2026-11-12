@@ -38,12 +38,12 @@ def test_bad_value_raises_instead_of_falling_back(monkeypatch):
 @pytest.mark.parametrize(
     "field,default",
     [
-        ("bank_import_max_entry_size_mb", 512),
-        ("bank_import_max_total_size_mb", 8192),
-        ("bank_import_max_entries", 1_000_000),
+        ("transfer_import_max_entry_size_mb", 512),
+        ("transfer_import_max_total_size_mb", 8192),
+        ("transfer_import_max_entries", 1_000_000),
     ],
 )
-def test_bank_import_limits_are_static_and_environment_backed(
+def test_transfer_import_limits_are_static_and_environment_backed(
     monkeypatch: pytest.MonkeyPatch, field: str, default: int
 ) -> None:
     from hindsight_api.config import HindsightConfig, StaticConfigProxy

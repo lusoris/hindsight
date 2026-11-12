@@ -2233,9 +2233,9 @@ Configuration for the file upload and conversion pipeline (used by `POST /v1/def
 | `HINDSIGHT_API_ENABLE_FILE_UPLOAD_API` | Enable the file upload API endpoint | `true` |
 | `HINDSIGHT_API_ENABLE_DOCUMENT_EXPORT_API` | Enable the [document export](./api/memory-banks.mdx#document-export--import-superseded) endpoint (`GET /document-transfer`) | `true` |
 | `HINDSIGHT_API_ENABLE_DOCUMENT_IMPORT_API` | Enable the [document import](./api/memory-banks.mdx#document-export--import-superseded) endpoint (`POST /document-transfer`) | `true` |
-| `HINDSIGHT_API_BANK_IMPORT_MAX_ENTRY_SIZE_MB` | Maximum declared uncompressed size in MiB of a whole-read transfer entry (manifest, document, bank-level JSON section or attachment). Streamed observation/data/history arrays use the total cap instead. Server-level only. | `512` |
-| `HINDSIGHT_API_BANK_IMPORT_MAX_TOTAL_SIZE_MB` | Maximum sum of declared uncompressed sizes in MiB over all transfer ZIP entries, checked before any entry is read. Server-level only. | `8192` |
-| `HINDSIGHT_API_BANK_IMPORT_MAX_ENTRIES` | Maximum number of transfer ZIP entries, checked before any entry is read. Server-level only. | `1000000` |
+| `HINDSIGHT_API_TRANSFER_IMPORT_MAX_ENTRY_SIZE_MB` | Maximum declared uncompressed size in MiB of a whole-read transfer entry (manifest, document, bank-level JSON section or attachment) for bank and document archive imports. Streamed observation/data/history sections apply this limit per item. Server-level only. | `512` |
+| `HINDSIGHT_API_TRANSFER_IMPORT_MAX_TOTAL_SIZE_MB` | Maximum sum of declared uncompressed sizes in MiB over all transfer ZIP entries for bank and document archive imports, checked before any entry is read. Server-level only. | `8192` |
+| `HINDSIGHT_API_TRANSFER_IMPORT_MAX_ENTRIES` | Maximum number of transfer ZIP entries for bank and document archive imports, checked before any entry is read. Server-level only. | `1000000` |
 | `HINDSIGHT_API_FILE_PARSER` | Server-side default parser or fallback chain (comma-separated, e.g. `iris,markitdown`) | `markitdown` |
 | `HINDSIGHT_API_FILE_PARSER_ALLOWLIST` | Comma-separated list of parsers clients are allowed to request. If not set, all registered parsers are allowed. | — |
 | `HINDSIGHT_API_FILE_CONVERSION_MAX_BATCH_SIZE` | Max files per upload request | `10` |

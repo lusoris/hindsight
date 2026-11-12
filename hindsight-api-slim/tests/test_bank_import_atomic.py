@@ -16,19 +16,22 @@ import uuid
 import zipfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
+from asyncpg import DataError
 
 from hindsight_api import MemoryEngine, RequestContext
 from hindsight_api.engine import memory_engine as engine_module
 from hindsight_api.engine import transfer
 from hindsight_api.engine.cross_encoder import RRFPassthroughCrossEncoder
+from hindsight_api.engine.db_utils import acquire_with_retry
 from hindsight_api.engine.embeddings import Embeddings
 from hindsight_api.engine.retain import bank_utils
+from hindsight_api.engine.schema import fq_table
 from hindsight_api.engine.transfer import TransferScope, importer, stream_export_bank
 from hindsight_api.engine.transfer.schema import (
     HISTORY_TABLES,
@@ -68,6 +71,22 @@ def cross_encoder() -> RRFPassthroughCrossEncoder:
 class _BankArchive:
     source: str
     data: bytes
+
+
+@dataclass
+class _InvalidTimestampOperation:
+    bank_id: str
+    operation_type: str = "retain"
+    status: str = "completed"
+    # A JSON number passes structural preflight, but asyncpg requires a datetime.
+    created_at: int = 7
+
+
+def _invalid_streamed_timestamp(archive: bytes, source: str) -> bytes:
+    # Live memory units are replayed from documents, not a data/memory_units.json
+    # section. The operations log is a streamed section restored verbatim.
+    row = _InvalidTimestampOperation(bank_id=source)
+    return _rewrite(archive, "data/async_operations.json", json.dumps([asdict(row)]).encode())
 
 
 def _synthetic_archive() -> bytes:
@@ -192,10 +211,59 @@ async def test_rollback_alone_removes_committed_document_batches(memory, request
 
 
 @pytest.mark.asyncio
+async def test_invalid_streamed_value_passes_preflight_and_rolls_back(
+    memory: MemoryEngine, request_context: RequestContext, exported_bank: _BankArchive
+) -> None:
+    target = _unique_bank("atomic_streamed_rollback")
+    archive = _invalid_streamed_timestamp(exported_bank.data, exported_bank.source)
+    importer.validate_bank_archive(archive)
+    try:
+        with pytest.raises(DataError, match="datetime"):
+            await memory.import_bank_async(archive, request_context, target_bank_id=target)
+        assert await bank_utils.get_bank_profile_if_exists(await memory._get_backend(), target) is None
+    finally:
+        await memory.delete_bank(target, request_context=request_context)
+
+
+@pytest.mark.asyncio
+async def test_delete_body_checks_identity_before_removing_bank_and_memories(
+    memory: MemoryEngine, request_context: RequestContext
+) -> None:
+    bank = _unique_bank("atomic_delete_identity")
+    try:
+        unit_ids = await _retain(memory, bank, "Alice owns a bicycle.", request_context, "doc-identity")
+        assert unit_ids
+        backend = await memory._get_backend()
+        # The profile helpers omit internal_id. Read only the bank row for the
+        # identity token; verify the deletion's effects through public reads.
+        async with acquire_with_retry(backend) as conn:
+            internal_id = uuid.UUID(
+                str(await conn.fetchval(f"SELECT internal_id FROM {fq_table('banks')} WHERE bank_id = $1", bank))
+            )
+        before = await memory.list_memory_units(bank, limit=100, request_context=request_context)
+        assert before["total"] > 0
+        refused = await memory._delete_bank_body(
+            bank, expected_internal_id=uuid.uuid4(), request_context=request_context
+        )
+        assert refused.applied is False
+        assert await bank_utils.get_bank_profile_if_exists(backend, bank) is not None
+        after = await memory.list_memory_units(bank, limit=100, request_context=request_context)
+        assert after["total"] == before["total"]
+        assert {unit["id"] for unit in after["items"]} == {unit["id"] for unit in before["items"]}
+        applied = await memory._delete_bank_body(
+            bank, expected_internal_id=internal_id, request_context=request_context
+        )
+        assert applied.applied is True
+        assert await bank_utils.get_bank_profile_if_exists(backend, bank) is None
+    finally:
+        await memory.delete_bank(bank, request_context=request_context)
+
+
+@pytest.mark.asyncio
 async def test_rollback_keeps_a_preexisting_bank(memory, request_context, exported_bank, monkeypatch):
     monkeypatch.setattr(importer, "validate_bank_archive", lambda archive, scope=None: None)
-    delete = AsyncMock(wraps=memory.delete_bank)
-    monkeypatch.setattr(memory, "delete_bank", delete)
+    delete = AsyncMock(wraps=memory._delete_bank_body)
+    monkeypatch.setattr(memory, "_delete_bank_body", delete)
     with pytest.raises(ValueError, match="already exists"):
         await memory.import_bank_async(exported_bank.data, request_context, target_bank_id=exported_bank.source)
     delete.assert_not_awaited()

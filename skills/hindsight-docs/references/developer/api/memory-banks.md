@@ -1089,6 +1089,8 @@ In `restore` mode the operation is recorded against `{bank_id}` — the bank in 
 
 Preflight checks the sections selected for restore and returns `400` before queuing for structural errors, contract errors (including bank ownership and row shape), integrity errors (ZIP CRC and attachment hash/size), and configured size or entry-count limits. Values rejected by the database fail in the background task; that task removes the bank it created, checking its internal identity so a replacement bank is left intact. If cleanup also fails, the original error carries a recovery note naming the half-restored bank and its deletion command.
 
+The restored bank is visible as soon as its bank row is written, before the import operation completes. If the restore then fails, the rollback removes that bank, including anything written to it in the meantime, so wait for the import operation to finish before writing to the bank.
+
 A restore carries the operations log as history, not as work: anything still in flight when the bank was exported is left behind, so a copied bank never re-runs the original's queued retains or re-fires its webhooks. In-flight work belongs to the bank that was exported — and a clone runs *inside* one such operation, so carrying them would put the clone's own unfinished record in the copy.
 
 ### Import facts extracted outside Hindsight

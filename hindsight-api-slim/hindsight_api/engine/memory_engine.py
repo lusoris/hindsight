@@ -12392,8 +12392,6 @@ class MemoryEngine(MemoryEngineInterface):
             if config.enable_auto_consolidation:
                 try:
                     await self.submit_async_consolidation(bank_id=bank_id, request_context=request_context)
-                except _BankDeletionIdentityMismatch:
-                    raise
                 except Exception as e:
                     logger.warning(f"Failed to submit consolidation after bank deletion for bank {bank_id}: {e}")
 
