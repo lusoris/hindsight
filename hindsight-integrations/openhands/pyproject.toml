@@ -44,6 +44,9 @@ line-length = 120
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Repository-only test helpers (hindsight-integrations/_shared/integration_testing);
+# tests/ is not shipped in the wheel, so the helpers are imported by path, not copied.
+pythonpath = ["../_shared"]
 markers = [
     "requires_real_llm: end-to-end test that needs live external services (a running Hindsight server and/or real LLM provider keys). Excluded from the deterministic PR-CI bucket via -m 'not requires_real_llm'; run on its own via -m requires_real_llm.",
 ]
