@@ -10,11 +10,12 @@ transcript afterwards (read from Aider's chat-history file).
 
 from __future__ import annotations
 
-import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Optional
+
+from ._user_config import read_user_config
 
 DEFAULT_HINDSIGHT_API_URL = "https://api.hindsight.vectorize.io"
 HINDSIGHT_API_KEY_ENV = "HINDSIGHT_API_KEY"
@@ -104,17 +105,12 @@ def load_config(config_file: Optional[Path] = None, env: Optional[dict] = None) 
     cfg = AiderConfig()
     env = os.environ if env is None else env
 
-    path = config_file if config_file is not None else USER_CONFIG_FILE
-    if path.is_file():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            data = {}
-        for key, (attr, typ) in _FILE_KEYS.items():
-            if key in data and data[key] is not None:
-                cast = _cast(data[key], typ)
-                if cast is not None:
-                    setattr(cfg, attr, cast)
+    data = read_user_config(config_file, USER_CONFIG_FILE)
+    for key, (attr, typ) in _FILE_KEYS.items():
+        if key in data and data[key] is not None:
+            cast = _cast(data[key], typ)
+            if cast is not None:
+                setattr(cfg, attr, cast)
 
     for key, (attr, typ) in _ENV_KEYS.items():
         if env.get(key):
