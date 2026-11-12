@@ -9090,7 +9090,8 @@ class MemoryEngine(MemoryEngineInterface):
                     exc.add_note(
                         f"Could not remove half-restored bank {bank_id!r}: {cleanup_error}. "
                         f"Recover with `hindsight bank delete {bank_id}` or "
-                        f"`DELETE /v1/default/banks/{bank_id}`."
+                        f"`DELETE /v1/default/banks/{bank_id}`. Both routes require permission to delete banks: "
+                        "the DELETE_BANK operation validator must allow it."
                     )
                     logger.warning("[transfer] Could not delete half-restored bank %s", bank_id, exc_info=True)
             raise

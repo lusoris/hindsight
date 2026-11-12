@@ -20,7 +20,7 @@ trap 'rm -f "$tmp"' EXIT
 # in their own implementation and planted test cases.
 # -i: semgrep matches any case; upper-case nosec must reach the checker and fail.
 set +e
-git grep -l -z -i -I -E '\bnosem(grep)?\b|\bnosec\b' -- . \
+git grep -l -z -i -I -E '\bnosem(grep)?\b|\bnosec' -- . \
     ':!scripts/check-scanner-suppressions.sh' \
     ':!scripts/check-scanner-suppressions.py' \
     ':!hindsight-dev/tests/test_check_scanner_suppressions.py' > "$tmp"

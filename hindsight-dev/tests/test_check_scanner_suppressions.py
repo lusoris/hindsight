@@ -178,15 +178,17 @@ def test_17_real_knowledge_base_proxy_file_passes() -> None:
     assert check_text(str(real_path), text, TODAY) == []
 
 
-@pytest.mark.parametrize("ids", ["B608", "B608, B110"])
-def test_23_nosec_with_ids_and_metadata_passes(ids: str) -> None:
-    text = f"x = 1  # nosec {ids} # bound values category D, expires 2027-01-01\n"
+def test_23_nosec_with_ids_and_metadata_passes() -> None:
+    text = "x = 1  # nosec B608 # bound values category D, expires 2027-01-01\n"
     assert check_text("test.py", text, TODAY) == []
 
 
 @pytest.mark.parametrize(
     "marker,message",
     [
+        ("# nosec B608, B110 # bound values category D, expires 2027-01-01", checker.UNKNOWN_BANDIT_ID),
+        ("# nosec B999 # bound values category D, expires 2027-01-01", checker.UNKNOWN_BANDIT_ID),
+        ("# nosec B608, B999 # bound values category D, expires 2027-01-01", checker.UNKNOWN_BANDIT_ID),
         ("# nosec B608", checker.MALFORMED_NOSEC),
         ("# nosec B608 #", "suppression reason is empty"),
         (
@@ -243,7 +245,8 @@ def test_27_real_importer_marker_passes() -> None:
     assert check_text(str(path), text, IMPORTER_ENTRY_DATE) == []
 
 
-def test_28_wrapper_finds_nosec_markers(tmp_path: Path) -> None:
+@pytest.mark.parametrize("marker", ["# nosec B608", "# nosecB608 # bound values category D, expires 2027-01-01"])
+def test_28_wrapper_finds_nosec_markers(tmp_path: Path, marker: str) -> None:
     git_bin = shutil.which("git")
     bash_bin = shutil.which("bash")
     assert git_bin is not None and bash_bin is not None, "git and bash must be on PATH"
@@ -274,13 +277,20 @@ def test_28_wrapper_finds_nosec_markers(tmp_path: Path) -> None:
     for name in ("check-scanner-suppressions.py", "check-scanner-suppressions.sh"):
         shutil.copyfile(CHECKER_PATH.parent / name, scripts / name)
     bad = tmp_path / "bad.py"
-    bad.write_text("x = 1  # nosec B608\n", encoding="utf-8")
+    bad.write_text(f"x = 1  {marker}\n", encoding="utf-8")
     git("add", "-A")
     result = run_wrapper()
     assert result.returncode == 1
     assert "bad.py:1:" in result.stderr
+    assert checker.MALFORMED_NOSEC in result.stderr
     expiry = datetime.datetime.now(datetime.UTC).date() + datetime.timedelta(days=30)
     bad.write_text(f"x = 1  # nosec B608 # bound values category D, expires {expiry.isoformat()}\n", encoding="utf-8")
     git("add", "-A")
     result = run_wrapper()
     assert result.returncode == 0
+
+
+def test_29_nosec_without_separator_is_discovered_and_rejected() -> None:
+    text = "x = 1  # nosecB608 # bound values category D, expires 2027-01-01\n"
+    assert checker.MARKER_RE.findall(text) == ["nosec"]
+    assert check_text("test.py", text, TODAY) == [checker.Problem("test.py", 1, checker.MALFORMED_NOSEC)]

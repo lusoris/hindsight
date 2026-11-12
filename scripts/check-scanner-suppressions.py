@@ -12,7 +12,7 @@ enforces fleet policy:
 - every suppression must name one or more valid rule IDs;
 - every Semgrep suppression must give a non-empty reason after ' -- ';
 - Bandit uses '<code>  # nosec B<nnn>[, B<nnn>...] # <reason>': the marker trails
-  the code it suppresses, uses test ids only, and puts the reason after a second '#';
+  the code it suppresses, uses only repo-approved test IDs (currently B608), and puts the reason after a second '#';
 - Bandit reasons follow the same category and expiry rules below;
 - the reason must declare a fleet exception category (A, B, C, or D);
 - the reason must declare a valid ISO expiry date (expires YYYY-MM-DD);
@@ -51,7 +51,8 @@ COMMENT_PREFIXES: tuple[str, ...] = ("//", "#", "/*", "*", "<!--")
 # marker right after the comment leader, in lower case, and so missed both.
 # Bandit honours only lower-case nosec, but any case counts here so an upper-case
 # marker that leaves the finding live fails instead of passing unchecked.
-MARKER_RE = re.compile(r"\bnosem(?:grep)?\b|\bnosec\b", re.IGNORECASE)
+# Bandit also reads nosec without a separator before the ID; discover it so strict validation can reject it.
+MARKER_RE = re.compile(r"\bnosem(?:grep)?\b|\bnosec", re.IGNORECASE)
 
 # The one accepted form. The spacing is exact on purpose: with two spaces after the colon
 # (`nosemgrep:  rule-x`) semgrep 1.183 drops the rule ids and suppresses every rule on the line,
@@ -67,6 +68,13 @@ RULE_ID_RE = re.compile(r"[A-Za-z0-9_.\-]+")
 # a reason contains a test id. Require ids only, never test names or blanket markers.
 NOSEC_ACCEPTED_RE = re.compile(r"\S\s+# nosec (?P<ids>[^#]+?) #(?P<reason>.*)$")
 BANDIT_ID_RE = re.compile(r"B\d{3}")
+# Bandit discards IDs it does not know; an empty set means a blanket nosec. This checker runs without Bandit
+# installed, so accept only repo-approved IDs that exist in its registry. Confirm each new ID in Bandit's
+# plugin list before adding it here.
+ALLOWED_BANDIT_IDS = frozenset({"B608"})
+UNKNOWN_BANDIT_ID = (
+    "Bandit test ID not in the approved list; an unknown ID makes Bandit suppress every test on the line"
+)
 MALFORMED_NOSEC = "malformed scanner suppression; expected '<code>  # nosec B<nnn>[, B<nnn>...] # <reason>'"
 NOSEC_COMMENT_ONLY = "nosec marker on a comment-only line suppresses nothing; put it after the code it suppresses"
 
@@ -161,6 +169,8 @@ def _nosec_problems(line: str, today: datetime.date) -> list[str]:
     match = NOSEC_ACCEPTED_RE.search(line)
     if not match or not all(BANDIT_ID_RE.fullmatch(rule) for rule in match.group("ids").split(", ")):
         return [MALFORMED_NOSEC]
+    if any(rule not in ALLOWED_BANDIT_IDS for rule in match.group("ids").split(", ")):
+        return [UNKNOWN_BANDIT_ID]
     reason = match.group("reason").strip()
     if not reason:
         return ["suppression reason is empty"]
