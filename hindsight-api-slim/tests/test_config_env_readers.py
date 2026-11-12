@@ -55,3 +55,41 @@ def test_transfer_import_limits_are_static_and_environment_backed(
     config = HindsightConfig.from_env()
     assert getattr(StaticConfigProxy(config), field) == 3
     assert field not in HindsightConfig.get_configurable_fields()
+
+
+@pytest.mark.parametrize(
+    "field", ["transfer_import_max_entry_size_mb", "transfer_import_max_total_size_mb", "transfer_import_max_entries"]
+)
+@pytest.mark.parametrize("raw", ["0", "-1"])
+def test_transfer_import_limit_below_one_stops_startup(monkeypatch: pytest.MonkeyPatch, field: str, raw: str) -> None:
+    from hindsight_api.config import HindsightConfig
+
+    # A ceiling of 0 would refuse every archive, manifest included, at import time;
+    # the operator sees the variable name at startup instead.
+    variable = "HINDSIGHT_API_" + field.upper()
+    monkeypatch.setenv(variable, raw)
+    with pytest.raises(ValueError, match=f"{variable} must be >= 1, got {raw}"):
+        HindsightConfig.from_env()
+
+
+def test_transfer_import_limits_default_when_the_dataclass_is_built_directly() -> None:
+    import dataclasses
+
+    from hindsight_api.config import (
+        DEFAULT_TRANSFER_IMPORT_MAX_ENTRIES,
+        DEFAULT_TRANSFER_IMPORT_MAX_ENTRY_SIZE_MB,
+        DEFAULT_TRANSFER_IMPORT_MAX_TOTAL_SIZE_MB,
+        HindsightConfig,
+    )
+
+    # Code that builds HindsightConfig itself (tests, embedders) predates these
+    # fields and passes none of them; they must not become required arguments.
+    limits = {"transfer_import_max_entry_size_mb", "transfer_import_max_total_size_mb", "transfer_import_max_entries"}
+    source = HindsightConfig.from_env()
+    kwargs = {
+        f.name: getattr(source, f.name) for f in dataclasses.fields(HindsightConfig) if f.init and f.name not in limits
+    }
+    config = HindsightConfig(**kwargs)
+    assert config.transfer_import_max_entry_size_mb == DEFAULT_TRANSFER_IMPORT_MAX_ENTRY_SIZE_MB == 512
+    assert config.transfer_import_max_total_size_mb == DEFAULT_TRANSFER_IMPORT_MAX_TOTAL_SIZE_MB == 8192
+    assert config.transfer_import_max_entries == DEFAULT_TRANSFER_IMPORT_MAX_ENTRIES == 1_000_000

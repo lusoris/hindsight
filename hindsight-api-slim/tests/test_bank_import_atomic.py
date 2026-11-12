@@ -510,22 +510,26 @@ async def test_failure_before_on_bank_created_does_not_delete_existing_bank(unit
     delete.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("row", [None, {"internal_id": uuid.uuid4()}])
-async def test_rollback_never_deletes_a_missing_or_replaced_bank(unit_engine, request_context, monkeypatch, row):
-    conn = MagicMock(fetchrow=AsyncMock(return_value=row), execute=AsyncMock())
+def _stub_connection(monkeypatch: pytest.MonkeyPatch, module: Any, conn: MagicMock) -> None:
+    """Make ``module.acquire_with_retry`` yield ``conn``, whose ``transaction()`` is a no-op."""
 
     @asynccontextmanager
     async def transaction() -> AsyncIterator[None]:
         yield
 
-    conn.transaction = transaction
-
     @asynccontextmanager
     async def acquire(backend: Any) -> AsyncIterator[Any]:
         yield conn
 
-    monkeypatch.setattr(engine_module, "acquire_with_retry", acquire)
+    conn.transaction = transaction
+    monkeypatch.setattr(module, "acquire_with_retry", acquire)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("row", [None, {"internal_id": uuid.uuid4()}])
+async def test_rollback_never_deletes_a_missing_or_replaced_bank(unit_engine, request_context, monkeypatch, row):
+    conn = MagicMock(fetchrow=AsyncMock(return_value=row), execute=AsyncMock())
+    _stub_connection(monkeypatch, engine_module, conn)
     files = AsyncMock()
     monkeypatch.setattr(unit_engine, "_delete_files_quietly", files)
     await unit_engine._discard_half_restored_bank("atomic-target", uuid.uuid4(), request_context)
@@ -649,17 +653,7 @@ def test_preflight_reads_attachment_bytes_and_reports_bad_crc_as_a_value_error()
 @pytest.mark.asyncio
 async def test_concurrent_default_bank_creation_fails_before_the_ownership_callback(monkeypatch):
     conn = MagicMock(fetchval=AsyncMock(return_value=None))
-
-    @asynccontextmanager
-    async def transaction() -> AsyncIterator[None]:
-        yield
-
-    @asynccontextmanager
-    async def acquire(backend: Any) -> AsyncIterator[Any]:
-        yield conn
-
-    conn.transaction = transaction
-    monkeypatch.setattr(importer, "acquire_with_retry", acquire)
+    _stub_connection(monkeypatch, importer, conn)
     monkeypatch.setattr(bank_utils, "create_bank_row_on_conn", AsyncMock(return_value=False))
     callback = AsyncMock()
     with pytest.raises(ValueError, match="concurrent call"):

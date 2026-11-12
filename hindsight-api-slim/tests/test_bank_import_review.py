@@ -26,7 +26,13 @@ from hindsight_api.engine.retain import bank_utils
 from hindsight_api.engine.transfer import TransferScope, importer
 from hindsight_api.engine.transfer.schema import TransferAttachment, TransferManifest, TransferScopeManifest
 from hindsight_api.extensions.operation_validator import OperationValidationError, ValidationResult
-from tests.test_bank_import_atomic import _invalid_streamed_timestamp, _rewrite, _stub_engine, _synthetic_archive
+from tests.test_bank_import_atomic import (
+    _invalid_streamed_timestamp,
+    _rewrite,
+    _stub_connection,
+    _stub_engine,
+    _synthetic_archive,
+)
 
 
 @pytest.fixture
@@ -126,17 +132,7 @@ async def test_restore_rewrites_bank_ids_even_when_preflight_is_bypassed(
         fetchval=AsyncMock(side_effect=lambda query, *args: internal_id if "SELECT internal_id" in query else None)
     )
     monkeypatch.setattr(bank_utils, "create_bank_vector_indexes", AsyncMock())
-
-    @asynccontextmanager
-    async def transaction() -> AsyncIterator[None]:
-        yield
-
-    @asynccontextmanager
-    async def acquire(backend: Any) -> AsyncIterator[Any]:
-        yield conn
-
-    conn.transaction = transaction
-    monkeypatch.setattr(importer, "acquire_with_retry", acquire)
+    _stub_connection(monkeypatch, importer, conn)
     monkeypatch.setattr(importer, "_replay_documents", AsyncMock(return_value=importer.ImportResult()))
     monkeypatch.setattr(importer, "_apply_mental_model_derived_state", AsyncMock())
     monkeypatch.setattr(importer, "_regenerate_mental_model_embeddings", AsyncMock(return_value={}))
@@ -377,6 +373,113 @@ def test_streamed_items_below_cap_can_exceed_it_in_total(monkeypatch: pytest.Mon
     payload = json.dumps([asdict(row) for row in rows]).encode()
     assert len(payload) > 1024**2
     importer.validate_bank_archive(_rewrite(_synthetic_archive(), "data/async_operations.json", payload))
+
+
+def _multibyte_operations(monkeypatch: pytest.MonkeyPatch, read_chars: int, chars: int) -> str:
+    """Set a 1 MiB item limit and return one async_operations row of ``chars`` euro signs as JSON."""
+    from hindsight_api.config import HindsightConfig
+
+    config = HindsightConfig.from_env()
+    config.transfer_import_max_entry_size_mb = 1
+    monkeypatch.setattr(importer, "get_config", lambda: config)
+    monkeypatch.setattr(importer, "_JSON_READ_CHARS", read_chars)
+    # "€" is one character and three UTF-8 bytes; ensure_ascii=False keeps it that way
+    # in the entry instead of escaping it to six ASCII bytes.
+    return json.dumps([asdict(_StreamedOperationRow(error_message="€" * chars))], ensure_ascii=False)
+
+
+@pytest.mark.parametrize("read_chars", [64 * 1024, 4 * 1024**2])
+def test_streamed_item_size_counts_utf8_bytes(monkeypatch: pytest.MonkeyPatch, read_chars: int) -> None:
+    text = _multibyte_operations(monkeypatch, read_chars, 1000 * 1024)
+    # Under the limit in characters, about three times over it in bytes: the
+    # character count used to stand in for the byte count and let this through.
+    assert len(text) < 1024**2 < len(text.encode())
+    name = "data/async_operations.json"
+    archive = _rewrite(_synthetic_archive(), name, text.encode())
+    # 64 KiB reads leave the item undecoded over several passes, so the check on the
+    # pending buffer refuses it; one 4 MiB read decodes it whole, so the check on the
+    # decoded item does.
+    with pytest.raises(ValueError, match=f"{name} has an item larger than the entry size limit"):
+        importer.validate_bank_archive(archive)
+
+
+@pytest.mark.parametrize("read_chars", [64 * 1024, 4 * 1024**2])
+def test_unfinished_streamed_item_is_refused_by_its_utf8_size(monkeypatch: pytest.MonkeyPatch, read_chars: int) -> None:
+    # Cut before its last closing quote, the item never decodes, so only the check on
+    # the pending buffer can refuse it by size. Counting characters there let the
+    # buffer fill to the limit in characters (up to four times it in bytes) and the
+    # read end at "not a complete JSON array" instead.
+    text = _multibyte_operations(monkeypatch, read_chars, 1000 * 1024)[: -len('"}]')]
+    name = "data/async_operations.json"
+    archive = _rewrite(_synthetic_archive(), name, text.encode())
+    with pytest.raises(ValueError, match=f"{name} has an item larger than the entry size limit"):
+        importer.validate_bank_archive(archive)
+
+
+@pytest.mark.parametrize("read_chars", [64 * 1024, 4 * 1024**2])
+def test_streamed_multibyte_item_within_the_byte_limit_passes(monkeypatch: pytest.MonkeyPatch, read_chars: int) -> None:
+    text = _multibyte_operations(monkeypatch, read_chars, 300 * 1024)
+    # Over a quarter of the limit in characters, so the item is encoded and measured.
+    assert 1024**2 < 4 * len(text) and len(text.encode()) < 1024**2
+    importer.validate_bank_archive(_rewrite(_synthetic_archive(), "data/async_operations.json", text.encode()))
+
+
+_SHARED_BLOB = "blobs/000000.bin"
+
+
+def _shared_blob_archive(monkeypatch: pytest.MonkeyPatch, copies: int) -> bytes:
+    """A 600 KiB blob named by ``copies`` attachment rows, under a 1 MiB total-size limit."""
+    from hindsight_api.config import HindsightConfig
+
+    config = HindsightConfig.from_env()
+    config.transfer_import_max_total_size_mb = 1
+    monkeypatch.setattr(importer, "get_config", lambda: config)
+    content = b"a" * (600 * 1024)
+    rows = [
+        TransferAttachment(
+            bank_id="atomic-source",
+            document_id="doc-0",
+            attachment_hash=hashlib.sha256(content).hexdigest(),
+            short_id=f"short-{copy}",
+            media_type="text/plain",
+            byte_size=len(content),
+            entry=_SHARED_BLOB,
+        )
+        for copy in range(copies)
+    ]
+    archive = _rewrite(
+        _synthetic_archive(), "attachments.json", ("[" + ",".join(row.model_dump_json() for row in rows) + "]").encode()
+    )
+    return _rewrite(archive, _SHARED_BLOB, content)
+
+
+def test_attachment_blob_named_once_passes_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    importer.validate_bank_archive(_shared_blob_archive(monkeypatch, copies=1))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("barrier", ["preflight", "import"])
+async def test_attachment_rows_sharing_a_blob_are_bounded_by_the_total_size(
+    monkeypatch: pytest.MonkeyPatch, barrier: str
+) -> None:
+    # The archive holds 600 KiB, inside the 1 MiB total, but two rows name the same
+    # entry and each barrier reads and hashes it once per row: 1200 KiB of work.
+    archive = _shared_blob_archive(monkeypatch, copies=2)
+    read = MagicMock(side_effect=AssertionError("the sum must be checked before any attachment is read"))
+    monkeypatch.setattr(importer, "_validated_attachment_chunks", read)
+    with pytest.raises(ValueError, match="attachments reference more bytes than the total size limit"):
+        if barrier == "preflight":
+            importer.validate_bank_archive(archive)
+        else:
+            await importer.import_bank(
+                archive=archive,
+                backend=MagicMock(),
+                embeddings_model=MagicMock(),
+                entity_resolver=MagicMock(),
+                resolve_config=AsyncMock(),
+                format_date_fn=str,
+            )
+    read.assert_not_called()
 
 
 @pytest.mark.asyncio
