@@ -301,6 +301,21 @@ def test_preflight_maps_unimplemented_zip_reads_to_value_error(monkeypatch: pyte
         importer.validate_bank_archive(_synthetic_archive())
 
 
+async def _run_barrier(barrier: str, archive: bytes) -> None:
+    """Pass ``archive`` through preflight, or through the import for any other ``barrier``."""
+    if barrier == "preflight":
+        importer.validate_bank_archive(archive)
+        return
+    await importer.import_bank(
+        archive=archive,
+        backend=MagicMock(),
+        embeddings_model=MagicMock(),
+        entity_resolver=MagicMock(),
+        resolve_config=AsyncMock(),
+        format_date_fn=str,
+    )
+
+
 @pytest.mark.parametrize(
     "limit", ["transfer_import_max_entry_size_mb", "transfer_import_max_total_size_mb", "transfer_import_max_entries"]
 )
@@ -316,17 +331,7 @@ async def test_archive_limits_precede_all_entry_reads(monkeypatch: pytest.Monkey
     read = MagicMock(side_effect=AssertionError("limit must be checked before reads"))
     monkeypatch.setattr(zipfile.ZipFile, "open", read)
     with pytest.raises(ValueError, match="limit"):
-        if path == "preflight":
-            importer.validate_bank_archive(archive)
-        else:
-            await importer.import_bank(
-                archive=archive,
-                backend=MagicMock(),
-                embeddings_model=MagicMock(),
-                entity_resolver=MagicMock(),
-                resolve_config=AsyncMock(),
-                format_date_fn=str,
-            )
+        await _run_barrier(path, archive)
     read.assert_not_called()
 
 
@@ -468,17 +473,7 @@ async def test_attachment_rows_sharing_a_blob_are_bounded_by_the_total_size(
     read = MagicMock(side_effect=AssertionError("the sum must be checked before any attachment is read"))
     monkeypatch.setattr(importer, "_validated_attachment_chunks", read)
     with pytest.raises(ValueError, match="attachments reference more bytes than the total size limit"):
-        if barrier == "preflight":
-            importer.validate_bank_archive(archive)
-        else:
-            await importer.import_bank(
-                archive=archive,
-                backend=MagicMock(),
-                embeddings_model=MagicMock(),
-                entity_resolver=MagicMock(),
-                resolve_config=AsyncMock(),
-                format_date_fn=str,
-            )
+        await _run_barrier(barrier, archive)
     read.assert_not_called()
 
 
