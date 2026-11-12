@@ -17,7 +17,7 @@ import pprint
 import re  # noqa: F401
 import json
 
-from pydantic import BaseModel, ConfigDict, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 from typing import Any, ClassVar, Dict, List, Optional
 from hindsight_client_api.models.chunk_attachment import ChunkAttachment
 from hindsight_client_api.models.recall_scores import RecallScores
@@ -42,8 +42,9 @@ class RecallResult(BaseModel):
     tags: Optional[List[StrictStr]] = None
     source_fact_ids: Optional[List[StrictStr]] = None
     scores: Optional[RecallScores] = None
+    is_stale: Optional[StrictBool] = Field(default=False, description="Whether to re-check this memory before relying on it: its record is marked 'stale', its ttl_seconds have elapsed since it was fetched, or it has ttl_seconds but no fetch time. Stale memories are still returned and ranked.")
     attachments: Optional[List[ChunkAttachment]] = None
-    __properties: ClassVar[List[str]] = ["id", "text", "type", "entities", "context", "occurred_start", "occurred_end", "mentioned_at", "document_id", "metadata", "chunk_id", "tags", "source_fact_ids", "scores", "attachments"]
+    __properties: ClassVar[List[str]] = ["id", "text", "type", "entities", "context", "occurred_start", "occurred_end", "mentioned_at", "document_id", "metadata", "chunk_id", "tags", "source_fact_ids", "scores", "is_stale", "attachments"]
 
     model_config = ConfigDict(
         populate_by_name=True,
@@ -185,6 +186,7 @@ class RecallResult(BaseModel):
             "tags": obj.get("tags"),
             "source_fact_ids": obj.get("source_fact_ids"),
             "scores": RecallScores.from_dict(obj["scores"]) if obj.get("scores") is not None else None,
+            "is_stale": obj.get("is_stale") if obj.get("is_stale") is not None else False,
             "attachments": [ChunkAttachment.from_dict(_item) for _item in obj["attachments"]] if obj.get("attachments") is not None else None
         })
         return _obj

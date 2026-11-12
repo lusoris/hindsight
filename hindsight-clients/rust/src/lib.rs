@@ -108,6 +108,32 @@ mod tests {
         assert_eq!(block.kind.to_string(), "text");
     }
 
+    /// The Rust client is generated from `hindsight-docs/static/openapi.json` by
+    /// build.rs, so nothing under `hindsight-clients/rust/` is regenerated or
+    /// committed when the spec gains a field; this test fails to compile if the
+    /// spec loses `RecallResult.is_stale`, and fails if its wire name or default
+    /// changes.
+    #[test]
+    fn test_recall_result_carries_is_stale() {
+        let result: types::RecallResult = serde_json::from_value(serde_json::json!({
+            "id": "m1",
+            "text": "t",
+            "is_stale": true,
+        }))
+        .expect("RecallResult with is_stale should decode");
+        assert!(result.is_stale);
+
+        let serialized = serde_json::to_value(&result).expect("RecallResult should serialize to JSON");
+        assert_eq!(serialized["is_stale"], serde_json::json!(true));
+
+        let default_result: types::RecallResult = serde_json::from_value(serde_json::json!({
+            "id": "m2",
+            "text": "t",
+        }))
+        .expect("RecallResult without is_stale should decode");
+        assert!(!default_result.is_stale);
+    }
+
     #[tokio::test]
     async fn test_memory_lifecycle() {
         let api_url = std::env::var("HINDSIGHT_API_URL")

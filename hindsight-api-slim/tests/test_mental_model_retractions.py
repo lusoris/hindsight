@@ -7,7 +7,6 @@ the retraction prompt is not tested here: the pass is driven through a stub that
 returns a fixed operation list, so these cover the pipeline, not the model.
 """
 
-from hindsight_api.engine.response_models import LLMCallResult, TokenUsage
 import json
 import os
 import uuid
@@ -21,13 +20,15 @@ import pytest
 from hindsight_api import RequestContext
 from hindsight_api.engine.memories import get_memories
 from hindsight_api.engine.memory_engine import MemoryEngine
-from hindsight_api.engine.schema import fq_store_table
 from hindsight_api.engine.reflect.retractions import (
     MEMORY_BACKED_FACT_TYPES,
     based_on_fact_ids,
     partition_retracted,
     prune_based_on,
 )
+from hindsight_api.engine.response_models import LLMCallResult, TokenUsage
+from hindsight_api.engine.schema import fq_store_table
+from tests.fact_fakes import RECORD_CONTRACT_DEFAULTS
 
 # ---------------------------------------------------------------------------
 # Pure helpers — no DB, no LLM
@@ -125,6 +126,7 @@ async def _insert_memory(memory: MemoryEngine, conn, bank_id: str, text: str) ->
         occurred_end=None,
         mentioned_at=None,
         attachment_ids=[],
+        **RECORD_CONTRACT_DEFAULTS,
     )
     unit_ids = await store.insert_facts(
         conn=conn, ops=memory._backend.ops, bank_id=bank_id, facts=[fact], document_id=None

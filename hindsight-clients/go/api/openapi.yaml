@@ -12374,6 +12374,14 @@ components:
           type: array
         scores:
           $ref: '#/components/schemas/RecallScores'
+        is_stale:
+          default: false
+          description: "Whether to re-check this memory before relying on it: its\
+            \ record is marked 'stale', its ttl_seconds have elapsed since it was\
+            \ fetched, or it has ttl_seconds but no fetch time. Stale memories are\
+            \ still returned and ranked."
+          title: Is Stale
+          type: boolean
         attachments:
           items:
             $ref: '#/components/schemas/ChunkAttachment'
