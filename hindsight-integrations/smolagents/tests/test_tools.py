@@ -19,7 +19,6 @@ from hindsight_smolagents import (
 from hindsight_smolagents.errors import HindsightError
 from hindsight_smolagents.tools import _USER_AGENT, _HindsightTool, _resolve_client
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
