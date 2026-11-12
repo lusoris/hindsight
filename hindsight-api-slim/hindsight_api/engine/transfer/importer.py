@@ -20,6 +20,7 @@ import itertools
 import json
 import logging
 import re
+import struct
 import uuid
 import zipfile
 import zlib
@@ -28,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import IO, TYPE_CHECKING, Any, Literal, cast
 
-from ...config import get_config
+from ...config import StaticConfigProxy, get_config
 from ...schema_context import get_current_schema
 from ..causal_links import CANONICAL_CAUSAL_LINK_TYPE, LEGACY_CAUSAL_LINK_TYPES
 from ..db.ops_postgresql import pg_search_vector_expr
@@ -193,6 +194,116 @@ class ParsedArchive:
     knowledge_pages: list[TransferKnowledgePage] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _ArchiveEndRecord:
+    entries: int
+    directory_size: int
+    directory_offset: int
+    record_offset: int
+
+
+@dataclass(frozen=True)
+class _ArchiveDirectory:
+    entries: int
+    size: int
+
+
+def _read_archive_range(archive: Archive, offset: int, size: int) -> bytes:
+    """Read a bounded end-record range, resetting seekable uploads for ZipFile."""
+    if isinstance(archive, bytes):
+        return archive[offset : offset + size]
+    try:
+        archive.seek(offset)
+        return archive.read(size)
+    finally:
+        archive.seek(0)
+
+
+def _find_archive_end_record(archive: Archive) -> _ArchiveEndRecord | None:
+    """Find the classic end record using CPython's no-comment fast path and tail search."""
+    if isinstance(archive, bytes):
+        archive_size = len(archive)
+    else:
+        archive.seek(0, io.SEEK_END)
+        archive_size = archive.tell()
+    tail_offset = max(0, archive_size - 22 - 65535)
+    tail = _read_archive_range(archive, tail_offset, 22 + 65535)
+    if len(tail) >= 22 and tail[-22:-18] == b"PK\x05\x06" and tail[-2:] == b"\x00\x00":
+        start = len(tail) - 22
+    else:
+        start = tail.rfind(b"PK\x05\x06")
+    if start < 0 or len(tail) - start < 22:
+        return None
+    # PKWARE APPNOTE 4.3.16: classic EOCD, total entries at 10, directory size at 12.
+    record = struct.unpack_from("<4s4H2LH", tail, start)
+    return _ArchiveEndRecord(record[4], record[5], record[6], tail_offset + start)
+
+
+def _read_zip64_directory(archive: Archive, end: _ArchiveEndRecord) -> _ArchiveDirectory | None:
+    """Read the fixed ZIP64 end record and locator immediately before the classic record."""
+    if end.record_offset < 76:
+        return None
+    # Read these fixed 76 bytes separately: a maximum-length comment can push
+    # them outside the bounded classic-EOCD search tail.
+    data = _read_archive_range(archive, end.record_offset - 76, 76)
+    if len(data) != 76 or data[:4] != b"PK\x06\x06" or data[56:60] != b"PK\x06\x07":
+        return None
+    # PKWARE APPNOTE 4.3.14-4.3.15: ZIP64 EOCD and locator, little-endian.
+    record = struct.unpack_from("<4sQ2H2L4Q", data)
+    locator = struct.unpack_from("<4sLQL", data, 56)
+    if record[1] != 44 or locator[1] != 0 or locator[3] > 1:
+        return None
+    return _ArchiveDirectory(record[7], record[8])
+
+
+def _check_archive_directory(archive: Archive, config: StaticConfigProxy) -> None:
+    """Bound directory allocation before ZipFile reads it whole and creates ZipInfo objects."""
+    end = _find_archive_end_record(archive)
+    if end is None:
+        return  # Preserve ZipFile's existing BadZipFile diagnosis for missing end records.
+    directory = _read_zip64_directory(archive, end)
+    if directory is None:
+        if end.entries == 0xFFFF or end.directory_size == 0xFFFFFFFF or end.directory_offset == 0xFFFFFFFF:
+            raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+        directory = _ArchiveDirectory(end.entries, end.directory_size)
+    if directory.entries > config.transfer_import_max_entries:
+        raise ValueError("Invalid transfer archive: entry count exceeds the transfer import limit")
+    # ZipFile reads the directory whole, so apply the same cap as a non-streamed
+    # entry. Each record needs at least 46 bytes, also bounding ZipInfo allocations.
+    if directory.size > config.transfer_import_max_entry_size_mb * 1024**2:
+        raise ValueError("Invalid transfer archive: central directory exceeds the entry size limit")
+    if directory.entries * 46 > directory.size:
+        raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+
+
+def _check_archive_entry(info: zipfile.ZipInfo, streamed: set[str], config: StaticConfigProxy) -> None:
+    """Apply the existing per-entry checks after directory parsing."""
+    if info.flag_bits & 0x1:
+        raise ValueError(f"Invalid transfer archive: encrypted entry {info.filename!r}")
+    # Export writes deflated JSON and stored blobs; no other codecs are part
+    # of the archive contract, even when the local zipfile supports them.
+    if info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
+        raise ValueError(f"Invalid transfer archive: unsupported compression for {info.filename!r}")
+    if info.filename not in streamed and info.file_size > config.transfer_import_max_entry_size_mb * 1024**2:
+        raise ValueError(f"Invalid transfer archive: {info.filename!r} exceeds the entry size limit")
+
+
+def _check_archive_entries(zf: zipfile.ZipFile, config: StaticConfigProxy) -> None:
+    """Keep post-parse size and codec checks independent of the end-record barrier."""
+    entries = zf.infolist()
+    if len(entries) > config.transfer_import_max_entries:
+        raise ValueError("Invalid transfer archive: entry count exceeds the transfer import limit")
+    if sum(info.file_size for info in entries) > config.transfer_import_max_total_size_mb * 1024**2:
+        raise ValueError("Invalid transfer archive: total size exceeds the transfer import limit")
+    streamed = {
+        "observations.json",
+        *(f"data/{table}.json" for table in (*OPERATIONAL_TABLES, "invalidated_memory_units")),
+        *(f"history/{table}.json" for table in HISTORY_TABLES),
+    }
+    for info in entries:
+        _check_archive_entry(info, streamed, config)
+
+
 def _open_archive(archive: Archive, *, produced_by: str) -> zipfile.ZipFile:
     """Open a transfer archive, rejecting non-archives as caller errors.
 
@@ -206,6 +317,8 @@ def _open_archive(archive: Archive, *, produced_by: str) -> zipfile.ZipFile:
             entry by entry as the import needs it, never loaded whole.
         produced_by: How the caller obtains a valid archive, named in the error.
     """
+    config = get_config()
+    _check_archive_directory(archive, config)
     try:
         zf = zipfile.ZipFile(io.BytesIO(archive) if isinstance(archive, bytes) else archive, "r")
     except zipfile.BadZipFile as e:
@@ -214,26 +327,7 @@ def _open_archive(archive: Archive, *, produced_by: str) -> zipfile.ZipFile:
     # bounds output by file_size, so declared sizes also bound decompression.
     # Only the explicitly streamed row sections are exempt from the whole-read cap.
     try:
-        config = get_config()
-        entries = zf.infolist()
-        if len(entries) > config.transfer_import_max_entries:
-            raise ValueError("Invalid transfer archive: entry count exceeds the transfer import limit")
-        if sum(info.file_size for info in entries) > config.transfer_import_max_total_size_mb * 1024**2:
-            raise ValueError("Invalid transfer archive: total size exceeds the transfer import limit")
-        streamed = {
-            "observations.json",
-            *(f"data/{table}.json" for table in (*OPERATIONAL_TABLES, "invalidated_memory_units")),
-            *(f"history/{table}.json" for table in HISTORY_TABLES),
-        }
-        for info in entries:
-            if info.flag_bits & 0x1:
-                raise ValueError(f"Invalid transfer archive: encrypted entry {info.filename!r}")
-            # Export writes deflated JSON and stored blobs; no other codecs are part
-            # of the archive contract, even when the local zipfile supports them.
-            if info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
-                raise ValueError(f"Invalid transfer archive: unsupported compression for {info.filename!r}")
-            if info.filename not in streamed and info.file_size > config.transfer_import_max_entry_size_mb * 1024**2:
-                raise ValueError(f"Invalid transfer archive: {info.filename!r} exceeds the entry size limit")
+        _check_archive_entries(zf, config)
     except BaseException:
         zf.close()
         raise

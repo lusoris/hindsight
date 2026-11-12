@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Feed check-scanner-suppressions.py the tracked files containing suppression markers.
 #
-#   check-scanner-suppressions.sh       check tracked files with nosem/nosemgrep
+#   check-scanner-suppressions.sh       check tracked files with nosem/nosemgrep/nosec
 #
 set -euo pipefail
 
@@ -18,9 +18,9 @@ trap 'rm -f "$tmp"' EXIT
 # Exclude this wrapper, scripts/check-scanner-suppressions.py and
 # hindsight-dev/tests/test_check_scanner_suppressions.py because they spell the marker pattern
 # in their own implementation and planted test cases.
-# -i: semgrep matches the marker in any case, so the file list must too.
+# -i: semgrep matches any case; upper-case nosec must reach the checker and fail.
 set +e
-git grep -l -z -i -I -E '\bnosem(grep)?\b' -- . \
+git grep -l -z -i -I -E '\bnosem(grep)?\b|\bnosec\b' -- . \
     ':!scripts/check-scanner-suppressions.sh' \
     ':!scripts/check-scanner-suppressions.py' \
     ':!hindsight-dev/tests/test_check_scanner_suppressions.py' > "$tmp"

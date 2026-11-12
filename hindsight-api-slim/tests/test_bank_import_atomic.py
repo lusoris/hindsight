@@ -670,3 +670,20 @@ async def test_concurrent_default_bank_creation_fails_before_the_ownership_callb
             on_bank_created=callback,
         )
     callback.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_report_skips_documents_when_no_facts_were_imported(
+    unit_engine: MemoryEngine, request_context: RequestContext
+) -> None:
+    # unit_engine stubs this method for orchestration tests; exercise the real guard here.
+    unit_engine._report_imported_documents = MemoryEngine._report_imported_documents.__get__(unit_engine, MemoryEngine)
+    validator = MagicMock(on_retain_complete=AsyncMock())
+    unit_engine._operation_validator = validator
+    archive = _synthetic_archive()
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        documents = sorted(name for name in zf.namelist() if name.startswith("documents/"))
+    assert documents == [f"documents/{index:06d}.json" for index in range(4)]
+    archive = _rewrite(archive, documents[0], b"{not json")
+    assert await unit_engine._report_imported_documents("bank", archive, {}, {}, request_context) is None
+    validator.on_retain_complete.assert_not_awaited()

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Refuse inline scanner suppressions that scanner tooling would ignore or misuse.
 
-Semgrep and Opengrep accept inline suppression markers (nosem and nosemgrep),
+Semgrep and Opengrep accept inline suppression markers (nosem and nosemgrep), and Bandit accepts nosec,
 which silently disable security rules. Without structured metadata and strict
 expiry dates, suppressions become permanent unreviewed exemptions or silently
 bind to nothing. This check scans tracked files for suppression markers and
@@ -10,13 +10,16 @@ enforces fleet policy:
 - every marker semgrep honours (nosem or nosemgrep, any case, anywhere on the line) must be the
   one accepted form '<comment leader> nosemgrep: <id>[, <id>...] -- <reason>', spaced exactly;
 - every suppression must name one or more valid rule IDs;
-- every suppression must give a non-empty reason after ' -- ';
+- every Semgrep suppression must give a non-empty reason after ' -- ';
+- Bandit uses '<code>  # nosec B<nnn>[, B<nnn>...] # <reason>': the marker trails
+  the code it suppresses, uses test ids only, and puts the reason after a second '#';
+- Bandit reasons follow the same category and expiry rules below;
 - the reason must declare a fleet exception category (A, B, C, or D);
 - the reason must declare a valid ISO expiry date (expires YYYY-MM-DD);
 - expired suppressions fail;
 - categories B (<=3 days), C (<=10 days), and D (<=120 days) must not exceed
   their category duration window from today;
-- comment-only suppressions must bind to an immediately following non-blank,
+- comment-only Semgrep suppressions must bind to an immediately following non-blank,
   non-comment code line; suppressions on code lines bind to their own line.
 
 scripts/check-scanner-suppressions.sh feeds tracked files containing markers to this script.
@@ -46,7 +49,9 @@ COMMENT_PREFIXES: tuple[str, ...] = ("//", "#", "/*", "*", "<!--")
 # semgrep 1.183: matching ignores case (`// NOSEMGREP` suppresses), and a marker after other words
 # (`fetch(u); // see nosemgrep docs`) still suppresses its own line. A first draft only counted a
 # marker right after the comment leader, in lower case, and so missed both.
-MARKER_RE = re.compile(r"\bnosem(?:grep)?\b", re.IGNORECASE)
+# Bandit honours only lower-case nosec, but any case counts here so an upper-case
+# marker that leaves the finding live fails instead of passing unchecked.
+MARKER_RE = re.compile(r"\bnosem(?:grep)?\b|\bnosec\b", re.IGNORECASE)
 
 # The one accepted form. The spacing is exact on purpose: with two spaces after the colon
 # (`nosemgrep:  rule-x`) semgrep 1.183 drops the rule ids and suppresses every rule on the line,
@@ -56,6 +61,14 @@ MARKER_RE = re.compile(r"\bnosem(?:grep)?\b", re.IGNORECASE)
 # regex-dos rule (Opengrep, via Codacy) flags. Ids hold no ` -- `, so both read the same lines.
 ACCEPTED_RE = re.compile(r"(?://|#|/\*|\*|<!--)\s+nosemgrep: (?P<ids>[A-Za-z0-9_.,\- ]+?) -- (?P<reason>\S.*)$")
 RULE_ID_RE = re.compile(r"[A-Za-z0-9_.\-]+")
+
+# Measured with Bandit 1.9.4: a second '#' ends its id list, keeping the reason
+# out of it. The '--' form warns on reason words and can widen suppression when
+# a reason contains a test id. Require ids only, never test names or blanket markers.
+NOSEC_ACCEPTED_RE = re.compile(r"\S\s+# nosec (?P<ids>[^#]+?) #(?P<reason>.*)$")
+BANDIT_ID_RE = re.compile(r"B\d{3}")
+MALFORMED_NOSEC = "malformed scanner suppression; expected '<code>  # nosec B<nnn>[, B<nnn>...] # <reason>'"
+NOSEC_COMMENT_ONLY = "nosec marker on a comment-only line suppresses nothing; put it after the code it suppresses"
 
 CATEGORY_RE = re.compile(r"\bcategory\s+([A-Za-z0-9_]+)\b")
 EXPIRES_RE = re.compile(r"\bexpires\s+(\S+)")
@@ -141,6 +154,19 @@ def _marker_problems(line: str, today: datetime.date) -> list[str]:
     return [msg for msg in (_category_problem(reason), _expiry_problem(reason, today)) if msg]
 
 
+def _nosec_problems(line: str, today: datetime.date) -> list[str]:
+    """Problems with a Bandit marker, which must trail the code it suppresses."""
+    if line.strip().startswith(COMMENT_PREFIXES):
+        return [NOSEC_COMMENT_ONLY]
+    match = NOSEC_ACCEPTED_RE.search(line)
+    if not match or not all(BANDIT_ID_RE.fullmatch(rule) for rule in match.group("ids").split(", ")):
+        return [MALFORMED_NOSEC]
+    reason = match.group("reason").strip()
+    if not reason:
+        return ["suppression reason is empty"]
+    return [m for m in (_category_problem(reason), _expiry_problem(reason, today)) if m]
+
+
 def check_text(path: str, text: str, today: datetime.date) -> list[Problem]:
     """Problems with every scanner suppression marker in ``text``, reported against ``path``."""
     problems: list[Problem] = []
@@ -150,6 +176,9 @@ def check_text(path: str, text: str, today: datetime.date) -> list[Problem]:
         line_no = line_idx + 1
         markers = MARKER_RE.findall(line)
         if not markers:
+            continue
+        if list(map(str.lower, markers)) == ["nosec"]:
+            problems.extend(Problem(path, line_no, msg) for msg in _nosec_problems(line, today))
             continue
 
         # A comment-only marker suppresses the next line, so it must have a code line to bind to.

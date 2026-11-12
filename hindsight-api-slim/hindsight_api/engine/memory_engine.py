@@ -9202,7 +9202,8 @@ class MemoryEngine(MemoryEngineInterface):
         dedup made free (which also reports ``processed_content_tokens=0``). Each
         document's text is re-read from the archive here, one at a time.
         """
-        if not self._operation_validator:
+        # An empty map yields nothing but parses every document first, which a config-only restore never validated.
+        if not self._operation_validator or not fact_unit_ids:
             return
 
         from .transfer.importer import iter_imported_documents
