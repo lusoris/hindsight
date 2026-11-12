@@ -268,4 +268,50 @@ describe("proxyDataplane", () => {
       expect.any(Error)
     );
   });
+
+  it.each([
+    {
+      label: "sends no body or Content-Type when jsonBody is omitted",
+      extra: {},
+      expectedInit: { method: "POST", headers: getDataplaneHeaders() },
+    },
+    {
+      label: "sends no body or Content-Type when jsonBody is undefined",
+      extra: { jsonBody: undefined },
+      expectedInit: { method: "POST", headers: getDataplaneHeaders() },
+    },
+    {
+      label: "sends JSON.stringify(jsonBody) with Content-Type application/json",
+      extra: { jsonBody: { mode: "full" } },
+      expectedInit: {
+        method: "POST",
+        headers: getDataplaneHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ mode: "full" }),
+      },
+    },
+    {
+      label: "sends JSON.stringify(jsonBody) when jsonBody is falsy but defined (null)",
+      extra: { jsonBody: null },
+      expectedInit: {
+        method: "POST",
+        headers: getDataplaneHeaders({ "Content-Type": "application/json" }),
+        body: "null",
+      },
+    },
+  ])("POST $label", async ({ extra, expectedInit }) => {
+    const result = { status: "queued" };
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(result), { status: HTTP_OK }));
+
+    const response = await proxyDataplane(
+      new Request(URL, { method: "POST" }),
+      options({ method: "POST", action: "refreshing mental model", ...extra })
+    );
+
+    expect(response.status).toBe(HTTP_OK);
+    expect(await response.json()).toEqual(result);
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const [calledUrl, calledInit] = fetchSpy.mock.calls[0];
+    expect(calledUrl).toBe(dataplaneBankUrl("bank-1", SUFFIX));
+    expect(calledInit).toStrictEqual(expectedInit);
+  });
 });
