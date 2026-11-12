@@ -10,11 +10,11 @@ import json
 import struct
 import uuid
 import zipfile
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -33,6 +33,9 @@ from tests.test_bank_import_atomic import (
     _stub_engine,
     _synthetic_archive,
 )
+
+if TYPE_CHECKING:
+    from hindsight_api.config import HindsightConfig
 
 
 @pytest.fixture
@@ -429,6 +432,28 @@ def test_streamed_multibyte_item_within_the_byte_limit_passes(monkeypatch: pytes
     importer.validate_bank_archive(_rewrite(_synthetic_archive(), "data/async_operations.json", text.encode()))
 
 
+@pytest.mark.parametrize("read_chars", [64 * 1024, 4 * 1024**2])
+def test_streamed_item_size_counts_crlf_bytes(monkeypatch: pytest.MonkeyPatch, read_chars: int) -> None:
+    _multibyte_operations(monkeypatch, read_chars, 0)
+    row = json.dumps(asdict(_StreamedOperationRow(error_message="x" * (600 * 1024))))
+    # Put CRLF inside the item so newline translation would hide its stored size.
+    text = "[{" + "\r\n" * (300 * 1024) + row[1:] + "]"
+    payload = text.encode("utf-8")
+    assert len(text.replace("\r\n", "\n").encode("utf-8")) < 1024**2 < len(payload)
+    name = "data/async_operations.json"
+    archive = _rewrite(_synthetic_archive(), name, payload)
+    with pytest.raises(ValueError, match=f"{name} has an item larger than the entry size limit") as exc_info:
+        importer.validate_bank_archive(archive)
+    assert str(exc_info.value) == f"Invalid transfer archive: {name} has an item larger than the entry size limit"
+
+
+def test_streamed_crlf_whitespace_parses() -> None:
+    rows = [asdict(_StreamedOperationRow(error_message=message)) for message in ("first", "second")]
+    text = json.dumps(rows, indent=1).replace("\n", "\r\n")
+    archive = _rewrite(_synthetic_archive(), "data/async_operations.json", text.encode("utf-8"))
+    importer.validate_bank_archive(archive)
+
+
 _SHARED_BLOB = "blobs/000000.bin"
 
 
@@ -798,26 +823,50 @@ async def test_streamed_entry_used_as_attachment_still_has_a_whole_read_cap(monk
     store.store.assert_not_awaited()
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("path", ["preflight", "restore"])
-async def test_end_record_entry_limit_precedes_zipfile(monkeypatch: pytest.MonkeyPatch, path: str) -> None:
+def _patch_config(monkeypatch: pytest.MonkeyPatch, **overrides: int) -> HindsightConfig:
+    """Patch the importer's environment config with the requested limits."""
     from hindsight_api.config import HindsightConfig
 
-    archive = _synthetic_archive()
     config = HindsightConfig.from_env()
-    config.transfer_import_max_entries = 6  # The fixture declares seven entries.
+    for name, value in overrides.items():
+        setattr(config, name, value)
     monkeypatch.setattr(importer, "get_config", lambda: config)
-    parse = MagicMock(side_effect=AssertionError("directory must not be parsed"))
-    monkeypatch.setattr(importer.zipfile, "ZipFile", parse)
+    return config
+
+
+@contextmanager
+def _refused_before_zipfile(patcher: pytest.MonkeyPatch, message: str) -> Iterator[None]:
+    """The body must raise exactly ``message`` without constructing ZipFile."""
+    parse = MagicMock(side_effect=AssertionError("the refusal must come before ZipFile is constructed"))
+    patcher.setattr(importer.zipfile, "ZipFile", parse)
     with pytest.raises(ValueError) as error:
-        await _run_barrier(path, archive)
-    assert str(error.value) == "Invalid transfer archive: entry count exceeds the transfer import limit"
+        yield
+    assert str(error.value) == message
     parse.assert_not_called()
 
 
-def test_zip64_end_record_limits_and_acceptance(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hindsight_api.config import HindsightConfig
+def _assert_archive_accepted(archive: bytes, as_file: bool) -> None:
+    """Accept archive bytes or a file whose caller has moved the cursor."""
+    if as_file:
+        upload = io.BytesIO(archive)
+        upload.seek(5)  # Precheck must reset files rather than inherit the caller's cursor.
+        assert importer.validate_bank_archive(upload) is None
+    else:
+        assert importer.validate_bank_archive(archive) is None
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["preflight", "restore"])
+async def test_end_record_entry_limit_precedes_zipfile(monkeypatch: pytest.MonkeyPatch, path: str) -> None:
+    archive = _synthetic_archive()
+    _patch_config(monkeypatch, transfer_import_max_entries=6)  # The fixture declares seven entries.
+    with _refused_before_zipfile(
+        monkeypatch, "Invalid transfer archive: entry count exceeds the transfer import limit"
+    ):
+        await _run_barrier(path, archive)
+
+
+def test_zip64_end_record_limits_and_acceptance(monkeypatch: pytest.MonkeyPatch) -> None:
     # Force CPython's writer to emit real ZIP64 end records for this small fixture.
     monkeypatch.setattr(zipfile, "ZIP_FILECOUNT_LIMIT", 1)
     archive_bytes = bytearray(_synthetic_archive())
@@ -826,16 +875,12 @@ def test_zip64_end_record_limits_and_acceptance(monkeypatch: pytest.MonkeyPatch)
     struct.pack_into("<H", archive_bytes, len(archive_bytes) - 22 + 10, 0xFFFF)
     archive = bytes(archive_bytes)
     assert b"PK\x06\x06" in archive
-    config = HindsightConfig.from_env()
-    config.transfer_import_max_entries = 6
-    monkeypatch.setattr(importer, "get_config", lambda: config)
+    config = _patch_config(monkeypatch, transfer_import_max_entries=6)
     with monkeypatch.context() as before_parse:
-        parse = MagicMock(side_effect=AssertionError("ZIP64 directory must not be parsed"))
-        before_parse.setattr(importer.zipfile, "ZipFile", parse)
-        with pytest.raises(ValueError) as error:
+        with _refused_before_zipfile(
+            before_parse, "Invalid transfer archive: entry count exceeds the transfer import limit"
+        ):
             importer.validate_bank_archive(archive)
-        assert str(error.value) == "Invalid transfer archive: entry count exceeds the transfer import limit"
-        parse.assert_not_called()
     config.transfer_import_max_entries = 7
     assert importer.validate_bank_archive(archive) is None
 
@@ -843,54 +888,34 @@ def test_zip64_end_record_limits_and_acceptance(monkeypatch: pytest.MonkeyPatch)
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["preflight", "restore"])
 async def test_end_record_directory_size_precedes_zipfile(monkeypatch: pytest.MonkeyPatch, path: str) -> None:
-    from hindsight_api.config import HindsightConfig
-
     archive = bytearray(_synthetic_archive())
     # Claim a large directory without allocating it; the end-record barrier must
     # refuse before ZipFile attempts its whole-directory read.
     struct.pack_into("<L", archive, len(archive) - 22 + 12, 1024**2 + 1)
-    config = HindsightConfig.from_env()
-    config.transfer_import_max_entry_size_mb = 1
-    monkeypatch.setattr(importer, "get_config", lambda: config)
-    parse = MagicMock(side_effect=AssertionError("directory must not be parsed"))
-    monkeypatch.setattr(importer.zipfile, "ZipFile", parse)
-    with pytest.raises(ValueError) as error:
+    _patch_config(monkeypatch, transfer_import_max_entry_size_mb=1)
+    with _refused_before_zipfile(
+        monkeypatch, "Invalid transfer archive: central directory exceeds the entry size limit"
+    ):
         await _run_barrier(path, bytes(archive))
-    assert str(error.value) == "Invalid transfer archive: central directory exceeds the entry size limit"
-    parse.assert_not_called()
 
 
 @pytest.mark.parametrize("field,fmt,sentinel", [(10, "<H", 0xFFFF), (12, "<L", 0xFFFFFFFF), (16, "<L", 0xFFFFFFFF)])
 def test_end_record_zip64_sentinels_require_records(
     monkeypatch: pytest.MonkeyPatch, field: int, fmt: str, sentinel: int
 ) -> None:
-    from hindsight_api.config import HindsightConfig
-
     archive = bytearray(_synthetic_archive())
     struct.pack_into(fmt, archive, len(archive) - 22 + field, sentinel)
-    config = HindsightConfig.from_env()
-    monkeypatch.setattr(importer, "get_config", lambda: config)
-    parse = MagicMock(side_effect=AssertionError("malformed directory must not be parsed"))
-    monkeypatch.setattr(importer.zipfile, "ZipFile", parse)
-    with pytest.raises(ValueError) as error:
+    _patch_config(monkeypatch)
+    with _refused_before_zipfile(monkeypatch, "Invalid transfer archive: malformed end-of-central-directory record"):
         importer.validate_bank_archive(bytes(archive))
-    assert str(error.value) == "Invalid transfer archive: malformed end-of-central-directory record"
-    parse.assert_not_called()
 
 
 def test_end_record_count_must_fit_directory(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hindsight_api.config import HindsightConfig
-
     archive = bytearray(_synthetic_archive())
     struct.pack_into("<L", archive, len(archive) - 22 + 12, 7 * 46 - 1)
-    config = HindsightConfig.from_env()
-    monkeypatch.setattr(importer, "get_config", lambda: config)
-    parse = MagicMock(side_effect=AssertionError("impossible directory must not be parsed"))
-    monkeypatch.setattr(importer.zipfile, "ZipFile", parse)
-    with pytest.raises(ValueError) as error:
+    _patch_config(monkeypatch)
+    with _refused_before_zipfile(monkeypatch, "Invalid transfer archive: malformed end-of-central-directory record"):
         importer.validate_bank_archive(bytes(archive))
-    assert str(error.value) == "Invalid transfer archive: malformed end-of-central-directory record"
-    parse.assert_not_called()
 
 
 @pytest.mark.parametrize("as_file", [False, True])
@@ -906,12 +931,7 @@ def test_end_record_with_comment_accepts_bytes_and_file(
     with zipfile.ZipFile(out, "a") as zf:
         zf.comment = b"x" * comment_size
     data = out.getvalue()
-    if as_file:
-        upload = io.BytesIO(data)
-        upload.seek(5)  # Precheck must reset files rather than inherit the caller's cursor.
-        assert importer.validate_bank_archive(upload) is None
-    else:
-        assert importer.validate_bank_archive(data) is None
+    _assert_archive_accepted(data, as_file)
 
 
 def _archive_with_directory_fields() -> bytes:
@@ -928,34 +948,22 @@ def _archive_with_directory_fields() -> bytes:
 
 
 def test_end_record_with_65536_trailing_bytes_precedes_zipfile(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hindsight_api.config import HindsightConfig
-
     archive = _synthetic_archive() + b"\x00" * 65536
-    config = HindsightConfig.from_env()
-    config.transfer_import_max_entries = 6
-    monkeypatch.setattr(importer, "get_config", lambda: config)
-    parse = MagicMock(side_effect=AssertionError("tail end record must be checked before parsing"))
-    monkeypatch.setattr(importer.zipfile, "ZipFile", parse)
-    with pytest.raises(ValueError) as error:
+    _patch_config(monkeypatch, transfer_import_max_entries=6)
+    with _refused_before_zipfile(
+        monkeypatch, "Invalid transfer archive: entry count exceeds the transfer import limit"
+    ):
         importer.validate_bank_archive(archive)
-    assert str(error.value) == "Invalid transfer archive: entry count exceeds the transfer import limit"
-    parse.assert_not_called()
 
 
 def test_end_record_with_65537_trailing_bytes_is_unreadable(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hindsight_api.config import HindsightConfig
-
-    config = HindsightConfig.from_env()
-    config.transfer_import_max_entries = 6
-    monkeypatch.setattr(importer, "get_config", lambda: config)
+    _patch_config(monkeypatch, transfer_import_max_entries=6)
     with pytest.raises(ValueError) as error:
         importer.validate_bank_archive(_synthetic_archive() + b"\x00" * 65537)
     assert str(error.value).startswith("Invalid transfer archive: the uploaded file is not a readable .zip")
 
 
 def test_zip64_extensible_data_precedes_zipfile(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hindsight_api.config import HindsightConfig
-
     monkeypatch.setattr(zipfile, "ZIP_FILECOUNT_LIMIT", 1)
     archive = bytearray(_synthetic_archive())
     end = len(archive) - 22
@@ -965,15 +973,9 @@ def test_zip64_extensible_data_precedes_zipfile(monkeypatch: pytest.MonkeyPatch)
     # Reproduce G2: understated classic values cannot stand in for ZIP64.
     struct.pack_into("<2H", archive, end + 8 + 8, 1, 1)
     struct.pack_into("<L", archive, end + 8 + 12, 46)
-    config = HindsightConfig.from_env()
-    config.transfer_import_max_entries = 6
-    monkeypatch.setattr(importer, "get_config", lambda: config)
-    parse = MagicMock(side_effect=AssertionError("extensible ZIP64 must not be parsed"))
-    monkeypatch.setattr(importer.zipfile, "ZipFile", parse)
-    with pytest.raises(ValueError) as error:
+    _patch_config(monkeypatch, transfer_import_max_entries=6)
+    with _refused_before_zipfile(monkeypatch, "Invalid transfer archive: malformed end-of-central-directory record"):
         importer.validate_bank_archive(bytes(archive))
-    assert str(error.value) == "Invalid transfer archive: malformed end-of-central-directory record"
-    parse.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -991,78 +993,52 @@ def test_zip64_extensible_data_precedes_zipfile(monkeypatch: pytest.MonkeyPatch)
 def test_zip64_incompatible_shapes_precede_zipfile(
     monkeypatch: pytest.MonkeyPatch, field: str, offset: int, fmt: str, change: int | None
 ) -> None:
-    from hindsight_api.config import HindsightConfig
-
     monkeypatch.setattr(zipfile, "ZIP_FILECOUNT_LIMIT", 1)
     archive = bytearray(_synthetic_archive())
     end = len(archive) - 22
     position = end - (76 if field == "record" else 20) + offset
     value = struct.unpack_from(fmt, archive, position)[0]
     struct.pack_into(fmt, archive, position, 0 if change is None else value + change)
-    config = HindsightConfig.from_env()
-    monkeypatch.setattr(importer, "get_config", lambda: config)
-    parse = MagicMock(side_effect=AssertionError("incompatible ZIP64 must not be parsed"))
-    monkeypatch.setattr(importer.zipfile, "ZipFile", parse)
-    with pytest.raises(ValueError) as error:
+    _patch_config(monkeypatch)
+    with _refused_before_zipfile(monkeypatch, "Invalid transfer archive: malformed end-of-central-directory record"):
         importer.validate_bank_archive(bytes(archive))
-    assert str(error.value) == "Invalid transfer archive: malformed end-of-central-directory record"
-    parse.assert_not_called()
 
 
 def test_zip64_locator_cannot_select_an_earlier_valid_record(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hindsight_api.config import HindsightConfig
-
     monkeypatch.setattr(zipfile, "ZIP_FILECOUNT_LIMIT", 1)
     archive = bytearray(_synthetic_archive())
     record = len(archive) - 22 - 76
     # Two valid-looking records separate the generations: patched CPython reads
     # the earlier locator target; unpatched CPython reads the adjacent duplicate.
     archive[record + 56 : record + 56] = archive[record : record + 56]
-    config = HindsightConfig.from_env()
-    monkeypatch.setattr(importer, "get_config", lambda: config)
-    parse = MagicMock(side_effect=AssertionError("ambiguous ZIP64 must not be parsed"))
-    monkeypatch.setattr(importer.zipfile, "ZipFile", parse)
-    with pytest.raises(ValueError) as error:
+    _patch_config(monkeypatch)
+    with _refused_before_zipfile(monkeypatch, "Invalid transfer archive: malformed end-of-central-directory record"):
         importer.validate_bank_archive(bytes(archive))
-    assert str(error.value) == "Invalid transfer archive: malformed end-of-central-directory record"
-    parse.assert_not_called()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("path", ["preflight", "restore"])
 async def test_directory_walk_refuses_understated_classic_counts(monkeypatch: pytest.MonkeyPatch, path: str) -> None:
-    from hindsight_api.config import HindsightConfig
-
     archive = bytearray(_archive_with_directory_fields())
     struct.pack_into("<2H", archive, len(archive) - 22 + 8, 1, 1)
-    config = HindsightConfig.from_env()
-    config.transfer_import_max_entries = 6
-    monkeypatch.setattr(importer, "get_config", lambda: config)
-    parse = MagicMock(side_effect=AssertionError("actual directory count must precede parsing"))
-    monkeypatch.setattr(importer.zipfile, "ZipFile", parse)
-    with pytest.raises(ValueError) as error:
+    _patch_config(monkeypatch, transfer_import_max_entries=6)
+    with _refused_before_zipfile(
+        monkeypatch, "Invalid transfer archive: entry count exceeds the transfer import limit"
+    ):
         await _run_barrier(path, bytes(archive))
-    assert str(error.value) == "Invalid transfer archive: entry count exceeds the transfer import limit"
-    parse.assert_not_called()
 
 
 def test_directory_walk_refuses_understated_zip64_counts(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hindsight_api.config import HindsightConfig
-
     monkeypatch.setattr(zipfile, "ZIP_FILECOUNT_LIMIT", 1)
     archive = bytearray(_archive_with_directory_fields())
     end = len(archive) - 22
     struct.pack_into("<2H", archive, end + 8, 1, 1)
     struct.pack_into("<2Q", archive, end - 76 + 24, 1, 1)
-    config = HindsightConfig.from_env()
-    config.transfer_import_max_entries = 6
-    monkeypatch.setattr(importer, "get_config", lambda: config)
-    parse = MagicMock(side_effect=AssertionError("actual ZIP64 count must precede parsing"))
-    monkeypatch.setattr(importer.zipfile, "ZipFile", parse)
-    with pytest.raises(ValueError) as error:
+    _patch_config(monkeypatch, transfer_import_max_entries=6)
+    with _refused_before_zipfile(
+        monkeypatch, "Invalid transfer archive: entry count exceeds the transfer import limit"
+    ):
         importer.validate_bank_archive(bytes(archive))
-    assert str(error.value) == "Invalid transfer archive: entry count exceeds the transfer import limit"
-    parse.assert_not_called()
 
 
 @pytest.mark.parametrize("as_file", [False, True])
@@ -1071,8 +1047,6 @@ def test_directory_walk_refuses_understated_zip64_counts(monkeypatch: pytest.Mon
 def test_directory_walk_accepts_the_entry_limit(
     monkeypatch: pytest.MonkeyPatch, as_file: bool, zip64: bool, understated: bool
 ) -> None:
-    from hindsight_api.config import HindsightConfig
-
     if zip64:
         monkeypatch.setattr(zipfile, "ZIP_FILECOUNT_LIMIT", 1)
     archive = _archive_with_directory_fields()
@@ -1083,76 +1057,44 @@ def test_directory_walk_accepts_the_entry_limit(
         if zip64:
             struct.pack_into("<2Q", data, end - 76 + 24, 1, 1)
         archive = bytes(data)
-    config = HindsightConfig.from_env()
-    config.transfer_import_max_entries = 7
-    monkeypatch.setattr(importer, "get_config", lambda: config)
-    if as_file:
-        upload = io.BytesIO(archive)
-        upload.seek(5)
-        assert importer.validate_bank_archive(upload) is None
-    else:
-        assert importer.validate_bank_archive(archive) is None
+    _patch_config(monkeypatch, transfer_import_max_entries=7)
+    _assert_archive_accepted(archive, as_file)
 
 
 def test_directory_walk_bad_record_precedes_zipfile(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hindsight_api.config import HindsightConfig
-
     archive = bytearray(_archive_with_directory_fields())
     end = len(archive) - 22
     start = struct.unpack_from("<L", archive, end + 16)[0]
     name_size, extra_size, comment_size = struct.unpack_from("<3H", archive, start + 28)
     second = start + 46 + name_size + extra_size + comment_size
     archive[second : second + 4] = b"\x00" * 4
-    config = HindsightConfig.from_env()
-    monkeypatch.setattr(importer, "get_config", lambda: config)
-    parse = MagicMock(side_effect=AssertionError("bad directory header must precede parsing"))
-    monkeypatch.setattr(importer.zipfile, "ZipFile", parse)
-    with pytest.raises(ValueError) as error:
+    _patch_config(monkeypatch)
+    with _refused_before_zipfile(monkeypatch, "Invalid transfer archive: malformed central directory"):
         importer.validate_bank_archive(bytes(archive))
-    assert str(error.value) == "Invalid transfer archive: malformed central directory"
-    parse.assert_not_called()
 
 
 def test_directory_negative_start_precedes_zipfile(monkeypatch: pytest.MonkeyPatch) -> None:
-    from hindsight_api.config import HindsightConfig
-
     archive = bytearray(_synthetic_archive())
     end = len(archive) - 22
     struct.pack_into("<L", archive, end + 12, end + 46)
-    config = HindsightConfig.from_env()
-    monkeypatch.setattr(importer, "get_config", lambda: config)
-    parse = MagicMock(side_effect=AssertionError("negative directory start must precede parsing"))
-    monkeypatch.setattr(importer.zipfile, "ZipFile", parse)
-    with pytest.raises(ValueError) as error:
+    _patch_config(monkeypatch)
+    with _refused_before_zipfile(monkeypatch, "Invalid transfer archive: malformed end-of-central-directory record"):
         importer.validate_bank_archive(bytes(archive))
-    assert str(error.value) == "Invalid transfer archive: malformed end-of-central-directory record"
-    parse.assert_not_called()
 
 
 @pytest.mark.parametrize("as_file", [False, True])
 def test_directory_walk_crosses_chunk_boundaries(monkeypatch: pytest.MonkeyPatch, as_file: bool) -> None:
-    from hindsight_api.config import HindsightConfig
-
     monkeypatch.setattr(importer, "_DIRECTORY_CHUNK", 50)
     archive = _archive_with_directory_fields()
-    config = HindsightConfig.from_env()
-    config.transfer_import_max_entries = 7
-    monkeypatch.setattr(importer, "get_config", lambda: config)
-    if as_file:
-        upload = io.BytesIO(archive)
-        upload.seek(5)
-        assert importer.validate_bank_archive(upload) is None
-    else:
-        assert importer.validate_bank_archive(archive) is None
+    config = _patch_config(monkeypatch, transfer_import_max_entries=7)
+    _assert_archive_accepted(archive, as_file)
     understated = bytearray(archive)
     struct.pack_into("<2H", understated, len(understated) - 22 + 8, 1, 1)
     config.transfer_import_max_entries = 6
-    parse = MagicMock(side_effect=AssertionError("later chunks must also be checked before parsing"))
-    monkeypatch.setattr(importer.zipfile, "ZipFile", parse)
-    with pytest.raises(ValueError) as error:
+    with _refused_before_zipfile(
+        monkeypatch, "Invalid transfer archive: entry count exceeds the transfer import limit"
+    ):
         importer.validate_bank_archive(io.BytesIO(understated) if as_file else bytes(understated))
-    assert str(error.value) == "Invalid transfer archive: entry count exceeds the transfer import limit"
-    parse.assert_not_called()
 
 
 @pytest.mark.parametrize("size", [45, 46])
@@ -1164,12 +1106,8 @@ def test_directory_walk_requires_a_complete_header(monkeypatch: pytest.MonkeyPat
     archive = b"PK\x01\x02" + b"\x00" * 41
     directory = importer._ArchiveDirectory(entries=0, size=size, start=0)
     config = HindsightConfig.from_env()
-    parse = MagicMock(side_effect=AssertionError("short header must not be parsed"))
-    monkeypatch.setattr(importer.zipfile, "ZipFile", parse)
-    with pytest.raises(ValueError) as error:
+    with _refused_before_zipfile(monkeypatch, "Invalid transfer archive: malformed central directory"):
         importer._walk_archive_directory(archive, directory, config)
-    assert str(error.value) == "Invalid transfer archive: malformed central directory"
-    parse.assert_not_called()
 
 
 def test_directory_walk_reads_only_bounded_directory_ranges(monkeypatch: pytest.MonkeyPatch) -> None:

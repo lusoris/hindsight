@@ -469,7 +469,10 @@ def _iter_json_array(zf: zipfile.ZipFile, name: str) -> Iterator[Any]:
     item_limit = get_config().transfer_import_max_entry_size_mb * 1024**2
     item_size_error = f"Invalid transfer archive: {name} has an item larger than the entry size limit"
     decoder = json.JSONDecoder()
-    with zf.open(name) as raw, io.TextIOWrapper(raw, encoding="utf-8") as text:
+    # The limit is in archive bytes. Default newline translation turns each CRLF
+    # into one character, measuring CRLF whitespace at up to half its stored size.
+    # newline="" keeps the stored characters so the byte count stays accurate.
+    with zf.open(name) as raw, io.TextIOWrapper(raw, encoding="utf-8", newline="") as text:
         buf, pos, eof = "", 0, False
         state = "start"
         while True:
