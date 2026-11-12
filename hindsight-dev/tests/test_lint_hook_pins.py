@@ -196,7 +196,10 @@ def test_lint_sh_refuses_when_prettier_missing(tmp_path: Path) -> None:
     result = _run_lint(repo, env, timeout=10)
 
     assert result.returncode != 0
-    assert "node_modules/.bin/prettier" in result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    # The version check further down also refuses a missing binary ("is unknown"), so asserting only the path let
+    # the existence check be deleted unnoticed; the message pins which check fired.
+    assert "node_modules/.bin/prettier not found or not executable" in output, output
     assert _read_calls(env) == []
 
 
