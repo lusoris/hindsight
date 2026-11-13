@@ -56,6 +56,9 @@ packages = ["hindsight_crewai"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Repository-only test helpers (hindsight-integrations/_shared/integration_testing);
+# tests/ is not shipped in the wheel, so the helpers are imported by path, not copied.
+pythonpath = ["../_shared"]
 
 [dependency-groups]
 dev = [
