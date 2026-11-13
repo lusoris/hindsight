@@ -160,4 +160,14 @@ describe("createKnowledgeBaseNode", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
     expectLoggedFailure();
   });
+
+  it("upstream 200 with a non-JSON body -> 500 with failure.error, console.error called", async () => {
+    upstreamReturns("<html>ok</html>", { status: HTTP_OK });
+
+    const response = await createKnowledgeBaseNode(postRequest(), "folders", UNTRANSLATED_FAILURE);
+
+    expect(response.status).toBe(HTTP_INTERNAL_ERROR);
+    expect(await response.json()).toEqual({ error: UNTRANSLATED_FAILURE.error });
+    expectLoggedFailure();
+  });
 });

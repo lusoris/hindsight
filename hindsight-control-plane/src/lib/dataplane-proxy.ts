@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
+import type { BankRouteContext } from "@/lib/bank-sdk-route";
 
 export type ApiFailure = { error: string; errorKey: string };
 
@@ -106,5 +107,79 @@ export async function proxyDataplane(
     return NextResponse.json(localizeApiErrorPayload(request, failure), {
       status: 500,
     });
+  }
+}
+
+/**
+ * Answers with what the dataplane answered: its JSON at `successStatus` when the call succeeded,
+ * otherwise its error body (or `{ detail: statusText }` when that is not JSON) at its own status.
+ * An OK answer that is not JSON throws, for the caller's catch to turn into its 500.
+ */
+export async function relayUpstreamJson(
+  response: Response,
+  successStatus: number
+): Promise<NextResponse> {
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({ detail: response.statusText }));
+    return NextResponse.json(error, { status: response.status });
+  }
+  return NextResponse.json(await response.json(), { status: successStatus });
+}
+
+/** One dataplane POST a bank route relays: the path under the bank (query included) and its JSON body. */
+export type BankPostCall = {
+  /** Path under the bank, e.g. `/import?dry_run=true`. */
+  suffix: string;
+  /** Sent as the request body with Content-Type application/json when not undefined. */
+  jsonBody?: unknown;
+};
+
+type BankPostRelayOptions = {
+  /** Status of the relayed upstream JSON when the upstream call succeeds. */
+  successStatus: number;
+  /** Payload at 500 when reading the request, the call or the upstream answer throws. */
+  failure: ApiFailure;
+  /** Log label, e.g. "cloning bank": a thrown error logs `Error <action>:`. */
+  action: string;
+};
+
+/**
+ * Relays one bank-scoped dataplane POST whose answer the UI reads as is: `prepare` reads the
+ * request and names the call (or answers early, e.g. 400), the upstream JSON comes back at
+ * `successStatus`, and an upstream error body (or `{ detail: statusText }` when it is not JSON)
+ * at the upstream status. Anything that throws, `prepare` included, answers `failure` at 500.
+ *
+ * The clone and import routes each carried a copy of this before and disagreed on non-JSON
+ * answers: clone relayed any of them as `{ detail: statusText }` (an OK one at 202), import
+ * turned every one into its 500. Both now follow `relayUpstreamJson`, the rule the knowledge-base
+ * proxy already used; both dataplane endpoints answer JSON models, so only a broken upstream
+ * reaches either branch.
+ */
+export async function relayBankPost(
+  request: Request,
+  context: BankRouteContext,
+  options: BankPostRelayOptions,
+  prepare: (bankId: string) => Promise<BankPostCall | NextResponse>
+): Promise<NextResponse> {
+  try {
+    const { bankId } = await context.params;
+    const call = await prepare(bankId);
+    if (call instanceof NextResponse) return call;
+
+    const init: RequestInit =
+      call.jsonBody === undefined
+        ? { method: "POST", headers: getDataplaneHeaders() }
+        : {
+            method: "POST",
+            headers: getDataplaneHeaders({ "Content-Type": "application/json" }),
+            body: JSON.stringify(call.jsonBody),
+          };
+    const response = await fetch(dataplaneBankUrl(bankId, call.suffix), init);
+    return await relayUpstreamJson(response, options.successStatus);
+  } catch (error) {
+    // Constant format string: `action` goes in as a %s argument, so a `%` in it cannot
+    // act as a format specifier.
+    console.error("Error %s:", options.action, error);
+    return NextResponse.json(localizeApiErrorPayload(request, options.failure), { status: 500 });
   }
 }
