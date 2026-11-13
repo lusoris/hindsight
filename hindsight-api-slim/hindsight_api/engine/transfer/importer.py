@@ -105,6 +105,9 @@ _OBSERVATION_BATCH_SIZE = 500
 #: Characters read at a time from a JSON-array entry (observations, history rows).
 _JSON_READ_CHARS = 1 << 20
 
+#: Bytes per read of an entry accumulated in memory; caps each DEFLATE call before size truncation.
+_ENTRY_READ_BYTES = 64 * 1024
+
 #: Verbatim rows per ``executemany`` when restoring a bank-scoped table.
 _RESTORE_BATCH_SIZE = 500
 
@@ -407,9 +410,11 @@ def _open_archive(archive: Archive, *, produced_by: str) -> zipfile.ZipFile:
         zf = zipfile.ZipFile(io.BytesIO(archive) if isinstance(archive, bytes) else archive, "r")
     except zipfile.BadZipFile as e:
         raise ValueError(f"Invalid transfer archive: the uploaded file is not a readable .zip ({e})") from e
-    # Inspect the central directory before reading even the manifest. ZipExtFile
-    # bounds output by file_size, so declared sizes also bound decompression.
-    # Only the explicitly streamed row sections are exempt from the whole-read cap.
+    # Inspect the central directory before reading even the manifest. Declared
+    # sizes bound returned lengths and directory totals, not decompressor output:
+    # whole reads pass a max_length near 2**30 and truncate to file_size afterwards.
+    # _read_entry replaces those whole reads with chunks that bound each DEFLATE
+    # call. Only explicitly streamed row sections are exempt from the entry cap.
     try:
         _check_archive_entries(zf, config)
     except BaseException:
@@ -425,8 +430,22 @@ def _open_archive(archive: Archive, *, produced_by: str) -> zipfile.ZipFile:
     return zf
 
 
+def _read_entry(zf: zipfile.ZipFile, name: str) -> bytes:
+    """Accumulate an entry with bounded decompression calls and an actual-byte limit."""
+    limit = get_config().transfer_import_max_entry_size_mb * 1024**2
+    chunks: list[bytes] = []
+    size = 0
+    with zf.open(name) as entry:
+        while chunk := entry.read(_ENTRY_READ_BYTES):
+            size += len(chunk)
+            if size > limit:
+                raise ValueError(f"Invalid transfer archive: {name!r} exceeds the entry size limit")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _read_manifest(zf: zipfile.ZipFile) -> TransferManifest:
-    manifest = TransferManifest.model_validate_json(zf.read("manifest.json"))
+    manifest = TransferManifest.model_validate_json(_read_entry(zf, "manifest.json"))
     if manifest.schema_version != SCHEMA_VERSION:
         raise ValueError(
             f"Unsupported transfer archive schema version {manifest.schema_version} "
@@ -438,7 +457,7 @@ def _read_manifest(zf: zipfile.ZipFile) -> TransferManifest:
 def _iter_documents(zf: zipfile.ZipFile, *, source_bank_id: str | None = None) -> Iterator[TransferDocument]:
     """The archive's documents in entry order, one parsed at a time."""
     for name in sorted(n for n in zf.NameToInfo if n.startswith("documents/") and n.endswith(".json")):
-        payload = zf.read(name)
+        payload = _read_entry(zf, name)
         if source_bank_id is not None:
             _check_archive_rows(name, [json.loads(payload)], source_bank_id=source_bank_id)
         yield TransferDocument.model_validate_json(payload)
@@ -537,7 +556,7 @@ def _iter_json_array(zf: zipfile.ZipFile, name: str) -> Iterator[Any]:
 
 def _read_json(zf: zipfile.ZipFile, name: str) -> list[Any]:
     """A small JSON array entry read whole (mental models, the knowledge tree), or [] when absent."""
-    rows = json.loads(zf.read(name)) if name in zf.NameToInfo else []
+    rows = json.loads(_read_entry(zf, name)) if name in zf.NameToInfo else []
     if not isinstance(rows, list):
         raise ValueError(f"Invalid transfer archive: {name} is not a JSON array")
     return rows

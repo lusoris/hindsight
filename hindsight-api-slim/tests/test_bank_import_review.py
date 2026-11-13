@@ -10,6 +10,7 @@ import json
 import struct
 import uuid
 import zipfile
+import zlib
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from dataclasses import asdict, dataclass
@@ -299,7 +300,7 @@ async def test_route_maps_unsupported_zip_to_400(
 
 
 def test_preflight_maps_unimplemented_zip_reads_to_value_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(zipfile.ZipFile, "read", MagicMock(side_effect=NotImplementedError("unsupported codec")))
+    monkeypatch.setattr(zipfile.ZipFile, "open", MagicMock(side_effect=NotImplementedError("unsupported codec")))
     with pytest.raises(ValueError, match="corrupt"):
         importer.validate_bank_archive(_synthetic_archive())
 
@@ -833,6 +834,151 @@ def _patch_config(monkeypatch: pytest.MonkeyPatch, **overrides: int) -> Hindsigh
         setattr(config, name, value)
     monkeypatch.setattr(importer, "get_config", lambda: config)
     return config
+
+
+@dataclass
+class _PaddedEntryArchive:
+    archive: bytes
+    declared_size: int
+
+
+def _with_undeclared_padding(name: str) -> _PaddedEntryArchive:
+    """Forge a small valid prefix's CRC and size over a much larger DEFLATE stream."""
+    archive = _synthetic_archive()
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        prefix = zf.read(name)
+    archive = _rewrite(archive, name, prefix + b" " * (4 * 1024**2))
+    damaged = bytearray(archive)
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        local = zf.getinfo(name).header_offset
+        central = zf.start_dir
+        while damaged[central : central + 4] == b"PK\x01\x02":
+            name_length, extra_length, comment_length = struct.unpack_from("<HHH", damaged, central + 28)
+            entry_name = damaged[central + 46 : central + 46 + name_length].decode()
+            if entry_name == name:
+                break
+            central += 46 + name_length + extra_length + comment_length
+        else:
+            raise AssertionError(f"{name} central entry missing")
+    # Keep the compressed size intact so ZipExtFile sees all padding, while its
+    # CRC and returned-length checks see only the valid prefix. Whole reads used
+    # to inflate the padding before truncating it, making a size-only test pass.
+    for offset in (local + 14, central + 16):
+        struct.pack_into("<I", damaged, offset, zlib.crc32(prefix))
+    for offset in (local + 22, central + 24):
+        struct.pack_into("<I", damaged, offset, len(prefix))
+    return _PaddedEntryArchive(archive=bytes(damaged), declared_size=len(prefix))
+
+
+@dataclass
+class _DecompressionCall:
+    max_length: int
+    inflated_bytes: int
+
+
+class _RecordingDecompressor:
+    """Record output before ZipExtFile truncates it to the declared size."""
+
+    def __init__(self, raw: Any) -> None:
+        self.raw = raw
+        self.calls: list[_DecompressionCall] = []
+
+    def decompress(self, data: bytes, max_length: int = 0) -> bytes:
+        output = self.raw.decompress(data, max_length)
+        self.calls.append(_DecompressionCall(max_length=max_length, inflated_bytes=len(output)))
+        return output
+
+    @property
+    def eof(self) -> bool:
+        return self.raw.eof
+
+    @property
+    def unconsumed_tail(self) -> bytes:
+        return self.raw.unconsumed_tail
+
+    def flush(self) -> bytes:
+        return self.raw.flush()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "barrier,name",
+    [
+        ("preflight", "manifest.json"),
+        ("preflight", "banks.json"),
+        ("preflight", "documents/000000.json"),
+        ("restore", "manifest.json"),
+        ("restore", "banks.json"),
+        ("restore", "documents/000000.json"),
+        ("documents", "documents/000000.json"),
+    ],
+)
+async def test_entry_reads_bound_decompression_before_size_truncation(
+    monkeypatch: pytest.MonkeyPatch, barrier: str, name: str
+) -> None:
+    planted = _with_undeclared_padding(name)
+    _patch_config(monkeypatch, transfer_import_max_entry_size_mb=1)
+    get_decompressor = zipfile._get_decompressor
+    open_entry = zipfile.ZipFile.open
+    target_decompressors: list[_RecordingDecompressor] = []
+
+    def record_decompressor(compression: int) -> _RecordingDecompressor:
+        return _RecordingDecompressor(get_decompressor(compression))
+
+    def record_open(zf: zipfile.ZipFile, entry: Any, *args: Any, **kwargs: Any) -> Any:
+        blob = open_entry(zf, entry, *args, **kwargs)
+        if (entry.filename if isinstance(entry, zipfile.ZipInfo) else entry) == name:
+            target_decompressors.append(blob._decompressor)
+        return blob
+
+    monkeypatch.setattr(zipfile, "_get_decompressor", record_decompressor)
+    monkeypatch.setattr(zipfile.ZipFile, "open", record_open)
+    if barrier == "restore":
+        from hindsight_api.engine import memories
+
+        class DocumentsRead(Exception):
+            """Stop restore after real document reads, before embedding or later writes."""
+
+        async def read_documents(zf: zipfile.ZipFile, **kwargs: Any) -> None:
+            list(importer._iter_documents(zf))
+            raise DocumentsRead
+
+        # Keep restore's actual entry readers, stubbing only persistence and the
+        # remainder of replay. The former tests stopped at directory metadata and
+        # never observed the bytes inflated before ZipExtFile's size truncation.
+        monkeypatch.setattr(memories, "get_memories", lambda: MagicMock(ensure_bank_storage=AsyncMock()))
+        _stub_connection(monkeypatch, importer, MagicMock(fetchval=AsyncMock(return_value=None)))
+        monkeypatch.setattr(importer, "_restore_rows", AsyncMock(return_value=1))
+        monkeypatch.setattr(importer, "_replay_documents", read_documents)
+        with pytest.raises(DocumentsRead):
+            await _run_barrier(barrier, planted.archive)
+    elif barrier == "preflight":
+        await _run_barrier(barrier, planted.archive)
+    else:
+        assert len(list(importer.iter_imported_documents(planted.archive, {"doc-0": ["unit"]}, {}))) == 1
+
+    # Other entries include intentionally streamed readers with a different chunk
+    # size; measure every decompressor call for the forged whole-entry reader.
+    assert target_decompressors
+    chunk_limit = max(importer._ENTRY_READ_BYTES, zipfile.ZipExtFile.MIN_READ_SIZE)
+    for decompressor in target_decompressors:
+        assert decompressor.calls
+        assert all(0 < call.max_length <= chunk_limit for call in decompressor.calls)
+        assert sum(call.inflated_bytes for call in decompressor.calls) < planted.declared_size + chunk_limit
+
+
+@pytest.mark.parametrize("extra_bytes", [0, 1])
+def test_entry_reader_checks_actual_returned_bytes(monkeypatch: pytest.MonkeyPatch, extra_bytes: int) -> None:
+    """Enforce the byte limit independently of the central-directory precheck."""
+    _patch_config(monkeypatch, transfer_import_max_entry_size_mb=1)
+    payload = b" " * (1024**2 + extra_bytes)
+    archive = _rewrite(_synthetic_archive(), "rows.json", payload)
+    with zipfile.ZipFile(io.BytesIO(archive)) as zf:
+        if extra_bytes:
+            with pytest.raises(ValueError, match="'rows.json' exceeds the entry size limit"):
+                importer._read_entry(zf, "rows.json")
+        else:
+            assert importer._read_entry(zf, "rows.json") == payload
 
 
 @contextmanager
