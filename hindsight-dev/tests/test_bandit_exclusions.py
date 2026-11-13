@@ -6,6 +6,7 @@ sys.modules is available solely as a subscript assignment target for the path-ba
 
 import ast
 import builtins
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -121,12 +122,204 @@ ALLOWED_ATTRIBUTE_NAMES = {
 # missed executable= and positional Popen arguments, including positional shell.
 ALLOWED_RUN_KEYWORDS = {"capture_output", "check", "cwd", "env", "text", "timeout"}
 
+# Normalize the reviewed expression with the same unparser so literal quote style cannot affect the comparison.
+REVIEWED_CHECKER_PATH_EXPRESSION = ast.unparse(
+    ast.parse('Path(__file__).resolve().parents[2] / "scripts" / "check-scanner-suppressions.py"', mode="eval").body
+)
+
 
 def _is_argv_list(node: ast.expr) -> bool:
     """A list literal, or list literals joined with +."""
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         return _is_argv_list(node.left) and _is_argv_list(node.right)
     return isinstance(node, ast.List)
+
+
+@dataclass(frozen=True)
+class ProcessStartContext:
+    called: set[int]
+    attribute_bases: set[int]
+    modules_assignment_targets: set[int]
+    approved_loader_ids: set[int]
+    checker_path_targets: set[int]
+    path_import_aliases: set[int]
+
+
+def _approved_attribute_bases(tree: ast.Module) -> set[int]:
+    # Track individual nodes: a permitted use cannot excuse a separate bare module
+    # reference, including an alias of the intermediate importlib.util module.
+    return {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and ast.unparse(node.value) in ALLOWED_MODULE_ATTRIBUTES
+        and node.attr in ALLOWED_MODULE_ATTRIBUTES[ast.unparse(node.value)]
+    }
+
+
+def _modules_assignment_targets(tree: ast.Module) -> set[int]:
+    return {
+        id(target.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ALLOWED_SYS_MODULES_ASSIGNMENTS)
+        for target in node.targets
+        if isinstance(target, ast.Subscript) and ast.unparse(target.value) == "sys.modules"
+    }
+
+
+# The loader exception is for one reviewed file (CodeRabbit 4562538328). Another
+# path executes an unreviewed module whose calls bypass the direct subprocess.run contract.
+def _is_reviewed_loader_call(node: ast.AST) -> bool:
+    if not isinstance(node, ast.Call):
+        return False
+    if ast.unparse(node.func) != "importlib.util.spec_from_file_location" or node.keywords or len(node.args) != 2:
+        return False
+    return (
+        isinstance(node.args[0], ast.Constant)
+        and node.args[0].value == "check_scanner_suppressions"
+        and isinstance(node.args[1], ast.Name)
+        and node.args[1].id == "CHECKER_PATH"
+    )
+
+
+def _is_reviewed_checker_path_assignment(node: ast.stmt) -> bool:
+    if not isinstance(node, ast.Assign) or len(node.targets) != 1:
+        return False
+    target = node.targets[0]
+    return (
+        isinstance(target, ast.Name)
+        and target.id == "CHECKER_PATH"
+        and ast.unparse(node.value) == REVIEWED_CHECKER_PATH_EXPRESSION
+    )
+
+
+def _checker_path_targets(tree: ast.Module) -> set[int]:
+    for node in tree.body:
+        if isinstance(node, ast.Assign) and _is_reviewed_checker_path_assignment(node):
+            return {id(node.targets[0])}
+    return set()
+
+
+def _path_import_aliases(tree: ast.Module) -> set[int]:
+    return {
+        id(alias)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "pathlib" and not node.level
+        for alias in node.names
+        if alias.name == "Path" and alias.asname is None
+    }
+
+
+def _process_start_context(tree: ast.Module) -> ProcessStartContext:
+    return ProcessStartContext(
+        called={id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)},
+        attribute_bases=_approved_attribute_bases(tree),
+        modules_assignment_targets=_modules_assignment_targets(tree),
+        approved_loader_ids={
+            id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call) and _is_reviewed_loader_call(node)
+        },
+        checker_path_targets=_checker_path_targets(tree),
+        path_import_aliases=_path_import_aliases(tree),
+    )
+
+
+def _name_problems(node: ast.AST, context: ProcessStartContext) -> list[str]:
+    problems: list[str] = []
+    if isinstance(node, ast.Name) and hasattr(builtins, node.id) and node.id not in ALLOWED_BUILTINS:
+        problems.append(f"line {node.lineno}: builtin {node.id} is not allowed")
+    if isinstance(node, (ast.Name, ast.Attribute)):
+        name = ast.unparse(node)
+        if name in ALLOWED_MODULE_ATTRIBUTES and id(node) not in context.attribute_bases:
+            problems.append(f"line {node.lineno}: bare reference to {name}")
+    return problems
+
+
+def _from_import_problems(node: ast.ImportFrom) -> list[str]:
+    problems: list[str] = []
+    for alias in node.names:
+        if node.level or alias.asname or (node.module, alias.name) not in ALLOWED_FROM_IMPORTS:
+            module = "." * node.level + (node.module or "")
+            problems.append(f"line {node.lineno}: from {module} import {alias.name} is not allowed")
+    return problems
+
+
+def _import_problems(node: ast.Import) -> list[str]:
+    problems: list[str] = []
+    for alias in node.names:
+        if alias.name not in ALLOWED_IMPORTS or alias.asname:
+            name = f"{alias.name} as {alias.asname}" if alias.asname else alias.name
+            problems.append(f"line {node.lineno}: import {name} is not allowed")
+    return problems
+
+
+def _attribute_problems(node: ast.Attribute, context: ProcessStartContext) -> list[str]:
+    problems: list[str] = []
+    base = ast.unparse(node.value)
+    name = f"{base}.{node.attr}"
+    if node.attr not in ALLOWED_ATTRIBUTE_NAMES or (
+        base in ALLOWED_MODULE_ATTRIBUTES and node.attr not in ALLOWED_MODULE_ATTRIBUTES[base]
+    ):
+        problems.append(f"line {node.lineno}: {name} is not allowed")
+    if name == "sys.modules" and id(node) not in context.modules_assignment_targets:
+        problems.append(f"line {node.lineno}: sys.modules is only allowed as a subscript assignment target")
+    if name == "subprocess.run" and id(node) not in context.called:
+        problems.append(f"line {node.lineno}: subprocess.run used without a direct call")
+    if name == "importlib.util.spec_from_file_location" and id(node) not in context.approved_loader_ids:
+        problems.append(f"line {node.lineno}: spec_from_file_location is only allowed for the reviewed checker loader")
+    return problems
+
+
+def _run_call_problems(node: ast.Call) -> list[str]:
+    problems: list[str] = []
+    if ast.unparse(node.func) != "subprocess.run":
+        return problems
+    if len(node.args) != 1 or not _is_argv_list(node.args[0]):
+        problems.append(f"line {node.lineno}: subprocess.run requires exactly one argv list")
+    if any(keyword.arg not in ALLOWED_RUN_KEYWORDS for keyword in node.keywords):
+        problems.append(f"line {node.lineno}: subprocess.run keyword is not allowed")
+    return problems
+
+
+def _node_process_problems(node: ast.AST, context: ProcessStartContext) -> list[str]:
+    if isinstance(node, ast.ImportFrom):
+        return _from_import_problems(node)
+    if isinstance(node, ast.Import):
+        return _import_problems(node)
+    if isinstance(node, ast.Attribute):
+        return _attribute_problems(node, context)
+    if isinstance(node, ast.Call):
+        return _run_call_problems(node)
+    return []
+
+
+def _string_field_values(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, str)]
+    return []
+
+
+def _is_allowed_identifier_position(node: ast.AST, field: str, context: ProcessStartContext) -> bool:
+    if isinstance(node, ast.Name) and field == "id":
+        return isinstance(node.ctx, ast.Load) or id(node) in context.checker_path_targets
+    return isinstance(node, ast.alias) and field == "name" and id(node) in context.path_import_aliases
+
+
+def _binding_position_problems(node: ast.AST, context: ProcessStartContext) -> list[str]:
+    problems: list[str] = []
+    # Inspect fields, not a deny-list of statement kinds: parameters, patterns,
+    # exception aliases and declarations can bind identifiers without Name(Store).
+    for field, value in ast.iter_fields(node):
+        for identifier in _string_field_values(value):
+            if identifier in {"CHECKER_PATH", "Path", "__file__"} and not _is_allowed_identifier_position(
+                node, field, context
+            ):
+                problems.append(
+                    f"line {node.lineno}: {identifier} may only be bound by the reviewed checker path "
+                    "assignment or import"
+                )
+    return problems
 
 
 def process_start_problems(source: str) -> list[str]:
@@ -136,59 +329,16 @@ def process_start_problems(source: str) -> list[str]:
     names must be approved explicitly. Module names cannot escape as bare values;
     sys.modules can only be a subscript assignment target. Process starts require
     a direct subprocess.run call, exactly one argv list and only approved keywords.
+    The loader is restricted to the reviewed checker name and path; its path's
+    identifiers can only be bound at their approved assignment or import positions.
     """
     tree = ast.parse(source)
-    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
-    # Track individual nodes: a permitted use cannot excuse a separate bare module
-    # reference, including an alias of the intermediate importlib.util module.
-    attribute_bases = {
-        id(node.value)
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute)
-        and ast.unparse(node.value) in ALLOWED_MODULE_ATTRIBUTES
-        and node.attr in ALLOWED_MODULE_ATTRIBUTES[ast.unparse(node.value)]
-    }
-    modules_assignment_targets = {
-        id(target.value)
-        for node in ast.walk(tree)
-        if isinstance(node, ALLOWED_SYS_MODULES_ASSIGNMENTS)
-        for target in node.targets
-        if isinstance(target, ast.Subscript) and ast.unparse(target.value) == "sys.modules"
-    }
+    context = _process_start_context(tree)
     problems: list[str] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Name) and hasattr(builtins, node.id) and node.id not in ALLOWED_BUILTINS:
-            problems.append(f"line {node.lineno}: builtin {node.id} is not allowed")
-        if isinstance(node, (ast.Name, ast.Attribute)):
-            name = ast.unparse(node)
-            if name in ALLOWED_MODULE_ATTRIBUTES and id(node) not in attribute_bases:
-                problems.append(f"line {node.lineno}: bare reference to {name}")
-        if isinstance(node, ast.ImportFrom):
-            for alias in node.names:
-                if node.level or alias.asname or (node.module, alias.name) not in ALLOWED_FROM_IMPORTS:
-                    module = "." * node.level + (node.module or "")
-                    problems.append(f"line {node.lineno}: from {module} import {alias.name} is not allowed")
-        elif isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.name not in ALLOWED_IMPORTS or alias.asname:
-                    name = f"{alias.name} as {alias.asname}" if alias.asname else alias.name
-                    problems.append(f"line {node.lineno}: import {name} is not allowed")
-        elif isinstance(node, ast.Attribute):
-            base = ast.unparse(node.value)
-            name = f"{base}.{node.attr}"
-            if node.attr not in ALLOWED_ATTRIBUTE_NAMES or (
-                base in ALLOWED_MODULE_ATTRIBUTES and node.attr not in ALLOWED_MODULE_ATTRIBUTES[base]
-            ):
-                problems.append(f"line {node.lineno}: {name} is not allowed")
-            if name == "sys.modules" and id(node) not in modules_assignment_targets:
-                problems.append(f"line {node.lineno}: sys.modules is only allowed as a subscript assignment target")
-            if name == "subprocess.run" and id(node) not in called:
-                problems.append(f"line {node.lineno}: subprocess.run used without a direct call")
-        elif isinstance(node, ast.Call) and ast.unparse(node.func) == "subprocess.run":
-            if len(node.args) != 1 or not _is_argv_list(node.args[0]):
-                problems.append(f"line {node.lineno}: subprocess.run requires exactly one argv list")
-            if any(keyword.arg not in ALLOWED_RUN_KEYWORDS for keyword in node.keywords):
-                problems.append(f"line {node.lineno}: subprocess.run keyword is not allowed")
+        problems.extend(_name_problems(node, context))
+        problems.extend(_node_process_problems(node, context))
+        problems.extend(_binding_position_problems(node, context))
     return problems
 
 
@@ -260,6 +410,68 @@ def test_bandit_excluded_module_starts_processes_only_with_argv_lists(path: str)
         ("from os import *", "from os import * is not allowed"),
         ('checker.subprocess.run(["git"])', "checker.subprocess is not allowed"),
         ("x.__globals__", "x.__globals__ is not allowed"),
+        (
+            """import importlib.util
+spec = importlib.util.spec_from_file_location("sp", SUBPROCESS_PATH)
+sp = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(sp)
+sp.run("git status", shell=True)
+""",
+            "spec_from_file_location",
+        ),
+        (
+            'importlib.util.spec_from_file_location("check_scanner_suppressions", OTHER_PATH)',
+            "spec_from_file_location",
+        ),
+        (
+            'importlib.util.spec_from_file_location("check_scanner_suppressions", CHECKER_PATH, loader=x)',
+            "spec_from_file_location",
+        ),
+        (
+            'importlib.util.spec_from_file_location("check_scanner_suppressions", CHECKER_PATH, x)',
+            "spec_from_file_location",
+        ),
+        ("f = importlib.util.spec_from_file_location", "spec_from_file_location"),
+        (
+            "CHECKER_PATH = SUBPROCESS_PATH\n"
+            'importlib.util.spec_from_file_location("check_scanner_suppressions", CHECKER_PATH)',
+            "CHECKER_PATH may only be bound",
+        ),
+        (
+            'CHECKER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "check-scanner-suppressions.py"\n'
+            "CHECKER_PATH = other",
+            "CHECKER_PATH may only be bound",
+        ),
+        (
+            "def load():\n"
+            '    CHECKER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "check-scanner-suppressions.py"',
+            "CHECKER_PATH may only be bound",
+        ),
+        ("def load(CHECKER_PATH): pass", "CHECKER_PATH may only be bound"),
+        ("Path = other", "Path may only be bound"),
+        ('__file__ = "x"', "__file__ may only be bound"),
+        ("for CHECKER_PATH in paths: pass", "CHECKER_PATH may only be bound"),
+        ("(CHECKER_PATH := other)", "CHECKER_PATH may only be bound"),
+        (
+            'CHECKER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "check-scanner-suppressions.py"\n'
+            'CHECKER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "check-scanner-suppressions.py"',
+            "CHECKER_PATH may only be bound",
+        ),
+        (
+            'CHECKER_PATH = alias = Path(__file__).resolve().parents[2] / "scripts" / "check-scanner-suppressions.py"',
+            "CHECKER_PATH may only be bound",
+        ),
+        ("def Path(): pass", "Path may only be bound"),
+        ("class CHECKER_PATH: pass", "CHECKER_PATH may only be bound"),
+        ("try: pass\nexcept RuntimeError as CHECKER_PATH: pass", "CHECKER_PATH may only be bound"),
+        ("import os as CHECKER_PATH", "CHECKER_PATH may only be bound"),
+        ("import Path", "Path may only be bound"),
+        ("from pathlib import Path as CHECKER_PATH", "CHECKER_PATH may only be bound"),
+        ("global CHECKER_PATH", "CHECKER_PATH may only be bound"),
+        ("def load():\n    nonlocal CHECKER_PATH", "CHECKER_PATH may only be bound"),
+        ("match value:\n    case CHECKER_PATH: pass", "CHECKER_PATH may only be bound"),
+        ("match value:\n    case [*CHECKER_PATH]: pass", "CHECKER_PATH may only be bound"),
+        ("match value:\n    case {**CHECKER_PATH}: pass", "CHECKER_PATH may only be bound"),
     ],
 )
 def test_process_start_problems_rejects_unsafe_source(source: str, expected: str) -> None:
@@ -281,7 +493,9 @@ def test_process_start_problems_accepts_importlib_loader() -> None:
     assert process_start_problems("import importlib.util") == []
     source = """import importlib.util
 import sys
+from pathlib import Path
 
+CHECKER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "check-scanner-suppressions.py"
 spec = importlib.util.spec_from_file_location("check_scanner_suppressions", CHECKER_PATH)
 assert spec and spec.loader
 checker = importlib.util.module_from_spec(spec)

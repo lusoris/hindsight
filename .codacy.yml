@@ -16,5 +16,5 @@ engines:
     exclude_paths:
       # category D, entry 2026-11-12, expiry 2027-03-12, rule bandit: B404 and B603 on a test that must run git and lint.sh as processes; argv lists of absolute executables, no shell, which hindsight-dev/tests/test_bandit_exclusions.py checks
       - "hindsight-dev/tests/test_lint_hook_pins.py"
-      # category D, entry 2026-11-12, expiry 2027-03-12, rule bandit: B404 and B603 on a test that must run git and the suppression wrapper as processes; argv lists of absolute executables, no shell, which hindsight-dev/tests/test_bandit_exclusions.py checks
+      # category D, entry 2026-11-13, expiry 2027-03-13, rule bandit: B404, B603 and B607 on a test that must run git and the suppression wrapper as processes; literal argv lists so the Opengrep subprocess audit sees a static command, git and bash resolved from PATH, no shell, which hindsight-dev/tests/test_bandit_exclusions.py checks
       - "hindsight-dev/tests/test_check_scanner_suppressions.py"
