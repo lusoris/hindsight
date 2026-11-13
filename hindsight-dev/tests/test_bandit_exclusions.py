@@ -308,6 +308,13 @@ def _is_allowed_identifier_position(node: ast.AST, field: str, context: ProcessS
 
 def _binding_position_problems(node: ast.AST, context: ProcessStartContext) -> list[str]:
     problems: list[str] = []
+    # A Constant's fields are its value and kind; neither binds a name. The scan
+    # used to read them too and refused label = "CHECKER_PATH", quoted annotations,
+    # docstrings and f-string pieces (CodeRabbit on PR 45). Attribute.attr and
+    # keyword.arg stay in the scan: sys.modules[__name__].CHECKER_PATH = x and
+    # namespace.update(CHECKER_PATH=x) rebind module globals through them.
+    if isinstance(node, ast.Constant):
+        return problems
     # Inspect fields, not a deny-list of statement kinds: parameters, patterns,
     # exception aliases and declarations can bind identifiers without Name(Store).
     for field, value in ast.iter_fields(node):
@@ -472,6 +479,8 @@ sp.run("git status", shell=True)
         ("match value:\n    case CHECKER_PATH: pass", "CHECKER_PATH may only be bound"),
         ("match value:\n    case [*CHECKER_PATH]: pass", "CHECKER_PATH may only be bound"),
         ("match value:\n    case {**CHECKER_PATH}: pass", "CHECKER_PATH may only be bound"),
+        ("module.CHECKER_PATH = other", "CHECKER_PATH may only be bound"),
+        ("namespace.update(CHECKER_PATH=other)", "CHECKER_PATH may only be bound"),
     ],
 )
 def test_process_start_problems_rejects_unsafe_source(source: str, expected: str) -> None:
@@ -508,3 +517,19 @@ spec.loader.exec_module(checker)
 def test_process_start_problems_accepts_sys_modules_assignment() -> None:
     """The loader can register a module without gaining read access to the module registry."""
     assert process_start_problems('import sys\nsys.modules["check_scanner_suppressions"] = module') == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        'label = "CHECKER_PATH"',
+        'path: "Path"',
+        'name = "__file__"',
+        'def load():\n    "Path"',
+        'label = f"{count}Path"',
+        'match value:\n    case "CHECKER_PATH": pass',
+    ],
+)
+def test_process_start_problems_accepts_identifier_names_in_strings(source: str) -> None:
+    """A string constant binds nothing, so the protected identifiers may appear inside one."""
+    assert process_start_problems(source) == []
