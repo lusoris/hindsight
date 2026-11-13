@@ -3,13 +3,12 @@
 import json
 import logging
 
+from hindsight_devin_desktop.config import DEFAULT_GLOBAL_BANK, DEFAULT_HINDSIGHT_API_URL, load_config
 from integration_testing.settings_file import (
     NON_UTF8_SETTINGS,
     assert_ignored_settings_file,
     assert_missing_file_logs_nothing,
 )
-
-from hindsight_devin_desktop.config import DEFAULT_GLOBAL_BANK, DEFAULT_HINDSIGHT_API_URL, load_config
 
 
 def test_defaults(tmp_path):
