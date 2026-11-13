@@ -47,7 +47,7 @@ def _temporal_side_sql(mu_table: str, *, after: bool) -> str:
                               AND mu.id != $6
                             ORDER BY mu.event_date {direction}
                             FETCH FIRST $5 ROWS ONLY
-                        ) {alias}"""
+                        ) {alias}"""  # nosec B608 # mu_table is fq_table("memory_units") from both callers, never caller input; every value bound as $n; category D, entry 2026-11-13, expires 2027-03-13
 
 
 class OracleOps(DataAccessOps):
