@@ -307,9 +307,9 @@ async def test_rollback_keeps_a_preexisting_bank(memory, request_context, export
 def _stub_engine(monkeypatch: pytest.MonkeyPatch) -> MemoryEngine:
     """Stub the DB boundary, keeping the real engine submission and rollback methods.
 
-    A plain function rather than a shared fixture: test_bank_import_review.py builds
-    its own `unit_engine` fixture from it, where importing the fixture object itself
-    reads as an unused import to pyflakes.
+    A plain function rather than a shared fixture: test_bank_import_review.py and
+    test_bank_import_compensation.py each build their own `unit_engine` fixture from
+    it, where importing the fixture object itself reads as an unused import to pyflakes.
     """
     engine = MemoryEngine.__new__(MemoryEngine)
     engine._operation_validator = None

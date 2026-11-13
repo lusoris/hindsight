@@ -79,6 +79,11 @@ logger = logging.getLogger(__name__)
 OnConflict = Literal["skip", "replace", "new-id"]
 _VALID_CONFLICT_MODES: tuple[OnConflict, ...] = ("skip", "replace", "new-id")
 
+# Ownership proof written live by MemoryEngine.import_bank_async's on_bank_created
+# in the bank-creation transaction. Archives are untrusted: restored rows must never
+# carry these keys, or a retry of a restored failed import_bank would trust them.
+_SERVER_OWNED_OPERATION_METADATA_KEYS = frozenset({"restored_bank_id", "restored_internal_id"})
+
 #: Texts per embedding call for the import phases that are sized by the *bank* rather
 #: than by a document: mental models arrive as one list covering the whole archive, and
 #: observations in ``_OBSERVATION_BATCH_SIZE`` slices of theirs. Slicing here, above the provider, bounds peak memory for every
@@ -1386,6 +1391,32 @@ def _finished_operations(rows: Iterable[dict]) -> Iterator[dict]:
     return (row for row in rows if row.get("status") not in _LIVE_OPERATION_STATUSES)
 
 
+def _without_server_owned_metadata(
+    rows: Iterable[dict], *, bank_rows_json_encoding: BankRowsJSONEncoding
+) -> Iterator[dict]:
+    """Strip live ownership proof from untrusted archive operation metadata.
+
+    A retry must never treat a restored failed import as the creator of a bank.
+    """
+    for row in rows:
+        metadata = row.get("result_metadata")
+        if metadata is None:
+            yield row
+            continue
+        if bank_rows_json_encoding == "serialized" and isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except ValueError:
+                yield row
+                continue
+        row["result_metadata"] = (
+            {key: value for key, value in metadata.items() if key not in _SERVER_OWNED_OPERATION_METADATA_KEYS}
+            if isinstance(metadata, dict)
+            else {}
+        )
+        yield row
+
+
 async def _restore_attachments(
     conn: Any,
     bank_id: str,
@@ -1464,6 +1495,7 @@ async def _restore_operational_rows(
     across the schema, and the source's rows may still be here (see :func:`_drop_ids`).
     """
     operations = _finished_operations(_iter_data_rows(zf, "async_operations", bank_id))
+    operations = _without_server_owned_metadata(operations, bank_rows_json_encoding=bank_rows_json_encoding)
     if drop_operation_ids:
         operations = _without(operations, "operation_id")
     restored_ops = await _restore_rows(
