@@ -1,8 +1,6 @@
-import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-import postcss, { type AtRule, type Root, type Rule } from "postcss";
-import tailwind from "@tailwindcss/postcss";
+import type { AtRule, Root, Rule } from "postcss";
 import { beforeAll, expect, it } from "vitest";
+import { compileGlobals } from "./compile-globals";
 
 /**
  * The phone layout rests on a few global rules in globals.css that every
@@ -13,12 +11,7 @@ import { beforeAll, expect, it } from "vitest";
 let compiled: Root;
 
 beforeAll(async () => {
-  const stylesheet = fileURLToPath(new URL("../../src/app/globals.css", import.meta.url));
-  const base = fileURLToPath(new URL("../../", import.meta.url));
-  const result = await postcss([tailwind({ base })]).process(await readFile(stylesheet, "utf8"), {
-    from: stylesheet,
-  });
-  compiled = result.root;
+  compiled = await compileGlobals();
 });
 
 function findRule(selector: string, media?: string): Rule | undefined {

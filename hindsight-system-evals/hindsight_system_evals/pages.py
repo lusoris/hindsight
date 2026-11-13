@@ -28,6 +28,8 @@ from hindsight_client_api.models.create_knowledge_page_response import CreateKno
 
 from hindsight_system_evals import corpus as corpus_module
 from hindsight_system_evals.corpus import HardFact, HardQuestion
+from hindsight_system_evals.judge import evaluate
+from hindsight_system_evals.report import EvalKind, EvalRecord
 
 #: Waits until a bank has no pending work — the ``settled`` fixture.
 SettleFn = Callable[[str], Awaitable[None]]
@@ -77,6 +79,41 @@ def split_into_waves(facts: list[HardFact], count: int = WAVES) -> list[list[Har
     for position, key in enumerate(sorted(by_subject)):
         waves[position % count].extend(by_subject[key])
     return waves
+
+
+async def grade_page(outcome: PageOutcome, question: HardQuestion, context: str) -> None:
+    """Grade the final page: does it answer, and does it assert the trap?
+
+    The trap criterion is inverted -- "met" is the failure -- so it must be judged
+    with ``confirm_met=True``; otherwise a correct "not met" can be overruled by
+    lenient re-asks into a false ``hit_trap``.
+    """
+    verdict = await evaluate(outcome.final_content, question.answer_criteria, context=context)
+    outcome.correct, outcome.correct_reason = verdict.meets_criteria, verdict.reasoning
+
+    if question.must_not_claim:
+        trap = await evaluate(
+            outcome.final_content,
+            f"The page asserts, as currently true, that {question.must_not_claim}.",
+            context=context,
+            confirm_met=True,
+        )
+        outcome.hit_trap, outcome.trap_reason = trap.meets_criteria, trap.reasoning
+
+
+def page_record(kind: EvalKind, question_id: str, question: HardQuestion, outcome: PageOutcome) -> EvalRecord:
+    """The published record for a graded page; a trap hit explains the failure first."""
+    return EvalRecord(
+        kind=kind,
+        question_id=question_id,
+        category=question.category,
+        correct=outcome.correct,
+        hit_trap=outcome.hit_trap,
+        sizes=[w.chars for w in outcome.waves],
+        bank_id=outcome.bank_id,
+        page_id=outcome.page_id,
+        reason=outcome.trap_reason if outcome.hit_trap else outcome.correct_reason,
+    )
 
 
 def questions() -> list[HardQuestion]:
