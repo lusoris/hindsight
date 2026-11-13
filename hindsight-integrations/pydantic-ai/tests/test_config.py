@@ -1,12 +1,11 @@
 """Unit tests for hindsight_pydantic_ai configuration."""
 
-from integration_testing.config_contract import ConfigApi, ConfigDefaultsContract, ConfigureContract
-
 import hindsight_pydantic_ai
 from hindsight_pydantic_ai.config import (
     DEFAULT_HINDSIGHT_API_URL,
     HINDSIGHT_API_KEY_ENV,
 )
+from integration_testing.config_contract import ConfigApi, ConfigDefaultsContract, ConfigureContract
 
 PYDANTIC_AI_API = ConfigApi(
     configure=hindsight_pydantic_ai.configure,

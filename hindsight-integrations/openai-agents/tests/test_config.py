@@ -1,7 +1,5 @@
 """Unit tests for hindsight_openai_agents configuration."""
 
-from integration_testing.config_contract import ConfigApi, ConfigDefaultsContract, ConfigureContract
-
 import hindsight_openai_agents
 from hindsight_openai_agents.config import (
     DEFAULT_BUDGET,
@@ -10,6 +8,7 @@ from hindsight_openai_agents.config import (
     DEFAULT_RECALL_TAGS_MATCH,
     HINDSIGHT_API_KEY_ENV,
 )
+from integration_testing.config_contract import ConfigApi, ConfigDefaultsContract, ConfigureContract
 
 OPENAI_AGENTS_API = ConfigApi(
     configure=hindsight_openai_agents.configure,

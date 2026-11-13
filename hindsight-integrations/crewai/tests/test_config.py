@@ -1,12 +1,11 @@
 """Unit tests for hindsight_crewai configuration."""
 
-from integration_testing.config_contract import ConfigApi, ConfigDefaultsContract, ConfigureContract
-
 import hindsight_crewai
 from hindsight_crewai.config import (
     DEFAULT_HINDSIGHT_API_URL,
     HINDSIGHT_API_KEY_ENV,
 )
+from integration_testing.config_contract import ConfigApi, ConfigDefaultsContract, ConfigureContract
 
 CREWAI_API = ConfigApi(
     configure=hindsight_crewai.configure,

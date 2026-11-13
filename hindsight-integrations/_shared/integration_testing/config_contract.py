@@ -32,13 +32,19 @@ class ConfigApi:
     extra_defaults: Mapping[str, Any] = field(default_factory=dict)
 
 
-def _assert_attributes(config: Any, expected: Mapping[str, Any]) -> None:
+# Explicit failures instead of `assert`: pytest rewrites asserts only in test modules, so in
+# this by-path helper a bare assert would fail without the compared values, and `python -O`
+# strips it (Bandit B101, which Codacy applies here because the file is outside `tests/`).
+def _expect(name: str, actual: Any, expected: Any) -> None:
+    # None and bools compare by identity so a truthy stand-in (1, "x") cannot pass.
+    same = actual is expected if expected is None or isinstance(expected, bool) else actual == expected
+    if not same:
+        raise AssertionError(f"{name}: expected {expected!r}, got {actual!r}")
+
+
+def _expect_attributes(config: Any, expected: Mapping[str, Any]) -> None:
     for name, value in expected.items():
-        actual = getattr(config, name)
-        if value is None or isinstance(value, bool):
-            assert actual is value, name
-        else:
-            assert actual == value, name
+        _expect(name, getattr(config, name), value)
 
 
 class ConfigDefaultsContract:
@@ -47,10 +53,10 @@ class ConfigDefaultsContract:
     api: ConfigApi
 
     def test_default_api_url(self) -> None:
-        assert self.api.default_api_url == "https://api.hindsight.vectorize.io"
+        _expect("default_api_url", self.api.default_api_url, "https://api.hindsight.vectorize.io")
 
     def test_env_var_name(self) -> None:
-        assert self.api.api_key_env == "HINDSIGHT_API_KEY"
+        _expect("api_key_env", self.api.api_key_env, "HINDSIGHT_API_KEY")
 
 
 class ConfigureContract:
@@ -66,50 +72,45 @@ class ConfigureContract:
 
     def test_configure_with_no_arguments(self) -> None:
         config = self.api.configure()
-        assert config.hindsight_api_url == self.api.default_api_url
-        assert config.budget == "mid"
-        assert config.max_tokens == 4096
-        _assert_attributes(config, self.api.extra_defaults)
+        _expect_attributes(
+            config,
+            {"hindsight_api_url": self.api.default_api_url, "budget": "mid", "max_tokens": 4096},
+        )
+        _expect_attributes(config, self.api.extra_defaults)
 
     def test_configure_reads_api_key_from_env(self) -> None:
         with patch.dict(os.environ, {self.api.api_key_env: "test-key"}):
             config = self.api.configure()
-        assert config.api_key == "test-key"
+        _expect("api_key", config.api_key, "test-key")
 
     def test_configure_explicit_overrides_env(self) -> None:
         with patch.dict(os.environ, {self.api.api_key_env: "env-key"}):
             config = self.api.configure(api_key="explicit-key")
-        assert config.api_key == "explicit-key"
+        _expect("api_key", config.api_key, "explicit-key")
 
     def test_configure_all_options(self) -> None:
-        config = self.api.configure(
-            hindsight_api_url="http://custom:8888",
-            api_key="my-key",
-            budget="high",
-            max_tokens=2048,
-            tags=["env:test"],
-            recall_tags=["scope:global"],
-            recall_tags_match="all",
+        options: dict[str, Any] = {
+            "hindsight_api_url": "http://custom:8888",
+            "api_key": "my-key",
+            "budget": "high",
+            "max_tokens": 2048,
+            "tags": ["env:test"],
+            "recall_tags": ["scope:global"],
+            "recall_tags_match": "all",
             **self.api.extra_options,
-        )
-        assert config.hindsight_api_url == "http://custom:8888"
-        assert config.api_key == "my-key"
-        assert config.budget == "high"
-        assert config.max_tokens == 2048
-        assert config.tags == ["env:test"]
-        assert config.recall_tags == ["scope:global"]
-        assert config.recall_tags_match == "all"
-        _assert_attributes(config, self.api.extra_options)
+        }
+        config = self.api.configure(**options)
+        _expect_attributes(config, options)
 
     def test_get_config_returns_none_without_configure(self) -> None:
-        assert self.api.get_config() is None
+        _expect("get_config()", self.api.get_config(), None)
 
     def test_get_config_returns_config_after_configure(self) -> None:
         self.api.configure()
-        assert self.api.get_config() is not None
+        _expect("get_config() is set", self.api.get_config() is not None, True)
 
     def test_reset_config(self) -> None:
         self.api.configure()
-        assert self.api.get_config() is not None
+        _expect("get_config() is set", self.api.get_config() is not None, True)
         self.api.reset_config()
-        assert self.api.get_config() is None
+        _expect("get_config() after reset", self.api.get_config(), None)
