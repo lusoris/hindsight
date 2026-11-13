@@ -1,6 +1,11 @@
-"""Compensating process-start checks for every Bandit exclusion in .codacy.yml."""
+"""Allow-list imports, module access, builtins, attributes and process calls in Bandit exclusions.
+
+Only direct subprocess.run calls with one argv list and approved keywords may start processes.
+sys.modules is available solely as a subscript assignment target for the path-based test loader.
+"""
 
 import ast
+import builtins
 from pathlib import Path
 
 import pytest
@@ -8,15 +13,113 @@ import yaml
 
 SOURCE_ROOT = Path(__file__).resolve().parents[2]
 
-# In Bandit-excluded files, process module names may appear only as the base of an allowed
-# attribute; importlib uses are restricted to ALLOWED_IMPORTLIB_CALLS.
-# Bare references and other dynamic imports fail the check.
-# Their tests must run git and shell wrappers; this shared check preserves the argv-list,
-# direct-call, and no-shell contract on which each .codacy.yml Bandit exclusion rests.
-ALLOWED_PROCESS_ATTRS = {"subprocess": {"run", "CompletedProcess"}, "os": {"environ", "devnull", "pathsep"}}
+# The former process-module deny-list missed other import paths to os. These are
+# exactly the imports used by the two excluded files; aliases cannot hide their roots.
+ALLOWED_IMPORTS = {"datetime", "importlib.util", "json", "os", "pytest", "re", "shlex", "shutil", "subprocess", "sys"}
 
-# The excluded scanner test loads a hyphen-named script by path; no other importlib use is allowed.
-ALLOWED_IMPORTLIB_CALLS = {"importlib.util.spec_from_file_location", "importlib.util.module_from_spec"}
+# Only these named imports support the fixtures without exposing module aliases or wildcard imports.
+ALLOWED_FROM_IMPORTS = {("__future__", "annotations"), ("dataclasses", "dataclass"), ("pathlib", "Path")}
+
+# Bound every imported module, including the two-level loader, to measured attributes;
+# allowing only os/subprocess attributes left shutil.os and similar paths unchecked.
+ALLOWED_MODULE_ATTRIBUTES = {
+    "datetime": {"UTC", "date", "datetime", "timedelta"},
+    "importlib": {"util"},
+    "importlib.util": {"module_from_spec", "spec_from_file_location"},
+    "json": {"dumps", "loads"},
+    "os": {"devnull", "environ", "pathsep"},
+    "pytest": {"mark"},
+    "re": {"search"},
+    "shlex": {"quote", "split"},
+    "shutil": {"copy2", "copyfile", "which"},
+    "subprocess": {"CompletedProcess", "run"},
+    "sys": {"executable", "modules"},
+}
+
+# The loader registers its module with a plain assignment; all other contexts can
+# read or expose sys.modules and recover unrestricted modules.
+ALLOWED_SYS_MODULES_ASSIGNMENTS = (ast.Assign,)
+
+# These are the measured builtin names; dynamic execution and namespace lookup
+# must require explicit review rather than escaping a list of known dangerous calls.
+ALLOWED_BUILTINS = {"RuntimeError", "all", "any", "dict", "int", "len", "list", "str"}
+
+# All 67 measured attribute names are needed by the fixtures. Checking every
+# attribute also closes paths through local objects, beyond imported-module roots.
+ALLOWED_ATTRIBUTE_NAMES = {
+    "CompletedProcess",
+    "MALFORMED_NOSEC",
+    "MARKER_RE",
+    # Explicit + keeps the name from matching scanner-suppressions lint; ruff format joins adjacent implicit literals.
+    "NO" + "SEC_COMMENT_ONLY",
+    "Problem",
+    "UNKNOWN_BANDIT_ID",
+    "UTC",
+    "args",
+    "check_text",
+    "chmod",
+    "command",
+    "copy2",
+    "copyfile",
+    "count",
+    "cwd",
+    "date",
+    "datetime",
+    "devnull",
+    "dumps",
+    "encode",
+    "environ",
+    "err",
+    "exec_module",
+    "executable",
+    "exists",
+    "findall",
+    "get",
+    "index",
+    "isoformat",
+    "items",
+    "join",
+    "loader",
+    "loads",
+    "lower",
+    "lstrip",
+    "main",
+    "mark",
+    "message",
+    "mkdir",
+    "module_from_spec",
+    "modules",
+    "now",
+    "parametrize",
+    "parent",
+    "parents",
+    "path",
+    "pathsep",
+    "quote",
+    "read_text",
+    "readouterr",
+    "replace",
+    "resolve",
+    "returncode",
+    "run",
+    "search",
+    "spec_from_file_location",
+    "split",
+    "splitlines",
+    "startswith",
+    "stderr",
+    "stdout",
+    "symlink_to",
+    "timedelta",
+    "util",
+    "which",
+    "write_bytes",
+    "write_text",
+}
+
+# Only the measured run keywords are permitted. The earlier shell/**kwargs check
+# missed executable= and positional Popen arguments, including positional shell.
+ALLOWED_RUN_KEYWORDS = {"capture_output", "check", "cwd", "env", "text", "timeout"}
 
 
 def _is_argv_list(node: ast.expr) -> bool:
@@ -27,67 +130,65 @@ def _is_argv_list(node: ast.expr) -> bool:
 
 
 def process_start_problems(source: str) -> list[str]:
-    """Return violations of the process-start contract for Bandit-excluded source.
+    """Return violations of the allow-list contract for Bandit-excluded source.
 
-    Processes start only through a direct subprocess.run call with an argv list and no shell keyword.
-    The subprocess and os module names appear only as the base of an allowed attribute. Other attributes, imports
-    that rename them, subprocess.run used without being called, and dynamic imports via __import__ fail.
-    Importlib names may only be the base of an attribute in ALLOWED_IMPORTLIB_CALLS; aliases and from-imports fail.
+    Imports and from-import pairs, module attributes, builtins and all attribute
+    names must be approved explicitly. Module names cannot escape as bare values;
+    sys.modules can only be a subscript assignment target. Process starts require
+    a direct subprocess.run call, exactly one argv list and only approved keywords.
     """
     tree = ast.parse(source)
     called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
-    # Track each base node so an allowed attribute cannot excuse a separate bare reference.
+    # Track individual nodes: a permitted use cannot excuse a separate bare module
+    # reference, including an alias of the intermediate importlib.util module.
     attribute_bases = {
         id(node.value)
         for node in ast.walk(tree)
         if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Name)
-        and node.value.id in ALLOWED_PROCESS_ATTRS
+        and ast.unparse(node.value) in ALLOWED_MODULE_ATTRIBUTES
+        and node.attr in ALLOWED_MODULE_ATTRIBUTES[ast.unparse(node.value)]
     }
-    # Match each two-level loader attribute so it cannot excuse another importlib reference.
-    importlib_bases = {
-        id(node.value.value)
+    modules_assignment_targets = {
+        id(target.value)
         for node in ast.walk(tree)
-        if isinstance(node, ast.Attribute)
-        and isinstance(node.value, ast.Attribute)
-        and isinstance(node.value.value, ast.Name)
-        and node.value.value.id == "importlib"
-        and ast.unparse(node) in ALLOWED_IMPORTLIB_CALLS
+        if isinstance(node, ALLOWED_SYS_MODULES_ASSIGNMENTS)
+        for target in node.targets
+        if isinstance(target, ast.Subscript) and ast.unparse(target.value) == "sys.modules"
     }
     problems: list[str] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Name):
-            if node.id in ALLOWED_PROCESS_ATTRS and id(node) not in attribute_bases:
-                problems.append(f"line {node.lineno}: bare reference to {node.id}")
-            elif node.id == "__import__":
-                problems.append(f"line {node.lineno}: __import__ is not allowed")
-            elif node.id == "importlib" and id(node) not in importlib_bases:
-                problems.append(f"line {node.lineno}: importlib use is not allowed")
-        if isinstance(node, ast.ImportFrom) and node.module in ALLOWED_PROCESS_ATTRS:
-            problems.append(f"line {node.lineno}: from {node.module} import")
-        elif isinstance(node, ast.ImportFrom) and node.module and node.module.split(".")[0] == "importlib":
-            problems.append(f"line {node.lineno}: from {node.module} import")
+        if isinstance(node, ast.Name) and hasattr(builtins, node.id) and node.id not in ALLOWED_BUILTINS:
+            problems.append(f"line {node.lineno}: builtin {node.id} is not allowed")
+        if isinstance(node, (ast.Name, ast.Attribute)):
+            name = ast.unparse(node)
+            if name in ALLOWED_MODULE_ATTRIBUTES and id(node) not in attribute_bases:
+                problems.append(f"line {node.lineno}: bare reference to {name}")
+        if isinstance(node, ast.ImportFrom):
+            for alias in node.names:
+                if node.level or alias.asname or (node.module, alias.name) not in ALLOWED_FROM_IMPORTS:
+                    module = "." * node.level + (node.module or "")
+                    problems.append(f"line {node.lineno}: from {module} import {alias.name} is not allowed")
         elif isinstance(node, ast.Import):
-            problems += [
-                f"line {node.lineno}: import {alias.name} as {alias.asname}"
-                for alias in node.names
-                if (alias.name in ALLOWED_PROCESS_ATTRS or alias.name.split(".")[0] == "importlib") and alias.asname
-            ]
-        elif (
-            isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id in ALLOWED_PROCESS_ATTRS
-        ):
-            name = f"{node.value.id}.{node.attr}"
-            if node.attr not in ALLOWED_PROCESS_ATTRS[node.value.id]:
+            for alias in node.names:
+                if alias.name not in ALLOWED_IMPORTS or alias.asname:
+                    name = f"{alias.name} as {alias.asname}" if alias.asname else alias.name
+                    problems.append(f"line {node.lineno}: import {name} is not allowed")
+        elif isinstance(node, ast.Attribute):
+            base = ast.unparse(node.value)
+            name = f"{base}.{node.attr}"
+            if node.attr not in ALLOWED_ATTRIBUTE_NAMES or (
+                base in ALLOWED_MODULE_ATTRIBUTES and node.attr not in ALLOWED_MODULE_ATTRIBUTES[base]
+            ):
                 problems.append(f"line {node.lineno}: {name} is not allowed")
-            elif name == "subprocess.run" and id(node) not in called:
+            if name == "sys.modules" and id(node) not in modules_assignment_targets:
+                problems.append(f"line {node.lineno}: sys.modules is only allowed as a subscript assignment target")
+            if name == "subprocess.run" and id(node) not in called:
                 problems.append(f"line {node.lineno}: subprocess.run used without a direct call")
         elif isinstance(node, ast.Call) and ast.unparse(node.func) == "subprocess.run":
-            if not node.args or not _is_argv_list(node.args[0]):
-                problems.append(f"line {node.lineno}: subprocess.run without an argv list")
-            if any(keyword.arg in ("shell", None) for keyword in node.keywords):
-                problems.append(f"line {node.lineno}: subprocess.run with shell= or **kwargs")
+            if len(node.args) != 1 or not _is_argv_list(node.args[0]):
+                problems.append(f"line {node.lineno}: subprocess.run requires exactly one argv list")
+            if any(keyword.arg not in ALLOWED_RUN_KEYWORDS for keyword in node.keywords):
+                problems.append(f"line {node.lineno}: subprocess.run keyword is not allowed")
     return problems
 
 
@@ -115,9 +216,9 @@ def test_bandit_excluded_module_starts_processes_only_with_argv_lists(path: str)
 @pytest.mark.parametrize(
     "source,expected",
     [
-        ('subprocess.run("git status", shell=True)', "subprocess.run without an argv list"),
-        ('subprocess.run("git status", shell=True)', "subprocess.run with shell= or **kwargs"),
-        ('subprocess.run(["git"], **kw)', "subprocess.run with shell= or **kwargs"),
+        ('subprocess.run("git status", shell=True)', "subprocess.run requires exactly one argv list"),
+        ('subprocess.run("git status", shell=True)', "subprocess.run keyword is not allowed"),
+        ('subprocess.run(["git"], **kw)', "subprocess.run keyword is not allowed"),
         ('subprocess.Popen(["git"])', "subprocess.Popen is not allowed"),
         ('os.system("git")', "os.system is not allowed"),
         ("from subprocess import run", "from subprocess import"),
@@ -126,21 +227,39 @@ def test_bandit_excluded_module_starts_processes_only_with_argv_lists(path: str)
         ("sp = subprocess", "bare reference to subprocess"),
         ('getattr(subprocess, "Popen")(["git"])', "bare reference to subprocess"),
         ('getattr(os, "system")("git")', "bare reference to os"),
-        ('__import__("subprocess")', "line 1: __import__ is not allowed"),
-        ('importlib.import_module("subprocess")', "line 1: importlib use is not allowed"),
-        ('importlib.__import__("subprocess")', "line 1: importlib use is not allowed"),
-        ("m = importlib", "line 1: importlib use is not allowed"),
-        ("u = importlib.util", "line 1: importlib use is not allowed"),
+        ('__import__("subprocess")', "line 1: builtin __import__ is not allowed"),
+        ('importlib.import_module("subprocess")', "line 1: importlib.import_module is not allowed"),
+        ('importlib.__import__("subprocess")', "line 1: importlib.__import__ is not allowed"),
+        ("m = importlib", "line 1: bare reference to importlib"),
+        ("u = importlib.util", "line 1: bare reference to importlib.util"),
         ("from importlib import import_module", "line 1: from importlib import"),
         ("from importlib.util import find_spec", "line 1: from importlib.util import"),
         ("import importlib as il", "line 1: import importlib as il"),
         ("import importlib.util as iu", "line 1: import importlib.util as iu"),
         (
             'importlib.util.module_from_spec(spec)\nimportlib.import_module("subprocess")',
-            "line 2: importlib use is not allowed",
+            "line 2: importlib.import_module is not allowed",
         ),
-        ("importlib.util.module_from_spec(spec)\nm = importlib", "line 2: importlib use is not allowed"),
-        ("importlib.util.module_from_spec(spec)\nu = importlib.util", "line 2: importlib use is not allowed"),
+        ("importlib.util.module_from_spec(spec)\nm = importlib", "line 2: bare reference to importlib"),
+        ("importlib.util.module_from_spec(spec)\nu = importlib.util", "line 2: bare reference to importlib.util"),
+        ('from os.path import os as host_os\nhost_os.system("x")', "from os.path import os is not allowed"),
+        ('import shutil\nshutil.os.system("x")', "shutil.os is not allowed"),
+        ('import sys\nsys.modules["os"].system("x")', "sys.modules is only allowed as a subscript assignment target"),
+        ('exec("x")', "builtin exec is not allowed"),
+        ('eval("1")', "builtin eval is not allowed"),
+        ('compile("x", "f", "exec")', "builtin compile is not allowed"),
+        ('vars()["x"]', "builtin vars is not allowed"),
+        ('globals()["x"]', "builtin globals is not allowed"),
+        (
+            'subprocess.run(["git"], -1, None, None, None, None, None, True, True)',
+            "subprocess.run requires exactly one argv list",
+        ),
+        ('subprocess.run(["git"], executable="/bin/sh")', "subprocess.run keyword is not allowed"),
+        ("import builtins", "import builtins"),
+        ("from . import x", "from . import x is not allowed"),
+        ("from os import *", "from os import * is not allowed"),
+        ('checker.subprocess.run(["git"])', "checker.subprocess is not allowed"),
+        ("x.__globals__", "x.__globals__ is not allowed"),
     ],
 )
 def test_process_start_problems_rejects_unsafe_source(source: str, expected: str) -> None:
@@ -159,7 +278,7 @@ def test_process_start_problems_accepts_argv_list() -> None:
 
 def test_process_start_problems_accepts_importlib_loader() -> None:
     """The scanner's path-based loader may use only the two allowed importlib attributes."""
-    assert process_start_problems("import importlib") == []
+    assert process_start_problems("import importlib.util") == []
     source = """import importlib.util
 import sys
 
@@ -170,3 +289,8 @@ sys.modules["check_scanner_suppressions"] = checker
 spec.loader.exec_module(checker)
 """
     assert process_start_problems(source) == []
+
+
+def test_process_start_problems_accepts_sys_modules_assignment() -> None:
+    """The loader can register a module without gaining read access to the module registry."""
+    assert process_start_problems('import sys\nsys.modules["check_scanner_suppressions"] = module') == []

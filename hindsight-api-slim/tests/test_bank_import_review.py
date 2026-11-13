@@ -300,9 +300,11 @@ async def test_route_maps_unsupported_zip_to_400(
 
 
 def test_preflight_maps_unimplemented_zip_reads_to_value_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Build first because writestr calls ZipFile.open, which this test patches.
+    archive = _synthetic_archive()
     monkeypatch.setattr(zipfile.ZipFile, "open", MagicMock(side_effect=NotImplementedError("unsupported codec")))
     with pytest.raises(ValueError, match="corrupt"):
-        importer.validate_bank_archive(_synthetic_archive())
+        importer.validate_bank_archive(archive)
 
 
 async def _run_barrier(barrier: str, archive: bytes) -> None:
