@@ -32,7 +32,7 @@ from types import SimpleNamespace
 from typing import IO, TYPE_CHECKING, Any, Literal, NoReturn, ParamSpec, TypeVar, cast
 
 import asyncpg
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from .._vector_index import (
     ann_search_tuning_settings,
@@ -146,6 +146,28 @@ from .operation_metadata import (
 )
 from .sql import SQLDialect, create_sql_dialect
 from .sql.postgresql import knowledge_bm25_arm
+
+
+class _BankRestoreMetadata(BaseModel):
+    """Identity committed with the bank row, so retries cannot claim a replacement."""
+
+    restored_bank_id: str | None = None
+    restored_internal_id: uuid.UUID | None = None
+
+
+@dataclass
+class _BankDeletionResult:
+    """Whether the identity matched, and the public deletion counts when it did."""
+
+    applied: bool
+    memory_units_deleted: int = 0
+    entities_deleted: int = 0
+    documents_deleted: int | None = None
+    bank_deleted: bool | None = None
+
+
+class _BankDeletionIdentityMismatch(Exception):
+    """Unwind the transaction without committing or running post-commit sweeps."""
 
 
 @dataclass
@@ -4138,6 +4160,9 @@ class MemoryEngine(MemoryEngineInterface):
                     history=task_dict.get("include_history", False),
                 ),
                 operation_id=operation_id,
+                # Only marked submissions validated these stashed bytes. Older tasks and
+                # clones still need preflight; an operation_id alone identifies neither.
+                _archive_validated=task_dict.get("archive_validated", False),
             )
             # Restored documents are reported like imported ones. Only here, not in
             # import_bank_async: a clone reuses that restore, but copies documents the
@@ -8200,7 +8225,7 @@ class MemoryEngine(MemoryEngineInterface):
         immediate error rather than a task that fails in the background.
         """
         from .transfer import TransferScope
-        from .transfer.importer import read_bank_manifest
+        from .transfer.importer import read_bank_manifest, validate_bank_archive
 
         scope = scope or TransferScope()
         # Validate the archive synchronously: a malformed or documents-only zip is
@@ -8223,8 +8248,13 @@ class MemoryEngine(MemoryEngineInterface):
                     CreateBankContext(bank_id=target, request_context=request_context)
                 )
             )
-        # Only parse the documents when a validator will look at them: restore parses the
-        # archive again when it runs, so without a gate this would be wasted work.
+        # Barrier 1 against a half-restored bank: read every section the restore will read
+        # before anything is stashed or queued, so one bad document, observation or page is a
+        # 400 here and not a task that fails after it created the bank. Always, with or
+        # without an operation validator; the task skips its own pass (see import_bank_async).
+        # Off the event loop: it is one full pass over an archive that can be large.
+        await asyncio.to_thread(validate_bank_archive, archive, scope)
+        # The validator's import gate needs the documents' text, so it reads them once more.
         if scope.data and self._operation_validator:
             await self._validate_import(target, archive, request_context)
 
@@ -8237,6 +8267,7 @@ class MemoryEngine(MemoryEngineInterface):
             "include_data": scope.data,
             "include_bank_config": scope.bank_config,
             "include_history": scope.history,
+            "archive_validated": True,
         }
         if request_context.tenant_id:
             task_payload["_tenant_id"] = request_context.tenant_id
@@ -8933,6 +8964,7 @@ class MemoryEngine(MemoryEngineInterface):
         target_bank_id: str | None = None,
         scope: "TransferScope | None" = None,
         operation_id: str | None = None,
+        _archive_validated: bool = False,
     ) -> "BankImportResult":
         """Restore a whole bank from an :func:`transfer.export_bank` archive.
 
@@ -8947,38 +8979,67 @@ class MemoryEngine(MemoryEngineInterface):
         mid-import) deletes the half-restored bank and starts again, rather than
         failing on a target that "already exists". A bank the operation did not
         create is never touched.
+
+        Two barriers keep a bad archive from leaving a half-restored bank. First, the whole
+        archive is validated before the first write (``validate_bank_archive``), so a bad
+        section is refused with a ``ValueError`` and nothing exists. Second, should the restore
+        still raise after it created the bank row (a value only the database rejects, a crash
+        in a later section), the bank this call created is deleted and the original error is
+        re-raised.
+
+        ``_archive_validated`` skips the first barrier for the one caller whose archive has
+        already passed it: the import task, which runs on the bytes that
+        ``submit_bank_import_async`` validated and stashed. An explicit flag rather than
+        ``operation_id`` because the clone task also carries an ``operation_id`` and its
+        archive was never validated. Every other caller (admin CLI, clone) pays the extra pass.
         """
         from .transfer import import_bank
-        from .transfer.importer import read_bank_manifest
+        from .transfer.importer import read_bank_manifest, validate_bank_archive
 
         await self._authenticate_tenant(request_context)
         backend = await self._get_backend()
         # Read the manifest up front so a bad archive fails fast and we know the target bank.
         bank_id = target_bank_id or read_bank_manifest(archive).source_bank_id
+        # Before the first write, including the discard of a previous attempt just below.
+        if not _archive_validated:
+            await asyncio.to_thread(validate_bank_archive, archive, scope)
 
-        on_bank_created = None
+        operations = fq_table("async_operations")
+        banks = fq_table("banks")
+        # Identity of the bank row this call committed, so the rollback below can tell it
+        # from a bank someone else created under the same id. Set on the connection that
+        # creates the row; stays unset when the restore refuses before creating one.
+        created_internal_id: uuid.UUID | None = None
         if operation_id:
-            operations = fq_table("async_operations")
             async with acquire_with_retry(backend) as conn:
                 metadata = conn.parse_json(
                     await conn.fetchval(
                         f"SELECT result_metadata FROM {operations} WHERE operation_id = $1", uuid.UUID(operation_id)
                     )
                 )
-            # Only a bank this operation created, and only if it is still there (someone
-            # may have deleted the leftovers by hand before the retry ran).
-            if (metadata or {}).get("restored_bank_id") == bank_id and (
-                await bank_utils.get_bank_profile_if_exists(backend, bank_id) is not None
-            ):
+            restored = _BankRestoreMetadata.model_validate(metadata or {})
+            # Legacy metadata has no ownership proof. Fail closed: leave the bank
+            # alone and let restore's existing-target refusal handle the retry.
+            if restored.restored_bank_id == bank_id and restored.restored_internal_id is not None:
                 logger.info("[transfer] Retrying operation %s: discarding partial restore of %s", operation_id, bank_id)
-                await self.delete_bank(bank_id, request_context=request_context)
+                await self._delete_bank_body(
+                    bank_id, expected_internal_id=restored.restored_internal_id, request_context=request_context
+                )
 
-            async def on_bank_created(conn: Any) -> None:
+        async def on_bank_created(conn: Any) -> None:
+            nonlocal created_internal_id
+            # Fetch FIRST: the metadata must attest to this exact row, not just its
+            # reusable public name. Both reads and the update share its transaction.
+            created_internal_id = uuid.UUID(
+                str(await conn.fetchval(f"SELECT internal_id FROM {banks} WHERE bank_id = $1", bank_id))
+            )
+            if operation_id:
+                ownership = _BankRestoreMetadata(restored_bank_id=bank_id, restored_internal_id=created_internal_id)
                 await conn.execute(
                     f"UPDATE {operations} "
                     f"SET result_metadata = COALESCE(result_metadata, '{{}}'::jsonb) || $1::jsonb "
                     f"WHERE operation_id = $2",
-                    json.dumps({"restored_bank_id": bank_id}),
+                    ownership.model_dump_json(),
                     uuid.UUID(operation_id),
                 )
 
@@ -9002,20 +9063,48 @@ class MemoryEngine(MemoryEngineInterface):
             # an imported bank classified as regular (#3236).
             return await self._config_resolver.resolve_full_config(bank_id, request_context)
 
-        return await import_bank(
-            backend=backend,
-            embeddings_model=self.embeddings,
-            entity_resolver=self.entity_resolver,
-            resolve_config=_resolve_restored_config,
-            format_date_fn=self._format_readable_date,
-            archive=archive,
-            target_bank_id=target_bank_id,
-            scope=scope,
-            # Attachment bytes ride in the archive; the target writes them to its
-            # own storage under its own keys (see transfer._restore_attachments).
-            file_storage=self._file_storage,
-            on_bank_created=on_bank_created,
-        )
+        try:
+            return await import_bank(
+                backend=backend,
+                embeddings_model=self.embeddings,
+                entity_resolver=self.entity_resolver,
+                resolve_config=_resolve_restored_config,
+                format_date_fn=self._format_readable_date,
+                archive=archive,
+                target_bank_id=target_bank_id,
+                scope=scope,
+                # Attachment bytes ride in the archive; the target writes them to its
+                # own storage under its own keys (see transfer._restore_attachments).
+                file_storage=self._file_storage,
+                on_bank_created=on_bank_created,
+            )
+        except BaseException as exc:
+            # Sections commit separately: even cancellation must discard this call's bank.
+            # The callback's row identity stays unset if the target already existed.
+            if created_internal_id is not None:
+                try:
+                    await self._discard_half_restored_bank(bank_id, created_internal_id, request_context)
+                except Exception as cleanup_error:
+                    # Keep the original failure visible to callers (including the admin CLI).
+                    # A cancellation during cleanup is still propagated by asyncio's rules.
+                    exc.add_note(
+                        f"Could not remove half-restored bank {bank_id!r}: {cleanup_error}. "
+                        f"Recover with `hindsight bank delete {bank_id}` or "
+                        f"`DELETE /v1/default/banks/{bank_id}`. Both routes require permission to delete banks: "
+                        "the DELETE_BANK operation validator must allow it."
+                    )
+                    logger.warning("[transfer] Could not delete half-restored bank %s", bank_id, exc_info=True)
+            raise
+
+    async def _discard_half_restored_bank(
+        self, bank_id: str, internal_id: uuid.UUID, request_context: "RequestContext"
+    ) -> None:
+        """Compensate this restore's creation, checking ownership under the deletion lock."""
+        # This compensates CREATE_BANK; it is not a caller-requested DELETE_BANK.
+        # Like _tag_scope's internal-context exemption, it must not run the operator
+        # validator again: an allowed create may need undoing when delete is denied.
+        # The private body checks identity and deletes in one locked transaction.
+        await self._delete_bank_body(bank_id, expected_internal_id=internal_id, request_context=request_context)
 
     async def import_documents_async(
         self,
@@ -9114,7 +9203,8 @@ class MemoryEngine(MemoryEngineInterface):
         dedup made free (which also reports ``processed_content_tokens=0``). Each
         document's text is re-read from the archive here, one at a time.
         """
-        if not self._operation_validator:
+        # An empty map yields nothing but parses every document first, which a config-only restore never validated.
+        if not self._operation_validator or not fact_unit_ids:
             return
 
         from .transfer.importer import iter_imported_documents
@@ -12042,9 +12132,37 @@ class MemoryEngine(MemoryEngineInterface):
                 bank_id=bank_id, operation=BankWriteOperation.DELETE_BANK, request_context=request_context
             )
             await self._validate_operation(self._operation_validator.validate_bank_write(ctx))
+        outcome = await self._delete_bank_body(
+            bank_id,
+            fact_type=fact_type,
+            delete_bank_profile=delete_bank_profile,
+            expected_internal_id=None,
+            request_context=request_context,
+        )
+        result = {"memory_units_deleted": outcome.memory_units_deleted, "entities_deleted": outcome.entities_deleted}
+        if outcome.documents_deleted is not None:
+            result["documents_deleted"] = outcome.documents_deleted
+        if outcome.bank_deleted is not None:
+            result["bank_deleted"] = outcome.bank_deleted
+        return result
+
+    async def _delete_bank_body(
+        self,
+        bank_id: str,
+        *,
+        expected_internal_id: uuid.UUID | None,
+        fact_type: str | None = None,
+        delete_bank_profile: bool = True,
+        request_context: "RequestContext",
+    ) -> _BankDeletionResult:
+        """Delete an authorized bank, or compensate an import with a matching identity.
+
+        Public callers authorize in delete_bank. Import compensation has already
+        authenticated and is limited to the exact row created by that operation.
+        """
         backend = await self._get_backend()
         invalidated_obs = 0
-        result: dict[str, int] = {}
+        result = _BankDeletionResult(applied=True)
         bank_internal_id: str | None = None
         legacy_files: list[str] = []
         # Deleting a bank that was never created is a no-op that reports zero, not an error. A store
@@ -12056,137 +12174,150 @@ class MemoryEngine(MemoryEngineInterface):
         async with acquire_with_retry(backend) as conn:
             # Ensure connection is not in read-only mode (can happen with connection poolers)
             await conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE")
-            async with conn.transaction():
-                try:
-                    # Match delete_document's bank-before-data order. Otherwise a
-                    # bank delete could hold its documents while waiting for the
-                    # bank row held by a concurrent document delete.
-                    bank_row = await conn.fetchrow(
-                        f"SELECT bank_id FROM {fq_table('banks')} WHERE bank_id = $1 FOR NO KEY UPDATE",
-                        bank_id,
-                    )
-                    bank_present = bank_row is not None
-                    from .memories import get_memories as _get_memories_for_delete
-                    from .memories.base import BankContentCounts, TypedMemoryScope
-
-                    _del_store = _get_memories_for_delete()
-                    # Counted where the memories live: for a bank whose memories, documents and
-                    # entity registry are outside SQL the Postgres tables are empty, and a count
-                    # read there reported deleting nothing while dropping everything (#4307). A
-                    # store-owned bank that was never created is not asked at all (see above).
-                    _ask_store = bank_present or not _del_store.store_owned_for(bank_id)
-                    if fact_type:
-                        # For source memory types, capture ids so we can invalidate
-                        # dependent observations AFTER the delete below. Running the
-                        # stale-observation sweep post-delete ensures we also catch
-                        # observations inserted concurrently by consolidation. The ids come
-                        # from wherever the memories live, or the sweep would silently skip.
-                        _scope = (
-                            await _del_store.bank_memories_of_type(
-                                conn=conn, fq_table=fq_table, bank_id=bank_id, fact_type=fact_type
-                            )
-                            if _ask_store
-                            else TypedMemoryScope()
+            try:
+                async with conn.transaction():
+                    try:
+                        # Match delete_document's bank-before-data order. Otherwise a
+                        # bank delete could hold its documents while waiting for the
+                        # bank row held by a concurrent document delete.
+                        bank_row = await conn.fetchrow(
+                            f"SELECT bank_id, internal_id FROM {fq_table('banks')} WHERE bank_id = $1 FOR NO KEY UPDATE",
+                            bank_id,
                         )
-                        unit_ids = _scope.unit_ids
-                        units_count = _scope.count
-                        # Sweep before the delete as well, in the sweep's lock order (see delete_document).
-                        if unit_ids:
-                            invalidated_obs = await self._delete_stale_observations_for_memories(
-                                conn, bank_id, unit_ids
-                            )
-                        # Delete only memories of a specific fact type, live and archived. A store
-                        # that owns its memories is told after the commit (delete_where below).
-                        await _del_store.delete_bank_memories_of_type(
-                            conn=conn,
-                            ops=self._backend.ops,
-                            fq_table=fq_table,
-                            bank_id=bank_id,
-                            fact_type=fact_type,
-                            unit_ids=unit_ids,
-                        )
-                        # Deleting observations directly (fact_type='observation') bypasses the
-                        # stale-observation sweep below — unit_ids is only filled for source types —
-                        # and history no longer cascades from memory_units (that FK was dropped), so
-                        # drop the observations' snapshots explicitly. All history in the bank belongs
-                        # to observations, and this branch removes them all.
-                        if fact_type == "observation":
-                            await conn.execute(
-                                f"DELETE FROM {fq_table('observation_history')} WHERE bank_id = $1",
-                                bank_id,
-                            )
+                        if expected_internal_id is not None and (
+                            bank_row is None or uuid.UUID(str(bank_row["internal_id"])) != expected_internal_id
+                        ):
+                            # Raising rolls back even the no-op transaction; the outer handler
+                            # returns before any file, index, cache or external-store sweep.
+                            raise _BankDeletionIdentityMismatch
+                        bank_present = bank_row is not None
+                        from .memories import get_memories as _get_memories_for_delete
+                        from .memories.base import BankContentCounts, TypedMemoryScope
 
-                        if unit_ids:
-                            invalidated_obs += await self._delete_stale_observations_for_memories(
-                                conn, bank_id, unit_ids
-                            )
-
-                        # Note: We don't delete entities when fact_type is specified,
-                        # as they may be referenced by other memory units
-                        result = {"memory_units_deleted": units_count, "entities_deleted": 0}
-                    else:
-                        # Delete all data for the bank — observations are included, no invalidation needed
-                        _contents = (
-                            await _del_store.count_bank_contents(conn=conn, fq_table=fq_table, bank_id=bank_id)
-                            if _ask_store
-                            else BankContentCounts()
-                        )
-                        units_count = _contents.memory_units
-                        entities_count = _contents.entities
-                        documents_count = _contents.documents
-
-                        # The bank's rows go, and with them the only record of its pre-tenant-prefix
-                        # file keys, which the store reads first for the sweep after the commit.
-                        legacy_files = await _del_store.purge_bank_rows(conn=conn, fq_table=fq_table, bank_id=bank_id)
-
-                        # Sweep extension-owned bank-scoped tables (audit receipts,
-                        # per-bank policy state, ...). These scope by bank_id without
-                        # a cascading FK to banks, so deleting the bank row below
-                        # would otherwise leave them as orphaned rows.
-                        extra_tables = self._tenant_extension.extra_bank_tables() if self._tenant_extension else []
-                        if extra_tables:
-                            for spec in extra_tables:
-                                if not spec.delete_with_bank:
-                                    continue
-                                qualified = fq_table(spec.name)
-                                # PG-only existence guard: a declared-but-unprovisioned
-                                # table must not abort the whole bank delete. (to_regclass
-                                # is PG syntax; extension bank tables are a PG feature.)
-                                if (
-                                    not _is_oracle()
-                                    and await conn.fetchval("SELECT to_regclass($1)", qualified) is None
-                                ):
-                                    continue
-                                await conn.execute(f"DELETE FROM {qualified} WHERE {spec.bank_id_column} = $1", bank_id)
-
-                        result = {
-                            "memory_units_deleted": units_count,
-                            "entities_deleted": entities_count,
-                            "documents_deleted": documents_count,
-                        }
-
-                        if delete_bank_profile:
-                            # The bank's request history holds its prompts and model output (memory
-                            # text included) and has no FK to banks, so it goes with the bank rather
-                            # than waiting for the retention sweep (#5839). PG-only table.
-                            from .llm_trace import _llm_requests_persistable  # noqa: PLC0415
-
-                            if _llm_requests_persistable():
-                                await conn.execute(
-                                    f"DELETE FROM {fq_table('llm_requests')} WHERE bank_id = $1", bank_id
+                        _del_store = _get_memories_for_delete()
+                        # Counted where the memories live: for a bank whose memories, documents and
+                        # entity registry are outside SQL the Postgres tables are empty, and a count
+                        # read there reported deleting nothing while dropping everything (#4307). A
+                        # store-owned bank that was never created is not asked at all (see above).
+                        _ask_store = bank_present or not _del_store.store_owned_for(bank_id)
+                        if fact_type:
+                            # For source memory types, capture ids so we can invalidate
+                            # dependent observations AFTER the delete below. Running the
+                            # stale-observation sweep post-delete ensures we also catch
+                            # observations inserted concurrently by consolidation. The ids come
+                            # from wherever the memories live, or the sweep would silently skip.
+                            _scope = (
+                                await _del_store.bank_memories_of_type(
+                                    conn=conn, fq_table=fq_table, bank_id=bank_id, fact_type=fact_type
                                 )
-                            # Delete the bank profile and retrieve internal_id for HNSW index cleanup
-                            internal_id = await conn.fetchval(
-                                f"DELETE FROM {fq_table('banks')} WHERE bank_id = $1 RETURNING internal_id", bank_id
+                                if _ask_store
+                                else TypedMemoryScope()
                             )
-                            if internal_id:
-                                bank_internal_id = str(internal_id)
-                            result["bank_deleted"] = True
+                            unit_ids = _scope.unit_ids
+                            units_count = _scope.count
+                            # Sweep before the delete as well, in the sweep's lock order (see delete_document).
+                            if unit_ids:
+                                invalidated_obs = await self._delete_stale_observations_for_memories(
+                                    conn, bank_id, unit_ids
+                                )
+                            # Delete only memories of a specific fact type, live and archived. A store
+                            # that owns its memories is told after the commit (delete_where below).
+                            await _del_store.delete_bank_memories_of_type(
+                                conn=conn,
+                                ops=self._backend.ops,
+                                fq_table=fq_table,
+                                bank_id=bank_id,
+                                fact_type=fact_type,
+                                unit_ids=unit_ids,
+                            )
+                            # Deleting observations directly (fact_type='observation') bypasses the
+                            # stale-observation sweep below — unit_ids is only filled for source types —
+                            # and history no longer cascades from memory_units (that FK was dropped), so
+                            # drop the observations' snapshots explicitly. All history in the bank belongs
+                            # to observations, and this branch removes them all.
+                            if fact_type == "observation":
+                                await conn.execute(
+                                    f"DELETE FROM {fq_table('observation_history')} WHERE bank_id = $1",
+                                    bank_id,
+                                )
 
-                except Exception as e:
-                    # Name the type: a lock-wait timeout or cancellation has an empty str(), and
-                    # the message alone then says nothing about what went wrong (#5805).
-                    raise Exception(f"Failed to delete agent data: {type(e).__name__}: {e}") from e
+                            if unit_ids:
+                                invalidated_obs += await self._delete_stale_observations_for_memories(
+                                    conn, bank_id, unit_ids
+                                )
+
+                            # Note: We don't delete entities when fact_type is specified,
+                            # as they may be referenced by other memory units
+                            result.memory_units_deleted = units_count
+                        else:
+                            # Delete all data for the bank — observations are included, no invalidation needed
+                            _contents = (
+                                await _del_store.count_bank_contents(conn=conn, fq_table=fq_table, bank_id=bank_id)
+                                if _ask_store
+                                else BankContentCounts()
+                            )
+                            units_count = _contents.memory_units
+                            entities_count = _contents.entities
+                            documents_count = _contents.documents
+
+                            # The bank's rows go, and with them the only record of its pre-tenant-prefix
+                            # file keys, which the store reads first for the sweep after the commit.
+                            legacy_files = await _del_store.purge_bank_rows(
+                                conn=conn, fq_table=fq_table, bank_id=bank_id
+                            )
+
+                            # Sweep extension-owned bank-scoped tables (audit receipts,
+                            # per-bank policy state, ...). These scope by bank_id without
+                            # a cascading FK to banks, so deleting the bank row below
+                            # would otherwise leave them as orphaned rows.
+                            extra_tables = self._tenant_extension.extra_bank_tables() if self._tenant_extension else []
+                            if extra_tables:
+                                for spec in extra_tables:
+                                    if not spec.delete_with_bank:
+                                        continue
+                                    qualified = fq_table(spec.name)
+                                    # PG-only existence guard: a declared-but-unprovisioned
+                                    # table must not abort the whole bank delete. (to_regclass
+                                    # is PG syntax; extension bank tables are a PG feature.)
+                                    if (
+                                        not _is_oracle()
+                                        and await conn.fetchval("SELECT to_regclass($1)", qualified) is None
+                                    ):
+                                        continue
+                                    await conn.execute(
+                                        f"DELETE FROM {qualified} WHERE {spec.bank_id_column} = $1", bank_id
+                                    )
+
+                            result.memory_units_deleted = units_count
+                            result.entities_deleted = entities_count
+                            result.documents_deleted = documents_count
+
+                            if delete_bank_profile:
+                                # The bank's request history holds its prompts and model output (memory
+                                # text included) and has no FK to banks, so it goes with the bank rather
+                                # than waiting for the retention sweep (#5839). PG-only table.
+                                from .llm_trace import _llm_requests_persistable  # noqa: PLC0415
+
+                                if _llm_requests_persistable():
+                                    await conn.execute(
+                                        f"DELETE FROM {fq_table('llm_requests')} WHERE bank_id = $1", bank_id
+                                    )
+                                # Delete the bank profile and retrieve internal_id for HNSW index cleanup
+                                internal_id = await conn.fetchval(
+                                    f"DELETE FROM {fq_table('banks')} WHERE bank_id = $1 RETURNING internal_id", bank_id
+                                )
+                                if internal_id:
+                                    bank_internal_id = str(internal_id)
+                                result.bank_deleted = True
+
+                    except _BankDeletionIdentityMismatch:
+                        raise
+                    except Exception as e:
+                        # Name the type: a lock-wait timeout or cancellation has an empty str(), and
+                        # the message alone then says nothing about what went wrong (#5805).
+                        raise Exception(f"Failed to delete agent data: {type(e).__name__}: {e}") from e
+            except _BankDeletionIdentityMismatch:
+                return _BankDeletionResult(applied=False)
 
             # Drop per-bank vector indexes AFTER the transaction commits: the
             # drop runs CONCURRENTLY (see ops.drop_bank_vector_indexes), which

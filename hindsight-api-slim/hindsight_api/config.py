@@ -939,6 +939,9 @@ ENV_STORE_DOCUMENT_TEXT = "HINDSIGHT_API_STORE_DOCUMENT_TEXT"
 # Document transfer (export/import documents between banks without re-running the LLM)
 ENV_ENABLE_DOCUMENT_EXPORT_API = "HINDSIGHT_API_ENABLE_DOCUMENT_EXPORT_API"
 ENV_ENABLE_DOCUMENT_IMPORT_API = "HINDSIGHT_API_ENABLE_DOCUMENT_IMPORT_API"
+ENV_TRANSFER_IMPORT_MAX_ENTRY_SIZE_MB = "HINDSIGHT_API_TRANSFER_IMPORT_MAX_ENTRY_SIZE_MB"
+ENV_TRANSFER_IMPORT_MAX_TOTAL_SIZE_MB = "HINDSIGHT_API_TRANSFER_IMPORT_MAX_TOTAL_SIZE_MB"
+ENV_TRANSFER_IMPORT_MAX_ENTRIES = "HINDSIGHT_API_TRANSFER_IMPORT_MAX_ENTRIES"
 
 # Observations settings (consolidated knowledge from facts)
 ENV_ENABLE_OBSERVATIONS = "HINDSIGHT_API_ENABLE_OBSERVATIONS"
@@ -1889,6 +1892,12 @@ DEFAULT_STORE_DOCUMENT_TEXT = True  # Persist raw source text in documents.origi
 # Document transfer defaults (export/import enabled by default; gated independently)
 DEFAULT_ENABLE_DOCUMENT_EXPORT_API = True
 DEFAULT_ENABLE_DOCUMENT_IMPORT_API = True
+# Generous server-side ceilings leave room for large document/attachment exports
+# (512 MiB per entry or streamed item, 8 GiB overall, a million entries).
+# Both bank and document archive imports use these limits; operators can raise them for larger migrations.
+DEFAULT_TRANSFER_IMPORT_MAX_ENTRY_SIZE_MB = 512
+DEFAULT_TRANSFER_IMPORT_MAX_TOTAL_SIZE_MB = 8192
+DEFAULT_TRANSFER_IMPORT_MAX_ENTRIES = 1_000_000
 
 # Observations defaults (consolidated knowledge from facts)
 DEFAULT_ENABLE_OBSERVATIONS = True  # Observations enabled by default
@@ -3937,6 +3946,12 @@ class HindsightConfig:
     file_parser_markitdown_ocr_model: str | None = None
     file_parser_markitdown_ocr_prompt: str = DEFAULT_FILE_PARSER_MARKITDOWN_OCR_PROMPT
     file_parser_markitdown_ocr_default_headers: dict | None = None
+    # Transfer archive import ceilings (static). Defaulted here, not beside the
+    # document transfer flags above, so callers that build HindsightConfig directly
+    # keep working; from_env() still reads each one from its env var.
+    transfer_import_max_entry_size_mb: int = DEFAULT_TRANSFER_IMPORT_MAX_ENTRY_SIZE_MB
+    transfer_import_max_total_size_mb: int = DEFAULT_TRANSFER_IMPORT_MAX_TOTAL_SIZE_MB
+    transfer_import_max_entries: int = DEFAULT_TRANSFER_IMPORT_MAX_ENTRIES
 
     # Multi-LLM chains (static, server-level). Index 0 of each chain is the
     # corresponding unindexed/base LLM config above; these hold the extra indexed
@@ -5409,6 +5424,23 @@ class HindsightConfig:
                 ENV_ENABLE_DOCUMENT_IMPORT_API, str(DEFAULT_ENABLE_DOCUMENT_IMPORT_API)
             ).lower()
             == "true",
+            # A zero ceiling would refuse every archive (even its manifest) at import
+            # time; refuse it at startup instead, where the operator sees the cause.
+            transfer_import_max_entry_size_mb=_parse_positive_int(
+                ENV_TRANSFER_IMPORT_MAX_ENTRY_SIZE_MB,
+                os.getenv(ENV_TRANSFER_IMPORT_MAX_ENTRY_SIZE_MB),
+                DEFAULT_TRANSFER_IMPORT_MAX_ENTRY_SIZE_MB,
+            ),
+            transfer_import_max_total_size_mb=_parse_positive_int(
+                ENV_TRANSFER_IMPORT_MAX_TOTAL_SIZE_MB,
+                os.getenv(ENV_TRANSFER_IMPORT_MAX_TOTAL_SIZE_MB),
+                DEFAULT_TRANSFER_IMPORT_MAX_TOTAL_SIZE_MB,
+            ),
+            transfer_import_max_entries=_parse_positive_int(
+                ENV_TRANSFER_IMPORT_MAX_ENTRIES,
+                os.getenv(ENV_TRANSFER_IMPORT_MAX_ENTRIES),
+                DEFAULT_TRANSFER_IMPORT_MAX_ENTRIES,
+            ),
             # Observations settings (consolidated knowledge from facts)
             enable_observations=os.getenv(ENV_ENABLE_OBSERVATIONS, str(DEFAULT_ENABLE_OBSERVATIONS)).lower() == "true",
             enable_auto_consolidation=os.getenv(

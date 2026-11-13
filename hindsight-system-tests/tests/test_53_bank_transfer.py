@@ -19,12 +19,20 @@ original's endpoints. What the copy owes is nothing: whatever was in flight when
 the export ran belongs to the bank that was exported.
 
 So the assertions here are about separateness as much as fidelity.
+
+A restore that fails has the opposite duty: it must leave nothing. A malformed
+archive used to be found only by the worker, after it had created the target bank
+and written part of it, so the bank id stayed taken by a half-restored copy and
+the retry with a good archive was refused as "already exists".
 """
 
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import uuid
+import zipfile
 from collections.abc import AsyncIterator
 
 import pytest
@@ -224,6 +232,43 @@ async def test_a_deleted_clone_can_be_cloned_again_under_the_same_id(client, llm
 
     operation_id = await client.aclone_bank(source_bank, copy_bank)
     await _await_operation(client, source_bank, operation_id)
+    await settled(copy_bank)
+    texts = sorted(m.text for m in (await client.memory.list_memories(copy_bank, limit=100)).items)
+    assert texts == sorted([CELLO, TOUR])
+
+
+def _invalidate_document(archive: bytes) -> bytes:
+    """Plant an invalid record contract in one exported document."""
+    out = io.BytesIO()
+    changed = False
+    with zipfile.ZipFile(io.BytesIO(archive)) as src, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            data = src.read(info)
+            if not changed and info.filename.startswith("documents/") and info.filename.endswith(".json"):
+                document = json.loads(data)
+                assert document["facts"], "the story must damage a document containing an extracted fact"
+                document["facts"][0]["ttl_seconds"] = -1
+                data = json.dumps(document).encode()
+                changed = True
+            dst.writestr(info, data)
+    assert changed, "the export must contain a document to invalidate"
+    return out.getvalue()
+
+
+async def test_a_bad_archive_is_refused_and_the_intact_bank_can_use_the_same_target(
+    client, llm, source_bank, copy_bank, settled
+):
+    archive = await client.aexport_bank(source_bank, poll_interval=0)
+    with pytest.raises(ApiException) as error:
+        await client.aimport_bank(source_bank, _invalidate_document(archive), target_bank_id=copy_bank)
+    assert error.value.status == 400
+
+    # Read a non-creating endpoint: absence is observable before the valid retry.
+    with pytest.raises(ApiException) as missing:
+        await client.banks.get_bank_config(copy_bank)
+    assert missing.value.status == 404
+
+    await _restore(client, source_bank, archive, copy_bank)
     await settled(copy_bank)
     texts = sorted(m.text for m in (await client.memory.list_memories(copy_bank, limit=100)).items)
     assert texts == sorted([CELLO, TOUR])

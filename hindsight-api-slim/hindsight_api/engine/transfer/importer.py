@@ -20,13 +20,16 @@ import itertools
 import json
 import logging
 import re
+import struct
 import uuid
 import zipfile
+import zlib
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from typing import IO, TYPE_CHECKING, Any, Literal, cast
 
+from ...config import StaticConfigProxy, get_config
 from ...schema_context import get_current_schema
 from ..causal_links import CANONICAL_CAUSAL_LINK_TYPE, LEGACY_CAUSAL_LINK_TYPES
 from ..db.ops_postgresql import pg_search_vector_expr
@@ -51,6 +54,7 @@ from ..schema import fq_table
 from .schema import (
     CARRIED_HISTORY_TABLES,
     HISTORY_TABLES,
+    OPERATIONAL_TABLES,
     SCHEMA_VERSION,
     BankRowsJSONEncoding,
     TransferAttachment,
@@ -74,6 +78,11 @@ logger = logging.getLogger(__name__)
 
 OnConflict = Literal["skip", "replace", "new-id"]
 _VALID_CONFLICT_MODES: tuple[OnConflict, ...] = ("skip", "replace", "new-id")
+
+# Ownership proof written live by MemoryEngine.import_bank_async's on_bank_created
+# in the bank-creation transaction. Archives are untrusted: restored rows must never
+# carry these keys, or a retry of a restored failed import_bank would trust them.
+_SERVER_OWNED_OPERATION_METADATA_KEYS = frozenset({"restored_bank_id", "restored_internal_id"})
 
 #: Texts per embedding call for the import phases that are sized by the *bank* rather
 #: than by a document: mental models arrive as one list covering the whole archive, and
@@ -100,6 +109,9 @@ _OBSERVATION_BATCH_SIZE = 500
 
 #: Characters read at a time from a JSON-array entry (observations, history rows).
 _JSON_READ_CHARS = 1 << 20
+
+#: Bytes per read of an entry accumulated in memory; caps each DEFLATE call before size truncation.
+_ENTRY_READ_BYTES = 64 * 1024
 
 #: Verbatim rows per ``executemany`` when restoring a bank-scoped table.
 _RESTORE_BATCH_SIZE = 500
@@ -190,6 +202,200 @@ class ParsedArchive:
     knowledge_pages: list[TransferKnowledgePage] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class _ArchiveEndRecord:
+    entries: int
+    directory_size: int
+    directory_offset: int
+    record_offset: int
+
+
+@dataclass(frozen=True)
+class _ArchiveDirectory:
+    entries: int
+    size: int
+    start: int
+
+
+_DIRECTORY_CHUNK = 1024**2
+
+
+@dataclass
+class _ArchiveDirectoryReader:
+    """Read central-directory record headers in chunks of at most _DIRECTORY_CHUNK bytes."""
+
+    archive: Archive
+    directory: _ArchiveDirectory
+    chunk_offset: int = -1
+    chunk: bytes = b""
+
+    def read_header(self, position: int) -> bytes:
+        """Assemble a header across bounded chunks without reading outside the directory."""
+        if position + 46 > self.directory.size:
+            raise ValueError("Invalid transfer archive: malformed central directory")
+        header = bytearray()
+        while len(header) < 46:
+            current = position + len(header)
+            offset = current // _DIRECTORY_CHUNK * _DIRECTORY_CHUNK
+            if offset != self.chunk_offset:
+                self.chunk = _read_archive_range(
+                    self.archive, self.directory.start + offset, min(_DIRECTORY_CHUNK, self.directory.size - offset)
+                )
+                self.chunk_offset = offset
+            # Reuse the current chunk; only a header crossing its boundary needs
+            # another read. Variable-length fields can skip entire chunks.
+            relative = current - offset
+            part = self.chunk[relative : relative + 46 - len(header)]
+            if not part:
+                raise ValueError("Invalid transfer archive: malformed central directory")
+            header.extend(part)
+        return bytes(header)
+
+
+def _read_archive_range(archive: Archive, offset: int, size: int) -> bytes:
+    """Read a bounded archive range, resetting seekable uploads for ZipFile."""
+    if isinstance(archive, bytes):
+        return archive[offset : offset + size]
+    try:
+        archive.seek(offset)
+        return archive.read(size)
+    finally:
+        archive.seek(0)
+
+
+def _find_archive_end_record(archive: Archive) -> _ArchiveEndRecord | None:
+    """Find the classic end record using CPython's no-comment fast path and tail search."""
+    if isinstance(archive, bytes):
+        archive_size = len(archive)
+    else:
+        archive.seek(0, io.SEEK_END)
+        archive_size = archive.tell()
+    # Match CPython's _EndRecData window: one byte less let an end record
+    # followed by 65536 bytes pass unseen while ZipFile still found it.
+    tail_offset = max(0, archive_size - 22 - (1 << 16))
+    tail = _read_archive_range(archive, tail_offset, 22 + (1 << 16))
+    if len(tail) >= 22 and tail[-22:-18] == b"PK\x05\x06" and tail[-2:] == b"\x00\x00":
+        start = len(tail) - 22
+    else:
+        start = tail.rfind(b"PK\x05\x06")
+    if start < 0 or len(tail) - start < 22:
+        return None
+    # PKWARE APPNOTE 4.3.16: classic EOCD, total entries at 10, directory size at 12.
+    record = struct.unpack_from("<4s4H2LH", tail, start)
+    return _ArchiveEndRecord(record[4], record[5], record[6], tail_offset + start)
+
+
+def _read_zip64_directory(archive: Archive, end: _ArchiveEndRecord) -> _ArchiveDirectory | None:
+    """Accept only ZIP64 layouts that patched and unpatched CPython read identically."""
+    if end.record_offset < 20:
+        return None
+    data = _read_archive_range(archive, end.record_offset - 20, 20)
+    if data[:4] != b"PK\x06\x07":
+        return None
+    # PKWARE APPNOTE 4.3.14-4.3.15: ZIP64 EOCD locator, little-endian.
+    locator = struct.unpack_from("<4sLQL", data)
+    if locator[1] != 0 or locator[3] > 1:
+        raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+    # Unpatched CPython reads at EOCD-76; patched CPython uses the locator's
+    # offset. Equality makes both read the record checked here. CPython's writer
+    # (used for Hindsight exports) writes these records adjacent to each other.
+    if locator[2] != end.record_offset - 76:
+        raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+    return _read_zip64_end_record(archive, locator[2])
+
+
+def _read_zip64_end_record(archive: Archive, offset: int) -> _ArchiveDirectory:
+    """Validate the shared fixed ZIP64 record, including patched CPython's invariants."""
+    data = _read_archive_range(archive, offset, 56)
+    if len(data) != 56 or data[:4] != b"PK\x06\x06":
+        raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+    # PKWARE APPNOTE 4.3.14-4.3.15: ZIP64 EOCD, little-endian.
+    record = struct.unpack_from("<4sQ2H2L4Q", data)
+    # At this adjacent position patched CPython requires no extensible data;
+    # unpatched CPython ignores the size field, so enforce the stricter reading.
+    if record[1] != 44:
+        raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+    if record[9] + record[8] != offset:
+        raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+    return _ArchiveDirectory(entries=record[7], size=record[8], start=offset - record[8])
+
+
+def _classic_archive_directory(end: _ArchiveEndRecord) -> _ArchiveDirectory:
+    """Locate the directory from a classic end record; ZIP64 sentinels without ZIP64 records fail closed."""
+    if end.entries == 0xFFFF or end.directory_size == 0xFFFFFFFF or end.directory_offset == 0xFFFFFFFF:
+        raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+    # CPython's concat arithmetic cancels the declared offset, including for
+    # archives with prepended data: start_dir is location minus size_cd.
+    return _ArchiveDirectory(end.entries, end.directory_size, end.record_offset - end.directory_size)
+
+
+def _walk_archive_directory(archive: Archive, directory: _ArchiveDirectory, config: StaticConfigProxy) -> None:
+    """Bound the actual records without decoding names, extra fields or comments."""
+    # F2: understated counts passed the old barrier; CPython builds one ZipInfo
+    # per record inside size_cd and ignores the declared counts.
+    reader = _ArchiveDirectoryReader(archive, directory)
+    position = 0
+    count = 0
+    while position < directory.size:
+        header = reader.read_header(position)
+        if header[:4] != b"PK\x01\x02":
+            raise ValueError("Invalid transfer archive: malformed central directory")
+        name_size, extra_size, comment_size = struct.unpack_from("<3H", header, 28)
+        position += 46 + name_size + extra_size + comment_size
+        count += 1
+        if count > config.transfer_import_max_entries:
+            raise ValueError("Invalid transfer archive: entry count exceeds the transfer import limit")
+
+
+def _check_archive_directory(archive: Archive, config: StaticConfigProxy) -> None:
+    """Bound directory allocation before ZipFile reads it whole and creates ZipInfo objects."""
+    end = _find_archive_end_record(archive)
+    if end is None:
+        return  # Preserve ZipFile's existing BadZipFile diagnosis for missing end records.
+    directory = _read_zip64_directory(archive, end)
+    if directory is None:
+        directory = _classic_archive_directory(end)
+    if directory.entries > config.transfer_import_max_entries:
+        raise ValueError("Invalid transfer archive: entry count exceeds the transfer import limit")
+    # ZipFile reads the directory whole, so apply the same cap as a non-streamed
+    # entry. Each record needs at least 46 bytes, also bounding ZipInfo allocations.
+    if directory.size > config.transfer_import_max_entry_size_mb * 1024**2:
+        raise ValueError("Invalid transfer archive: central directory exceeds the entry size limit")
+    if directory.entries * 46 > directory.size:
+        raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+    if directory.start < 0:
+        raise ValueError("Invalid transfer archive: malformed end-of-central-directory record")
+    _walk_archive_directory(archive, directory, config)
+
+
+def _check_archive_entry(info: zipfile.ZipInfo, streamed: set[str], config: StaticConfigProxy) -> None:
+    """Apply the existing per-entry checks after directory parsing."""
+    if info.flag_bits & 0x1:
+        raise ValueError(f"Invalid transfer archive: encrypted entry {info.filename!r}")
+    # Export writes deflated JSON and stored blobs; no other codecs are part
+    # of the archive contract, even when the local zipfile supports them.
+    if info.compress_type not in {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}:
+        raise ValueError(f"Invalid transfer archive: unsupported compression for {info.filename!r}")
+    if info.filename not in streamed and info.file_size > config.transfer_import_max_entry_size_mb * 1024**2:
+        raise ValueError(f"Invalid transfer archive: {info.filename!r} exceeds the entry size limit")
+
+
+def _check_archive_entries(zf: zipfile.ZipFile, config: StaticConfigProxy) -> None:
+    """Keep post-parse size and codec checks independent of the end-record barrier."""
+    entries = zf.infolist()
+    if len(entries) > config.transfer_import_max_entries:
+        raise ValueError("Invalid transfer archive: entry count exceeds the transfer import limit")
+    if sum(info.file_size for info in entries) > config.transfer_import_max_total_size_mb * 1024**2:
+        raise ValueError("Invalid transfer archive: total size exceeds the transfer import limit")
+    streamed = {
+        "observations.json",
+        *(f"data/{table}.json" for table in (*OPERATIONAL_TABLES, "invalidated_memory_units")),
+        *(f"history/{table}.json" for table in HISTORY_TABLES),
+    }
+    for info in entries:
+        _check_archive_entry(info, streamed, config)
+
+
 def _open_archive(archive: Archive, *, produced_by: str) -> zipfile.ZipFile:
     """Open a transfer archive, rejecting non-archives as caller errors.
 
@@ -203,10 +409,22 @@ def _open_archive(archive: Archive, *, produced_by: str) -> zipfile.ZipFile:
             entry by entry as the import needs it, never loaded whole.
         produced_by: How the caller obtains a valid archive, named in the error.
     """
+    config = get_config()
+    _check_archive_directory(archive, config)
     try:
         zf = zipfile.ZipFile(io.BytesIO(archive) if isinstance(archive, bytes) else archive, "r")
     except zipfile.BadZipFile as e:
         raise ValueError(f"Invalid transfer archive: the uploaded file is not a readable .zip ({e})") from e
+    # Inspect the central directory before reading even the manifest. Declared
+    # sizes bound returned lengths and directory totals, not decompressor output:
+    # whole reads pass a max_length near 2**30 and truncate to file_size afterwards.
+    # _read_entry replaces those whole reads with chunks that bound each DEFLATE
+    # call. Only explicitly streamed row sections are exempt from the entry cap.
+    try:
+        _check_archive_entries(zf, config)
+    except BaseException:
+        zf.close()
+        raise
     if "manifest.json" not in zf.NameToInfo:
         zf.close()
         raise ValueError(
@@ -217,8 +435,22 @@ def _open_archive(archive: Archive, *, produced_by: str) -> zipfile.ZipFile:
     return zf
 
 
+def _read_entry(zf: zipfile.ZipFile, name: str) -> bytes:
+    """Accumulate an entry with bounded decompression calls and an actual-byte limit."""
+    limit = get_config().transfer_import_max_entry_size_mb * 1024**2
+    chunks: list[bytes] = []
+    size = 0
+    with zf.open(name) as entry:
+        while chunk := entry.read(_ENTRY_READ_BYTES):
+            size += len(chunk)
+            if size > limit:
+                raise ValueError(f"Invalid transfer archive: {name!r} exceeds the entry size limit")
+            chunks.append(chunk)
+    return b"".join(chunks)
+
+
 def _read_manifest(zf: zipfile.ZipFile) -> TransferManifest:
-    manifest = TransferManifest.model_validate_json(zf.read("manifest.json"))
+    manifest = TransferManifest.model_validate_json(_read_entry(zf, "manifest.json"))
     if manifest.schema_version != SCHEMA_VERSION:
         raise ValueError(
             f"Unsupported transfer archive schema version {manifest.schema_version} "
@@ -227,10 +459,52 @@ def _read_manifest(zf: zipfile.ZipFile) -> TransferManifest:
     return manifest
 
 
-def _iter_documents(zf: zipfile.ZipFile) -> Iterator[TransferDocument]:
+def _iter_documents(zf: zipfile.ZipFile, *, source_bank_id: str | None = None) -> Iterator[TransferDocument]:
     """The archive's documents in entry order, one parsed at a time."""
     for name in sorted(n for n in zf.NameToInfo if n.startswith("documents/") and n.endswith(".json")):
-        yield TransferDocument.model_validate_json(zf.read(name))
+        payload = _read_entry(zf, name)
+        if source_bank_id is not None:
+            _check_archive_rows(name, [json.loads(payload)], source_bank_id=source_bank_id)
+        yield TransferDocument.model_validate_json(payload)
+
+
+def _utf8_exceeds(text: str, start: int, end: int, limit: int) -> bool:
+    """Whether ``text[start:end]`` encodes to more than ``limit`` UTF-8 bytes.
+
+    A character takes one to four bytes, so the length alone settles it outside
+    ``limit / 4 < n <= limit``; only that band pays for an encode.
+    """
+    n = end - start
+    if n > limit:
+        return True
+    if 4 * n <= limit:
+        return False
+    return len(text[start:end].encode("utf-8")) > limit
+
+
+def _next_json_array_state(name: str, state: str, char: str) -> str | None:
+    """The scan state after ``char`` when it is structural for a top-level JSON array,
+    or None when it starts a value.
+
+    Raises the archive errors for a missing ``[``, data after the array, a missing comma, or a stray separator.
+    """
+    if state == "start":
+        if char != "[":
+            raise ValueError(f"Invalid transfer archive: {name} is not a JSON array")
+        return "first"
+    if state == "finished":
+        raise ValueError(f"Invalid transfer archive: {name} has data after the JSON array")
+    if char == "]" and state in {"first", "separator"}:
+        # Do not return at ']': read through EOF to reject trailing data
+        # and let ZipExtFile verify the CRC, including trailing whitespace.
+        return "finished"
+    if state == "separator":
+        if char != ",":
+            raise ValueError(f"Invalid transfer archive: {name} is missing a comma")
+        return "value"
+    if char in {",", "]"}:
+        raise ValueError(f"Invalid transfer archive: {name} has an unexpected separator")
+    return None
 
 
 def _iter_json_array(zf: zipfile.ZipFile, name: str) -> Iterator[Any]:
@@ -241,42 +515,65 @@ def _iter_json_array(zf: zipfile.ZipFile, name: str) -> Iterator[Any]:
     """
     if name not in zf.NameToInfo:
         return
+    item_limit = get_config().transfer_import_max_entry_size_mb * 1024**2
+    item_size_error = f"Invalid transfer archive: {name} has an item larger than the entry size limit"
     decoder = json.JSONDecoder()
-    with zf.open(name) as raw, io.TextIOWrapper(raw, encoding="utf-8") as text:
-        buf, pos, opened, eof = "", 0, False, False
+    # The limit is in archive bytes. Default newline translation turns each CRLF
+    # into one character, measuring CRLF whitespace at up to half its stored size.
+    # newline="" keeps the stored characters so the byte count stays accurate.
+    with zf.open(name) as raw, io.TextIOWrapper(raw, encoding="utf-8", newline="") as text:
+        buf, pos, eof = "", 0, False
+        state = "start"
         while True:
-            while pos < len(buf) and (buf[pos].isspace() or (opened and buf[pos] == ",")):
+            while pos < len(buf) and buf[pos] in " \t\r\n":
                 pos += 1
-            if pos < len(buf) and not opened:
-                if buf[pos] != "[":
-                    raise ValueError(f"Invalid transfer archive: {name} is not a JSON array")
-                opened = True
-                pos += 1
-                continue
-            if pos < len(buf) and buf[pos] == "]":
-                return
             if pos < len(buf):
+                next_state = _next_json_array_state(name, state, buf[pos])
+                if next_state is not None:
+                    state, pos = next_state, pos + 1
+                    continue
                 try:
                     item, end = decoder.raw_decode(buf, pos)
                 except json.JSONDecodeError:
                     item, end = None, -1
-                # An item ending exactly at the buffer's end may be a number cut short.
-                if end != -1 and (end < len(buf) or eof):
+                # A number can end at a read boundary, or decode only its integer
+                # prefix before the rest of an exponent arrives. Wait for its delimiter.
+                if end != -1 and (eof or (end < len(buf) and buf[end] in " \t\r\n,]")):
+                    # The limit is in bytes but the buffer holds characters. The read
+                    # bound below caps the character count, and one UTF-8 character
+                    # takes up to four bytes, so measure the encoded item. An item of at
+                    # most a quarter of the limit in characters cannot exceed it, so the
+                    # common small row is never re-encoded.
+                    if _utf8_exceeds(buf, pos, end, item_limit):
+                        raise ValueError(item_size_error)
                     yield item
-                    pos = end
+                    state, pos = "separator", end
                     continue
             if eof:
+                if state == "finished":
+                    return
                 raise ValueError(f"Invalid transfer archive: {name} is not a complete JSON array")
-            # Read at least as much as is buffered, so an item larger than one read
-            # costs a few re-parses rather than one per read.
-            chunk = text.read(max(_JSON_READ_CHARS, len(buf) - pos))
+            undecoded_chars = len(buf) - pos
+            # Cap each undecoded item in UTF-8 bytes rather than the section, which
+            # can contain arbitrarily many small rows. The character count used to
+            # stand in for the byte count, which let multi-byte text through at up
+            # to four times the limit. Reads double the buffer, so re-encoding the
+            # pending item on each pass stays linear in its size.
+            if _utf8_exceeds(buf, pos, len(buf), item_limit):
+                raise ValueError(item_size_error)
+            # One extra character distinguishes an exactly-at-limit item from
+            # an oversized one without letting an incomplete item double forever.
+            chunk = text.read(min(max(_JSON_READ_CHARS, undecoded_chars), item_limit + 1 - undecoded_chars))
             eof = not chunk
             buf, pos = buf[pos:] + chunk, 0
 
 
 def _read_json(zf: zipfile.ZipFile, name: str) -> list[Any]:
     """A small JSON array entry read whole (mental models, the knowledge tree), or [] when absent."""
-    return json.loads(zf.read(name)) if name in zf.NameToInfo else []
+    rows = json.loads(_read_entry(zf, name)) if name in zf.NameToInfo else []
+    if not isinstance(rows, list):
+        raise ValueError(f"Invalid transfer archive: {name} is not a JSON array")
+    return rows
 
 
 def parse_archive(archive: Archive) -> ParsedArchive:
@@ -530,14 +827,6 @@ def _document_batches(documents: Iterable[TransferDocument]) -> Iterator[list[Tr
         yield batch
 
 
-# Bank-level config/state tables restored verbatim from a whole-bank archive.
-# Order matters for foreign keys: banks (parent) is restored before any child.
-_BANK_CHILD_TABLES = ("mental_models", "directives", "webhooks")
-# Child-history carried verbatim; restored after its parent (mental_models) so the
-# foreign key resolves. Surrogate ids were dropped on export (the target reassigns
-# them), so these restore via fresh IDENTITY values.
-
-
 @dataclass
 class BankImportResult:
     """Outcome of importing a whole-bank archive."""
@@ -581,44 +870,155 @@ class ParsedBankArchive:
     # Attachment rows paired with the archive entries holding their bytes.
     attachments: list[TransferAttachment] = field(default_factory=list)
 
-    @property
-    def scope(self) -> TransferScope:
-        """What the producer put in the archive.
 
-        A pre-scope archive carried data and bank config, and declared its history
-        through ``includes_history`` — so that is what it reads back as.
-        """
-        declared = self.manifest.scope
-        if declared is None:
-            return TransferScope(data=True, bank_config=True, history=self.manifest.includes_history)
-        return TransferScope(data=declared.data, bank_config=declared.bank_config, history=declared.history)
+def _archive_scope(manifest: TransferManifest) -> TransferScope:
+    """What the producer put in the archive.
+
+    A pre-scope archive carried data and bank config, and declared its history
+    through ``includes_history`` — so that is what it reads back as.
+    """
+    declared = manifest.scope
+    if declared is None:
+        return TransferScope(data=True, bank_config=True, history=manifest.includes_history)
+    return TransferScope(data=declared.data, bank_config=declared.bank_config, history=declared.history)
 
 
-def parse_bank_archive(zf: zipfile.ZipFile) -> ParsedBankArchive:
-    """Parse the bank-level sections of a whole-bank archive (``archive_type='bank'``)."""
+def _restore_scope(manifest: TransferManifest, scope: TransferScope | None) -> TransferScope:
+    """One intersection for preflight, section parsing and restore."""
+    archive_scope = _archive_scope(manifest)
+    requested = scope or archive_scope
+    return TransferScope(
+        data=requested.data and archive_scope.data,
+        bank_config=requested.bank_config and archive_scope.bank_config,
+        history=requested.history and archive_scope.history,
+    )
+
+
+def parse_bank_archive(zf: zipfile.ZipFile, scope: TransferScope | None = None) -> ParsedBankArchive:
+    """Parse only the bank-level sections the requested restore will consume."""
     manifest = _read_manifest(zf)
     if manifest.archive_type != "bank":
         raise ValueError(
             f"Not a whole-bank archive (archive_type={manifest.archive_type!r}); use import_documents instead"
         )
-    bank_rows = {
-        table: _read_json(zf, f"{table}.json") for table in ("banks", *_BANK_CHILD_TABLES, *CARRIED_HISTORY_TABLES)
-    }
-    # Typed tree — absent on pre-tree archives, which restore with no pages.
-    knowledge_pages = [TransferKnowledgePage.model_validate(p) for p in _read_json(zf, "knowledge_pages.json")]
-    attachments = [TransferAttachment.model_validate(a) for a in _read_json(zf, "attachments.json")]
+    restoring = _restore_scope(manifest, scope)
+    tables = []
+    if restoring.bank_config:
+        tables.extend(("banks", "directives", "webhooks"))
+    if restoring.data:
+        tables.extend(("mental_models", *CARRIED_HISTORY_TABLES))
+    bank_rows = {table: _read_json(zf, f"{table}.json") for table in tables}
+    # Validate bank ownership before typed models discard extra fields such as bank_id.
+    # Verbatim table columns are intentionally dynamic across schema versions.
+    knowledge_rows = _read_json(zf, "knowledge_pages.json") if restoring.data else []
+    _check_archive_rows("knowledge_pages.json", knowledge_rows, source_bank_id=manifest.source_bank_id)
+    knowledge_pages = [TransferKnowledgePage.model_validate(p) for p in knowledge_rows]
+    attachments = (
+        [TransferAttachment.model_validate(a) for a in _read_json(zf, "attachments.json")] if restoring.data else []
+    )
+    # Both import barriers read and hash each row's entry in full, so one blob named by
+    # many rows costs as much as that many blobs, though the archive holds it once.
+    # Bound the bytes the rows reference, counting a shared entry once per row. Export
+    # writes one entry per row (blobs/NNNNNN.bin), so a genuine archive's sum equals its
+    # blob bytes, which the total-size check in _open_archive already bounds.
+    referenced_limit = get_config().transfer_import_max_total_size_mb * 1024**2
+    referenced = 0
     for attachment in attachments:
-        if attachment.entry not in zf.NameToInfo:
+        info = zf.NameToInfo.get(attachment.entry)
+        if info is None:
             raise ValueError(
                 f"Invalid transfer archive: attachment {attachment.short_id} names entry "
                 f"{attachment.entry!r}, which the archive does not contain"
             )
+        referenced += info.file_size
+        if referenced > referenced_limit:
+            raise ValueError("Invalid transfer archive: attachments reference more bytes than the total size limit")
     return ParsedBankArchive(
         manifest=manifest,
         bank_rows=bank_rows,
         knowledge_pages=knowledge_pages,
         attachments=attachments,
     )
+
+
+def _check_archive_rows(name: str, rows: Iterable[Any], *, source_bank_id: str | None = None) -> None:
+    """Check dynamic table row shape and ownership before any restore writes."""
+    for position, row in enumerate(rows):
+        if not isinstance(row, dict):
+            raise ValueError(f"Invalid transfer archive: {name} row {position} is not a JSON object")
+        if source_bank_id is not None and "bank_id" in row and row["bank_id"] != source_bank_id:
+            raise ValueError(f"Invalid transfer archive: {name} row {position} bank_id differs from source_bank_id")
+
+
+def _validated_attachment_chunks(zf: zipfile.ZipFile, attachment: TransferAttachment) -> Iterator[bytes]:
+    """Verify size and content address as well as ZIP CRC, at both import barriers."""
+    if zf.getinfo(attachment.entry).file_size > get_config().transfer_import_max_entry_size_mb * 1024**2:
+        raise ValueError(f"Invalid transfer archive: attachment {attachment.short_id} exceeds the entry size limit")
+    digest = hashlib.sha256()
+    size = 0
+    with zf.open(attachment.entry) as blob:
+        while chunk := blob.read(_JSON_READ_CHARS):
+            digest.update(chunk)
+            size += len(chunk)
+            yield chunk
+    if size != attachment.byte_size or digest.hexdigest() != attachment.attachment_hash:
+        raise ValueError(f"Invalid transfer archive: attachment {attachment.short_id} hash or byte_size mismatch")
+
+
+def validate_bank_archive(archive: Archive, scope: TransferScope | None = None) -> None:
+    """Validate just the sections restore will read, before it can create a bank.
+
+    Streaming sections stay streamed during this extra pass. Database constraints
+    still require the restore's independent rollback barrier.
+    """
+    # One helper per restore section keeps each check next to the section it guards;
+    # the single function they replaced grew past the complexity bound Codacy holds.
+    with _open_archive(archive, produced_by="the bank export endpoint") as zf:
+        try:
+            parsed = parse_bank_archive(zf, scope)
+            restoring = _restore_scope(parsed.manifest, scope)
+            source = parsed.manifest.source_bank_id
+            for table, rows in parsed.bank_rows.items():
+                _check_archive_rows(f"{table}.json", rows, source_bank_id=source)
+            if restoring.bank_config:
+                _validate_bank_row(parsed, source)
+            if restoring.data:
+                _validate_data_sections(zf, parsed, source)
+                _validate_attachments(zf, parsed.attachments, source)
+            if restoring.history:
+                for table in HISTORY_TABLES:
+                    name = f"history/{table}.json"
+                    _check_archive_rows(name, _iter_json_array(zf, name), source_bank_id=source)
+        except (zipfile.BadZipFile, zlib.error, EOFError, NotImplementedError) as error:
+            raise ValueError(f"Invalid transfer archive: an entry is corrupt ({error})") from error
+
+
+def _validate_bank_row(parsed: ParsedBankArchive, source: str) -> None:
+    banks = parsed.bank_rows.get("banks", [])
+    if len(banks) != 1 or banks[0].get("bank_id") != source:
+        raise ValueError("Invalid transfer archive: banks.json must contain exactly the source bank row")
+
+
+def _validate_data_sections(zf: zipfile.ZipFile, parsed: ParsedBankArchive, source: str) -> None:
+    for row in parsed.bank_rows.get("mental_models", []):
+        if "id" not in row:
+            raise ValueError("Invalid transfer archive: mental_models.json row has no id")
+    for _document in _iter_documents(zf, source_bank_id=source):
+        pass
+    for observation in _iter_json_array(zf, "observations.json"):
+        _check_archive_rows("observations.json", [observation], source_bank_id=source)
+        TransferObservation.model_validate(observation)
+    for table in (*OPERATIONAL_TABLES, "invalidated_memory_units"):
+        name = f"data/{table}.json"
+        _check_archive_rows(name, _iter_json_array(zf, name), source_bank_id=source)
+
+
+def _validate_attachments(zf: zipfile.ZipFile, attachments: Iterable[TransferAttachment], source: str) -> None:
+    for attachment in attachments:
+        if attachment.bank_id != source:
+            raise ValueError("Invalid transfer archive: attachments.json bank_id differs from source_bank_id")
+        for _chunk in _validated_attachment_chunks(zf, attachment):
+            pass
 
 
 def _resolve_bank_rows_json_encoding(manifest: TransferManifest) -> BankRowsJSONEncoding:
@@ -658,8 +1058,9 @@ async def _restore_rows(
     fq: Callable[[str], str] = fq_table,
 ) -> int:
     """Insert verbatim rows into a bank-scoped table, coercing JSON-encoded values
-    back to the column's type (timestamps, uuids, jsonb). ``ON CONFLICT DO NOTHING``
-    keeps an import idempotent and safe to re-run against a partially-filled target.
+    back to the column's type (timestamps, uuids, jsonb). Child rows use
+    ``ON CONFLICT DO NOTHING``; the bank row must be fresh so the ownership
+    callback cannot claim a row created by a concurrent call.
 
     ``rows`` may be a stream: they are written ``_RESTORE_BATCH_SIZE`` at a time, one
     ``executemany`` per run of rows sharing a column set.
@@ -719,7 +1120,10 @@ async def _restore_rows(
             values.append(value)
         # Oracle folds unquoted DDL identifiers to upper case; quoted lower case would not match.
         col_list = ", ".join(f'"{c.upper()}"' if oracle else f'"{c}"' for c in cols)
-        sql = f"INSERT INTO {fq(table)} ({col_list}) VALUES ({', '.join(placeholders)}) ON CONFLICT DO NOTHING"
+        # A concurrent bank creator must fail this restore before on_bank_created;
+        # silently adopting its row would let rollback delete somebody else's bank.
+        conflict = "" if table == "banks" else " ON CONFLICT DO NOTHING"
+        sql = f"INSERT INTO {fq(table)} ({col_list}) VALUES ({', '.join(placeholders)}){conflict}"  # nosec B608 # values bound as $n; identifiers from the internal table list and live catalog columns; category D, entry 2026-11-12, expires 2027-03-12
         if pending and (sql != pending_sql or len(pending) >= _RESTORE_BATCH_SIZE):
             await conn.executemany(cast(str, pending_sql), pending)
             pending = []
@@ -945,12 +1349,12 @@ def _drop_ids(rows: list[dict], column: str = "id") -> None:
         row.pop(column, None)
 
 
-def _retargeted_history(rows: Iterable[dict], bank_id: str) -> Iterator[dict]:
-    """History rows moved to ``bank_id``, their schema-wide ids dropped (see :func:`_drop_ids`)."""
+def _retargeted_history(rows: Iterable[dict], bank_id: str, *, drop_ids: bool = True) -> Iterator[dict]:
+    """Pin history to the destination; drop schema-wide ids only when retargeting."""
     for row in rows:
-        if "bank_id" in row:
-            row["bank_id"] = bank_id
-        row.pop("id", None)
+        row["bank_id"] = bank_id
+        if drop_ids:
+            row.pop("id", None)
         yield row
 
 
@@ -961,8 +1365,7 @@ def _iter_data_rows(zf: zipfile.ZipFile, table: str, bank_id: str) -> Iterator[d
     so they are never read whole (#5737). Absent on pre-scope archives: empty.
     """
     for row in _iter_json_array(zf, f"data/{table}.json"):
-        if "bank_id" in row:
-            row["bank_id"] = bank_id
+        row["bank_id"] = bank_id
         yield row
 
 
@@ -997,6 +1400,32 @@ def _finished_operations(rows: Iterable[dict]) -> Iterator[dict]:
     return (row for row in rows if row.get("status") not in _LIVE_OPERATION_STATUSES)
 
 
+def _without_server_owned_metadata(
+    rows: Iterable[dict], *, bank_rows_json_encoding: BankRowsJSONEncoding
+) -> Iterator[dict]:
+    """Strip live ownership proof from untrusted archive operation metadata.
+
+    A retry must never treat a restored failed import as the creator of a bank.
+    """
+    for row in rows:
+        metadata = row.get("result_metadata")
+        if metadata is None:
+            yield row
+            continue
+        if bank_rows_json_encoding == "serialized" and isinstance(metadata, str):
+            try:
+                metadata = json.loads(metadata)
+            except ValueError:
+                yield row
+                continue
+        row["result_metadata"] = (
+            {key: value for key, value in metadata.items() if key not in _SERVER_OWNED_OPERATION_METADATA_KEYS}
+            if isinstance(metadata, dict)
+            else {}
+        )
+        yield row
+
+
 async def _restore_attachments(
     conn: Any,
     bank_id: str,
@@ -1027,7 +1456,8 @@ async def _restore_attachments(
         document_id = document_id_map.get(attachment.document_id, attachment.document_id)
         key = attachment_storage_key(bank_id, document_id, attachment.attachment_hash)
         await file_storage.store(
-            file_data=zf.read(attachment.entry),
+            # Consume and verify the whole stream before the first external write.
+            file_data=b"".join(_validated_attachment_chunks(zf, attachment)),
             key=key,
             metadata={"content_type": attachment.media_type, "bank_id": bank_id},
         )
@@ -1074,6 +1504,7 @@ async def _restore_operational_rows(
     across the schema, and the source's rows may still be here (see :func:`_drop_ids`).
     """
     operations = _finished_operations(_iter_data_rows(zf, "async_operations", bank_id))
+    operations = _without_server_owned_metadata(operations, bank_rows_json_encoding=bank_rows_json_encoding)
     if drop_operation_ids:
         operations = _without(operations, "operation_id")
     restored_ops = await _restore_rows(
@@ -1248,28 +1679,19 @@ async def _restore_bank(
     on_bank_created: Callable[[Any], Awaitable[None]] | None,
 ) -> BankImportResult:
     """:func:`import_bank`, reading the archive from the open ``zf``."""
-    parsed = parse_bank_archive(zf)
-    archive_scope = parsed.scope
-    requested = scope or archive_scope
-    # The intersection: what was asked for, of what is actually in the archive.
-    restoring = TransferScope(
-        data=requested.data and archive_scope.data,
-        bank_config=requested.bank_config and archive_scope.bank_config,
-        history=requested.history and archive_scope.history,
-    )
+    parsed = parse_bank_archive(zf, scope)
+    restoring = _restore_scope(parsed.manifest, scope)
     bank_rows_json_encoding = _resolve_bank_rows_json_encoding(parsed.manifest)
     source_bank_id = parsed.manifest.source_bank_id
     bank_id = target_bank_id or source_bank_id
 
-    # Remapping to a different id: rewrite the carried bank_id on every row so FKs
-    # and PKs line up with the (also-remapped) documents/facts.
+    # Independent of preflight: every verbatim write belongs to the destination,
+    # even when it has the source's name. Never trust a carried bank_id here.
+    # Streamed rows receive the same treatment below.
+    for rows in parsed.bank_rows.values():
+        for row in rows:
+            row["bank_id"] = bank_id
     if bank_id != source_bank_id:
-        # History and data rows get the same treatment as they stream in (_retargeted_history,
-        # _iter_data_rows).
-        for rows in parsed.bank_rows.values():
-            for row in rows:
-                if "bank_id" in row:
-                    row["bank_id"] = bank_id
         # Ids that are unique across the whole schema rather than within the bank.
         # Their source rows are still present on a same-instance transfer, where
         # ON CONFLICT DO NOTHING would silently skip the copy (see _drop_ids).
@@ -1326,7 +1748,8 @@ async def _restore_bank(
                     bank_rows_json_encoding=bank_rows_json_encoding,
                 )
             else:
-                await bank_utils.create_bank_row_on_conn(conn, bank_id, ops=ops)
+                if not await bank_utils.create_bank_row_on_conn(conn, bank_id, ops=ops):
+                    raise ValueError(f"Target bank '{bank_id}' already exists; a concurrent call created it")
             if on_bank_created is not None:
                 await on_bank_created(conn)
             # The restored banks row bypasses the fresh-INSERT gate that normally
@@ -1471,8 +1894,7 @@ async def _restore_bank(
         if restoring.history:
             for table in HISTORY_TABLES:
                 rows: Iterable[dict] = _iter_json_array(zf, f"history/{table}.json")
-                if bank_id != source_bank_id:
-                    rows = _retargeted_history(rows, bank_id)
+                rows = _retargeted_history(rows, bank_id, drop_ids=bank_id != source_bank_id)
                 result.history_rows_imported += await _restore_rows(
                     conn,
                     table,

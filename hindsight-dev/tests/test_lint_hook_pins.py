@@ -10,7 +10,6 @@ Incident dates: 2026-11-08 and 2026-11-12.
   .venv or PATH ruff rather than the repository root lockfile pin (0.14.9).
 """
 
-import ast
 import json
 import os
 import re
@@ -26,16 +25,17 @@ LINT_SH = SOURCE_ROOT / "scripts" / "hooks" / "lint.sh"
 LOCKED_PRETTIER = "3.7.4"
 
 
-def _require(tool: str) -> str:
-    """Absolute path of a tool the tests start themselves, resolved before any stub directory joins PATH."""
-    path = shutil.which(tool)
-    if path is None:
+def _require_on_path(tool: str) -> None:
+    """Fail at collection when a tool the tests start by name is missing from PATH."""
+    if shutil.which(tool) is None:
         raise RuntimeError(f"{tool} must be on PATH to run these tests")
-    return path
 
 
-GIT = _require("git")
-BASH = _require("bash")
+# The tests start git and bash by name with literal argv lists, so the Opengrep subprocess audit rule sees a static
+# command. They used to run absolute paths resolved here before any stub directory joined PATH; _lint_env stubs only
+# uv, npx, npm, ruff and prettier, so a PATH lookup of git or bash still reaches the real tools.
+_require_on_path("git")
+_require_on_path("bash")
 
 ALLOWED_RUFF_PREFIXES = (
     "uv run --frozen ruff check",
@@ -46,11 +46,6 @@ ALLOWED_RUFF_PREFIXES = (
 )
 
 ALLOWED_PRETTIER_PREFIXES = ("$PRETTIER --write",)
-
-# The only attributes this module may use on the modules that start processes. .codacy.yml excludes this file from
-# Bandit (B404 import, B603 call: the tests must run git and lint.sh), so
-# test_this_module_starts_processes_only_with_argv_lists keeps the claim that exclusion rests on.
-ALLOWED_PROCESS_ATTRS = {"subprocess": {"run", "CompletedProcess"}, "os": {"environ", "devnull", "pathsep"}}
 
 
 def _recorder(version: str, python: str = sys.executable, failing_subcommand: str = "") -> str:
@@ -115,10 +110,22 @@ def _lint_env(tmp_path: Path) -> dict[str, str]:
 def _make_repo(repo: Path, env: dict[str, str]) -> Path:
     """A git repository with one empty commit (lint.sh diffs against HEAD) and a copy of lint.sh."""
     repo.mkdir()
-    subprocess.run([GIT, "init", "-q", str(repo)], check=True, env=env)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, env=env)
     subprocess.run(
-        [GIT, "-C", str(repo), "-c", "user.name=Test", "-c", "user.email=test@example.com"]
-        + ["commit", "-q", "--allow-empty", "-m", "init"],
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
         check=True,
         env=env,
     )
@@ -141,7 +148,7 @@ def _install_prettier(repo: Path, version: str) -> Path:
 
 def _run_lint(repo: Path, env: dict[str, str], timeout: int) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [BASH, str(repo / "scripts" / "hooks" / "lint.sh")],
+        ["bash", "scripts/hooks/lint.sh"],
         cwd=repo,
         env=env,
         capture_output=True,
@@ -177,18 +184,18 @@ def test_recorder_stub_runs_under_an_interpreter_path_with_a_space(tmp_path: Pat
     env = {**os.environ, "DEV_SCRIPT_CALLS": str(tmp_path / "calls.jsonl")}
 
     version = subprocess.run(
-        [str(stub), "--version"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10, check=False
+        ["./tool", "--version"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10, check=False
     )
     spaced = subprocess.run(
-        [str(stub), "a b", "", "$HOME"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10, check=False
+        ["./tool", "a b", "", "$HOME"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10, check=False
     )
 
     assert (version.returncode, version.stdout) == (0, "9.9.9\n"), version
     assert (spaced.returncode, spaced.stdout) == (0, ""), spaced
     cwd = str(tmp_path.resolve())
     assert _read_calls(env) == [
-        RecordedCall(command="tool", path=str(stub), args=["--version"], cwd=cwd),
-        RecordedCall(command="tool", path=str(stub), args=["a b", "", "$HOME"], cwd=cwd),
+        RecordedCall(command="tool", path=str(Path(cwd, "tool")), args=["--version"], cwd=cwd),
+        RecordedCall(command="tool", path=str(Path(cwd, "tool")), args=["a b", "", "$HOME"], cwd=cwd),
     ]
 
 
@@ -352,46 +359,3 @@ def test_lint_sh_runs_pinned_tools(tmp_path: Path) -> None:
     assert len(int_ruff_calls) == 2, f"Expected 2 integration ruff calls, got {len(int_ruff_calls)}: {int_ruff_calls}"
     for call in int_ruff_calls:
         assert call.args[call.args.index("--project") + 1] == str(repo.resolve()), call.args
-
-
-def _is_argv_list(node: ast.expr) -> bool:
-    """A list literal, or list literals joined with +."""
-    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
-        return _is_argv_list(node.left) and _is_argv_list(node.right)
-    return isinstance(node, ast.List)
-
-
-def test_this_module_starts_processes_only_with_argv_lists() -> None:
-    """Compensating check for the Bandit exclusion of this file in .codacy.yml.
-
-    Processes start only through a direct subprocess.run call with an argv list and no shell keyword; any other
-    attribute of subprocess or os, an import that renames them, or subprocess.run used without being called fails.
-    """
-    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
-    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
-    problems: list[str] = []
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module in ALLOWED_PROCESS_ATTRS:
-            problems.append(f"line {node.lineno}: from {node.module} import")
-        elif isinstance(node, ast.Import):
-            problems += [
-                f"line {node.lineno}: import {alias.name} as {alias.asname}"
-                for alias in node.names
-                if alias.name in ALLOWED_PROCESS_ATTRS and alias.asname
-            ]
-        elif (
-            isinstance(node, ast.Attribute)
-            and isinstance(node.value, ast.Name)
-            and node.value.id in ALLOWED_PROCESS_ATTRS
-        ):
-            name = f"{node.value.id}.{node.attr}"
-            if node.attr not in ALLOWED_PROCESS_ATTRS[node.value.id]:
-                problems.append(f"line {node.lineno}: {name} is not allowed")
-            elif name == "subprocess.run" and id(node) not in called:
-                problems.append(f"line {node.lineno}: subprocess.run used without a direct call")
-        elif isinstance(node, ast.Call) and ast.unparse(node.func) == "subprocess.run":
-            if not node.args or not _is_argv_list(node.args[0]):
-                problems.append(f"line {node.lineno}: subprocess.run without an argv list")
-            if any(keyword.arg in ("shell", None) for keyword in node.keywords):
-                problems.append(f"line {node.lineno}: subprocess.run with shell= or **kwargs")
-    assert problems == [], problems

@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import datetime
 import importlib.util
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 # Load check-scanner-suppressions.py directly via importlib (no subprocess)
 CHECKER_PATH = Path(__file__).resolve().parents[2] / "scripts" / "check-scanner-suppressions.py"
@@ -171,3 +176,125 @@ def test_17_real_knowledge_base_proxy_file_passes() -> None:
     )
     text = real_path.read_text(encoding="utf-8")
     assert check_text(str(real_path), text, TODAY) == []
+
+
+def test_23_nosec_with_ids_and_metadata_passes() -> None:
+    text = "x = 1  # nosec B608 # bound values category D, expires 2027-01-01\n"
+    assert check_text("test.py", text, TODAY) == []
+
+
+@pytest.mark.parametrize(
+    "marker,message",
+    [
+        ("# nosec B608, B110 # bound values category D, expires 2027-01-01", checker.UNKNOWN_BANDIT_ID),
+        ("# nosec B999 # bound values category D, expires 2027-01-01", checker.UNKNOWN_BANDIT_ID),
+        ("# nosec B608, B999 # bound values category D, expires 2027-01-01", checker.UNKNOWN_BANDIT_ID),
+        ("# nosec B608", checker.MALFORMED_NOSEC),
+        ("# nosec B608 #", "suppression reason is empty"),
+        (
+            "# nosec B608 # bound values category D",
+            "suppression reason missing expiry (must contain 'expires YYYY-MM-DD')",
+        ),
+        (
+            "# nosec B608 # bound values expires 2027-01-01",
+            "suppression reason missing category (must contain 'category X' with X in A, B, C, D)",
+        ),
+        (
+            "# nosec B608 # bound values category D, expires 2026-11-07",
+            "suppression expired on 2026-11-07 (today is 2026-11-08)",
+        ),
+        (
+            "# nosec B608 # bound values category D, expires 2027-03-09",
+            "expiry 2027-03-09 exceeds category D limit of 120 days (latest allowed: 2027-03-08)",
+        ),
+        ("# nosec B608 -- bound values category D, expires 2027-01-01", checker.MALFORMED_NOSEC),
+        ("# NOSEC B608 # bound values category D, expires 2027-01-01", checker.MALFORMED_NOSEC),
+        ("# nosec # bound values category D, expires 2027-01-01", checker.MALFORMED_NOSEC),
+        ("#nosec B608 # bound values category D, expires 2027-01-01", checker.MALFORMED_NOSEC),
+        (
+            "# nosec hardcoded_sql_expressions # bound values category D, expires 2027-01-01",
+            checker.MALFORMED_NOSEC,
+        ),
+    ],
+)
+def test_24_nosec_invalid_forms_fail(marker: str, message: str) -> None:
+    assert check_text("test.py", f"x = 1  {marker}\n", TODAY) == [checker.Problem("test.py", 1, message)]
+
+
+def test_30_unknown_bandit_id_message_names_the_allow_list() -> None:
+    # test_24 compares against the constant, so only this pins its text: the finding has
+    # to tell the reviewer where an ID gets approved, not just that it is unknown.
+    assert "ALLOWED_BANDIT_IDS" in checker.UNKNOWN_BANDIT_ID
+
+
+def test_25_nosec_comment_only_suppresses_nothing() -> None:
+    text = '# nosec B608 # bound values category D, expires 2027-01-01\nsql = f"SELECT {cols} FROM t"\n'
+    assert check_text("test.py", text, TODAY) == [checker.Problem("test.py", 1, checker.NOSEC_COMMENT_ONLY)]
+
+
+def test_26_nosec_with_another_marker_fails() -> None:
+    text = "x = 1  # nosec B608 # see nosemgrep: rule-a -- bound values category D, expires 2027-01-01\n"
+    assert check_text("test.py", text, TODAY) == [
+        checker.Problem("test.py", 1, "line contains multiple scanner suppression markers")
+    ]
+
+
+# This is the entry date, not TODAY: TODAY's 120-day D window ends 2027-03-08,
+# before the reviewed marker's expiry on 2027-03-12.
+IMPORTER_ENTRY_DATE = datetime.date(2026, 11, 12)
+
+
+def test_27_real_importer_marker_passes() -> None:
+    path = CHECKER_PATH.parent.parent / "hindsight-api-slim/hindsight_api/engine/transfer/importer.py"
+    text = path.read_text(encoding="utf-8")
+    assert text.count("# nosec B608 #") == 1
+    assert check_text(str(path), text, IMPORTER_ENTRY_DATE) == []
+
+
+@pytest.mark.parametrize("marker", ["# nosec B608", "# nosecB608 # bound values category D, expires 2027-01-01"])
+def test_28_wrapper_finds_nosec_markers(tmp_path: Path, marker: str) -> None:
+    assert shutil.which("git") is not None and shutil.which("bash") is not None, "git and bash must be on PATH"
+
+    # Keep inherited Git settings out of the fixture repository and ignore user/system config.
+    fixture_env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    fixture_env["GIT_CONFIG_GLOBAL"] = os.devnull
+    fixture_env["GIT_CONFIG_NOSYSTEM"] = "1"
+
+    # Keep argv lists literal so the process-start audit rule sees a static command.
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, env=fixture_env, check=True)
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    for name in ("check-scanner-suppressions.py", "check-scanner-suppressions.sh"):
+        shutil.copyfile(CHECKER_PATH.parent / name, scripts / name)
+    bad = tmp_path / "bad.py"
+    bad.write_text(f"x = 1  {marker}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, env=fixture_env, check=True)
+    result = subprocess.run(
+        ["bash", "scripts/check-scanner-suppressions.sh"],
+        cwd=tmp_path,
+        env=fixture_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 1
+    assert "bad.py:1:" in result.stderr
+    assert checker.MALFORMED_NOSEC in result.stderr
+    expiry = datetime.datetime.now(datetime.UTC).date() + datetime.timedelta(days=30)
+    bad.write_text(f"x = 1  # nosec B608 # bound values category D, expires {expiry.isoformat()}\n", encoding="utf-8")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, env=fixture_env, check=True)
+    result = subprocess.run(
+        ["bash", "scripts/check-scanner-suppressions.sh"],
+        cwd=tmp_path,
+        env=fixture_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0
+
+
+def test_29_nosec_without_separator_is_discovered_and_rejected() -> None:
+    text = "x = 1  # nosecB608 # bound values category D, expires 2027-01-01\n"
+    assert checker.MARKER_RE.findall(text) == ["nosec"]
+    assert check_text("test.py", text, TODAY) == [checker.Problem("test.py", 1, checker.MALFORMED_NOSEC)]

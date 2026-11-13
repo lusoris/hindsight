@@ -64,3 +64,26 @@ async def test_run_export_bank_declares_decoded_json_rows(monkeypatch: pytest.Mo
     assert output.read_bytes() == b"archive"
     assert size == len(b"archive")
     assert connection.closed is True
+
+
+def test_import_bank_command_prints_cleanup_recovery_notes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from types import SimpleNamespace
+
+    import typer
+
+    failure = ValueError("original restore error")
+    failure.add_note("Recover half-restored bank: hindsight bank delete damaged-bank")
+    monkeypatch.setattr(
+        cli.HindsightConfig,
+        "from_env",
+        lambda: SimpleNamespace(database_url="postgresql://example", database_schema="public"),
+    )
+    monkeypatch.setattr(cli, "_run_import_bank", AsyncMock(side_effect=failure))
+    with pytest.raises(typer.Exit) as error:
+        cli.import_bank_command(archive=tmp_path / "archive.zip", schema=None, target_bank=None, include_history=False)
+    assert error.value.exit_code == 1
+    output = capsys.readouterr().err
+    assert "original restore error" in output
+    assert "hindsight bank delete damaged-bank" in output

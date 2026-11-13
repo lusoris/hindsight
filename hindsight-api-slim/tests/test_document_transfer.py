@@ -12,6 +12,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
+from unittest.mock import AsyncMock
 from urllib.parse import quote
 
 import httpx
@@ -1604,6 +1605,10 @@ async def test_import_bank_retried_after_a_crash_starts_over(memory, request_con
             return await real_batch(**kwargs)
 
         monkeypatch.setattr(importer, "_import_document_batch", crash_on_second_batch)
+        # A raised error is rolled back in-process (import_bank_async deletes the bank it
+        # created); a killed worker never reaches that handler. Skip it to model the kill,
+        # which is the case the operation-id retry below exists for.
+        monkeypatch.setattr(memory, "_discard_half_restored_bank", AsyncMock())
         # The task layer turns the failure into a scheduled retry — the retry this test runs below.
         with pytest.raises(RetryTaskAt, match="worker died"):
             await memory.submit_bank_import_async(src, archive, request_context, target_bank_id=dst)
@@ -3619,7 +3624,7 @@ async def test_attachment_bytes_travel_with_the_bank(memory, request_context):
     point the copy at the source's blob — which deleting the source bank then
     sweeps out from under it.
     """
-    from hindsight_api.engine.retain.attachment_content import RetainAttachment
+    from hindsight_api.engine.retain.attachment_content import RetainAttachment, compute_attachment_hash
     from hindsight_api.engine.retain.attachment_store import store_images
     from hindsight_api.engine.transfer import export_bank
 
@@ -3637,7 +3642,7 @@ async def test_attachment_bytes_travel_with_the_bank(memory, request_context):
                 "doc-1",
                 [
                     RetainAttachment(
-                        attachment_hash="a" * 64,
+                        attachment_hash=compute_attachment_hash(payload),
                         media_type="image/png",
                         data=payload,
                         block_index=0,
