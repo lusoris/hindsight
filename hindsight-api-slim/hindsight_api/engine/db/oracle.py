@@ -21,6 +21,7 @@ import re
 import uuid as _uuid_mod
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from typing import Any, NamedTuple, cast
 
 from ...schema_context import get_current_schema
@@ -50,6 +51,16 @@ class RewriteResult(NamedTuple):
     query: str
     ignore_dup: bool
     returning_cols: list[str] | None
+
+
+@dataclass(frozen=True, slots=True)
+class _PreparedStatement:
+    """A statement rewritten for Oracle with its binds ready for ``cursor.execute``."""
+
+    query: str
+    params: dict[str, Any] | None
+    ignore_dup: bool
+    ret_cols: list[str] | None
 
 
 # ---------------------------------------------------------------------------
@@ -1144,6 +1155,41 @@ class OracleConnection(DatabaseConnection):
 
     # -- DML methods ------------------------------------------------------
 
+    async def _prepare(self, cursor: Any, query: str, args: tuple[Any, ...]) -> _PreparedStatement:
+        """Rewrite a PostgreSQL statement and bind its arguments on ``cursor``."""
+        query, ignore_dup, ret_cols = _rewrite_pg_to_oracle(query)
+        params = self._make_bind_params(cursor, args, ret_cols)
+        query, params = self._expand_any_lists(query, params)
+        await self._bind_large_values_as_lobs(params)
+        self._apply_clob_input_sizes(cursor, query, params)
+        return _PreparedStatement(query, params, ignore_dup, ret_cols)
+
+    @staticmethod
+    async def _execute_ignoring_duplicate(cursor: Any, stmt: _PreparedStatement) -> bool:
+        """Run an ON CONFLICT DO NOTHING statement; False if ORA-00001 was swallowed."""
+        try:
+            await cursor.execute(stmt.query, stmt.params)
+        except Exception as e:
+            if "ORA-00001" in str(e):
+                return False
+            raise
+        return True
+
+    @staticmethod
+    async def _execute_logging_failure(cursor: Any, stmt: _PreparedStatement, operation: str) -> None:
+        """Run a statement, logging ``Oracle <operation> failed.`` before re-raising."""
+        try:
+            await cursor.execute(stmt.query, stmt.params)
+        except Exception as e:
+            logger.error(
+                "Oracle %s failed. Query: %s\nParams keys: %s\nError: %s",
+                operation,
+                stmt.query[:500],
+                list(stmt.params.keys()) if stmt.params else None,
+                e,
+            )
+            raise
+
     async def execute(self, query: str, *args: Any, timeout: float | None = None) -> str:
         # PostgreSQL planner/session GUCs (SET LOCAL enable_seqscan, lock_timeout,
         # hnsw.ef_search, ...) have no Oracle equivalent; running them raises
@@ -1151,31 +1197,14 @@ class OracleConnection(DatabaseConnection):
         if query.lstrip().upper().startswith("SET LOCAL "):
             return "SET"
         orig_query = query
-        query, ignore_dup, ret_cols = _rewrite_pg_to_oracle(query)
         cursor = self._conn.cursor()
         try:
-            params = self._make_bind_params(cursor, args, ret_cols)
-            query, params = self._expand_any_lists(query, params)
-            await self._bind_large_values_as_lobs(params)
-            self._apply_clob_input_sizes(cursor, query, params)
-            if ignore_dup:
-                try:
-                    await cursor.execute(query, params)
-                except Exception as e:
-                    if "ORA-00001" in str(e):
-                        return "INSERT 0 0"
-                    raise
+            stmt = await self._prepare(cursor, query, args)
+            if stmt.ignore_dup:
+                if not await self._execute_ignoring_duplicate(cursor, stmt):
+                    return "INSERT 0 0"
             else:
-                try:
-                    await cursor.execute(query, params)
-                except Exception as e:
-                    logger.error(
-                        "Oracle execute failed. Query: %s\nParams keys: %s\nError: %s",
-                        query[:500],
-                        list(params.keys()) if params else None,
-                        e,
-                    )
-                    raise
+                await self._execute_logging_failure(cursor, stmt, "execute")
             # Return PG-compatible status string
             cmd = orig_query.strip().split()[0].upper() if orig_query.strip() else "OK"
             rowcount = cursor.rowcount
@@ -1258,39 +1287,21 @@ class OracleConnection(DatabaseConnection):
         return f"INSERT 0 {n_rows}"
 
     async def fetch(self, query: str, *args: Any, timeout: float | None = None) -> list[ResultRow]:
-        query, ignore_dup, ret_cols = _rewrite_pg_to_oracle(query)
         cursor = self._conn.cursor()
         try:
-            params = self._make_bind_params(cursor, args, ret_cols)
-            query, params = self._expand_any_lists(query, params)
-            await self._bind_large_values_as_lobs(params)
-            self._apply_clob_input_sizes(cursor, query, params)
-            if ignore_dup:
-                try:
-                    await cursor.execute(query, params)
-                except Exception as e:
-                    if "ORA-00001" in str(e):
-                        return []
-                    raise
-                # INSERT succeeded but RETURNING was stripped — return empty
-                # (callers using fetch with ON CONFLICT DO NOTHING typically
-                # only care about rowcount, not the returned rows)
+            stmt = await self._prepare(cursor, query, args)
+            if stmt.ignore_dup:
+                await self._execute_ignoring_duplicate(cursor, stmt)
+                # Duplicate suppressed, or INSERT succeeded but RETURNING was
+                # stripped — return empty (callers using fetch with ON CONFLICT
+                # DO NOTHING typically only care about rowcount, not the rows)
                 return []
 
-            try:
-                await cursor.execute(query, params)
-            except Exception as e:
-                logger.error(
-                    "Oracle fetch failed. Query: %s\nParams keys: %s\nError: %s",
-                    query[:500],
-                    list(params.keys()) if params else None,
-                    e,
-                )
-                raise
+            await self._execute_logging_failure(cursor, stmt, "fetch")
 
-            if ret_cols is not None:
-                # `params` is the bind dict built for the statement just executed.
-                row_dict = await self._read_returning_values(ret_cols, cast("dict[str, Any]", params))
+            if stmt.ret_cols is not None:
+                # `stmt.params` is the bind dict built for the statement just executed.
+                row_dict = await self._read_returning_values(stmt.ret_cols, cast("dict[str, Any]", stmt.params))
                 return [ResultRow(row_dict)] if row_dict else []
 
             columns = [col[0].lower() for col in cursor.description or []]
@@ -1300,37 +1311,19 @@ class OracleConnection(DatabaseConnection):
             cursor.close()
 
     async def fetchrow(self, query: str, *args: Any, timeout: float | None = None) -> ResultRow | None:
-        query, ignore_dup, ret_cols = _rewrite_pg_to_oracle(query)
         cursor = self._conn.cursor()
         try:
-            params = self._make_bind_params(cursor, args, ret_cols)
-            query, params = self._expand_any_lists(query, params)
-            await self._bind_large_values_as_lobs(params)
-            self._apply_clob_input_sizes(cursor, query, params)
-            if ignore_dup:
-                try:
-                    await cursor.execute(query, params)
-                except Exception as e:
-                    if "ORA-00001" in str(e):
-                        return None
-                    raise
-                # INSERT succeeded but RETURNING was stripped
+            stmt = await self._prepare(cursor, query, args)
+            if stmt.ignore_dup:
+                await self._execute_ignoring_duplicate(cursor, stmt)
+                # Duplicate suppressed, or INSERT succeeded but RETURNING was stripped
                 return None
 
-            try:
-                await cursor.execute(query, params)
-            except Exception as e:
-                logger.error(
-                    "Oracle fetchrow failed. Query: %s\nParams keys: %s\nError: %s",
-                    query[:500],
-                    list(params.keys()) if params else None,
-                    e,
-                )
-                raise
+            await self._execute_logging_failure(cursor, stmt, "fetchrow")
 
-            if ret_cols is not None:
-                # `params` is the bind dict built for the statement just executed.
-                row_dict = await self._read_returning_values(ret_cols, cast("dict[str, Any]", params))
+            if stmt.ret_cols is not None:
+                # `stmt.params` is the bind dict built for the statement just executed.
+                row_dict = await self._read_returning_values(stmt.ret_cols, cast("dict[str, Any]", stmt.params))
                 return ResultRow(row_dict) if row_dict else None
 
             columns = [col[0].lower() for col in cursor.description or []]
@@ -1342,30 +1335,22 @@ class OracleConnection(DatabaseConnection):
             cursor.close()
 
     async def fetchval(self, query: str, *args: Any, column: int = 0, timeout: float | None = None) -> Any:
-        query, ignore_dup, ret_cols = _rewrite_pg_to_oracle(query)
         cursor = self._conn.cursor()
         try:
-            params = self._make_bind_params(cursor, args, ret_cols)
-            query, params = self._expand_any_lists(query, params)
-            await self._bind_large_values_as_lobs(params)
-            self._apply_clob_input_sizes(cursor, query, params)
-            if ignore_dup:
-                try:
-                    await cursor.execute(query, params)
-                except Exception as e:
-                    if "ORA-00001" in str(e):
-                        return None
-                    raise
+            stmt = await self._prepare(cursor, query, args)
+            if stmt.ignore_dup:
+                if not await self._execute_ignoring_duplicate(cursor, stmt):
+                    return None
                 # INSERT succeeded (no dup). RETURNING was stripped, so we can't
                 # fetch rows. Return the first positional arg as a best-effort
                 # stand-in (callers typically RETURNING the PK they just inserted).
                 return args[0] if args else True
 
-            await cursor.execute(query, params)
+            await cursor.execute(stmt.query, stmt.params)
 
-            if ret_cols is not None:
-                # `params` is the bind dict built for the statement just executed.
-                row_dict = await self._read_returning_values(ret_cols, cast("dict[str, Any]", params))
+            if stmt.ret_cols is not None:
+                # `stmt.params` is the bind dict built for the statement just executed.
+                row_dict = await self._read_returning_values(stmt.ret_cols, cast("dict[str, Any]", stmt.params))
                 if row_dict is None:
                     return None
                 vals = list(row_dict.values())

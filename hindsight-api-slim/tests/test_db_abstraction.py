@@ -6,6 +6,7 @@ without requiring a live database connection.
 
 import asyncio
 from datetime import datetime
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import asyncpg
@@ -18,6 +19,9 @@ from hindsight_api.engine.db.postgresql import PostgreSQLBackend, apply_session_
 from hindsight_api.engine.db.result import DictResultRow as ResultRow
 from hindsight_api.engine.sql import SQLDialect, create_sql_dialect
 from hindsight_api.engine.sql.postgresql import PostgreSQLDialect
+
+if TYPE_CHECKING:
+    from hindsight_api.engine.db.oracle import OracleConnection
 
 # A recall with no created_after/created_before — the graph-expansion CTEs must
 # then render exactly as they did before the window existed.
@@ -1570,3 +1574,223 @@ class TestOracleSessionAndClobBinding:
         assert params["4"].lob_type == oracledb.DB_TYPE_CLOB and params["4"].data == text
         assert params["1"] == "doc-id" and params["3"] == bytes(16)  # a UUID stays RAW(16)
         assert params["5"] == "x" * 5000  # 4 000-32 767 bytes stay a string with a CLOB input size
+
+
+class _FakeOracleCursor:
+    """Minimal oracledb async cursor: records executes, optionally raises."""
+
+    def __init__(self, error: Exception | None = None, rowcount: int = 0) -> None:
+        self.error = error
+        self.rowcount = rowcount
+        self.description = None
+        self.executed: list[tuple[str, object]] = []
+        self.closed = 0
+
+    async def execute(self, query: str, params: object = None) -> None:
+        self.executed.append((query, params))
+        if self.error is not None:
+            raise self.error
+
+    async def fetchall(self) -> list:
+        return []
+
+    async def fetchone(self) -> None:
+        return None
+
+    def setinputsizes(self, **kwargs: object) -> None:
+        pass
+
+    def close(self) -> None:  # synchronous, like oracledb.AsyncCursor.close
+        self.closed += 1
+
+
+class _FakeOracleDriverConn:
+    def __init__(self, cursor: _FakeOracleCursor) -> None:
+        self.cursor_obj = cursor
+        self.cursors_opened = 0
+
+    def cursor(self) -> _FakeOracleCursor:
+        self.cursors_opened += 1
+        return self.cursor_obj
+
+
+_DUP_INSERT = "INSERT INTO t (a, b) VALUES ($1, $2) ON CONFLICT DO NOTHING"
+
+
+def _oracle_connection(cursor: _FakeOracleCursor) -> "OracleConnection":
+    from hindsight_api.engine.db.oracle import OracleConnection
+
+    conn = OracleConnection.__new__(OracleConnection)
+    conn._conn = _FakeOracleDriverConn(cursor)
+    return conn
+
+
+class TestOracleConnectionExecuteAndFetch:
+    """execute / fetch / fetchrow / fetchval share one statement preamble. No live Oracle required."""
+
+    def test_dup_insert_is_marked_ignore_dup_by_the_rewriter(self):
+        from hindsight_api.engine.db.oracle import _rewrite_pg_to_oracle
+
+        assert _rewrite_pg_to_oracle(_DUP_INSERT).ignore_dup is True
+
+    @pytest.mark.asyncio
+    async def test_execute_ignore_dup_swallows_ora_00001(self):
+        cursor = _FakeOracleCursor(error=Exception("ORA-00001: unique constraint violated"))
+        assert await _oracle_connection(cursor).execute(_DUP_INSERT, "x", "y") == "INSERT 0 0"
+        assert cursor.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_execute_ignore_dup_reraises_other_errors(self):
+        cursor = _FakeOracleCursor(error=RuntimeError("ORA-12899: value too large"))
+        with pytest.raises(RuntimeError, match="ORA-12899"):
+            await _oracle_connection(cursor).execute(_DUP_INSERT, "x", "y")
+        assert cursor.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_execute_plain_insert_returns_rowcount_status(self):
+        cursor = _FakeOracleCursor(rowcount=3)
+        assert await _oracle_connection(cursor).execute("INSERT INTO t (a) VALUES ($1)", "x") == "INSERT 0 3"
+        assert len(cursor.executed) == 1
+        assert cursor.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_execute_ignore_dup_success_returns_rowcount_status(self):
+        cursor = _FakeOracleCursor(rowcount=1)
+        assert await _oracle_connection(cursor).execute(_DUP_INSERT, "x", "y") == "INSERT 0 1"
+        assert cursor.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_execute_update_returns_command_and_rowcount(self):
+        cursor = _FakeOracleCursor(rowcount=2)
+        assert await _oracle_connection(cursor).execute("UPDATE t SET a = $1", "x") == "UPDATE 2"
+
+    @pytest.mark.asyncio
+    async def test_execute_failure_logs_and_reraises_and_closes_cursor(self, caplog):
+        cursor = _FakeOracleCursor(error=RuntimeError("ORA-00942: table or view does not exist"))
+        with caplog.at_level("ERROR", logger="hindsight_api.engine.db.oracle"):
+            with pytest.raises(RuntimeError, match="ORA-00942"):
+                await _oracle_connection(cursor).execute("DELETE FROM t WHERE a = $1", "x")
+        assert "Oracle execute failed. Query: DELETE FROM t WHERE a = :1" in caplog.text
+        assert "Params keys: ['1']" in caplog.text
+        assert cursor.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_execute_set_local_returns_set_without_opening_a_cursor(self):
+        cursor = _FakeOracleCursor()
+        conn = _oracle_connection(cursor)
+        assert await conn.execute("SET LOCAL enable_seqscan = off") == "SET"
+        assert conn._conn.cursors_opened == 0
+        assert cursor.executed == []
+
+    @pytest.mark.asyncio
+    async def test_fetch_ignore_dup_with_ora_00001_returns_empty(self):
+        cursor = _FakeOracleCursor(error=Exception("ORA-00001: unique constraint violated"))
+        assert await _oracle_connection(cursor).fetch(_DUP_INSERT, "x", "y") == []
+        assert cursor.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_fetch_ignore_dup_success_returns_empty(self):
+        cursor = _FakeOracleCursor()
+        assert await _oracle_connection(cursor).fetch(_DUP_INSERT, "x", "y") == []
+        assert len(cursor.executed) == 1
+        assert cursor.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_fetch_ignore_dup_reraises_other_errors(self):
+        cursor = _FakeOracleCursor(error=RuntimeError("ORA-12899: value too large"))
+        with pytest.raises(RuntimeError, match="ORA-12899"):
+            await _oracle_connection(cursor).fetch(_DUP_INSERT, "x", "y")
+        assert cursor.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_fetch_failure_logs_and_reraises_and_closes_cursor(self, caplog):
+        cursor = _FakeOracleCursor(error=RuntimeError("ORA-00942: table or view does not exist"))
+        with caplog.at_level("ERROR", logger="hindsight_api.engine.db.oracle"):
+            with pytest.raises(RuntimeError, match="ORA-00942"):
+                await _oracle_connection(cursor).fetch("SELECT a FROM t WHERE b = $1", "x")
+        assert "Oracle fetch failed. Query: SELECT a FROM t WHERE b = :1" in caplog.text
+        assert cursor.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_fetchrow_ignore_dup_returns_none_on_duplicate_and_on_success(self):
+        for error in (Exception("ORA-00001: unique constraint violated"), None):
+            cursor = _FakeOracleCursor(error=error)
+            assert await _oracle_connection(cursor).fetchrow(_DUP_INSERT, "x", "y") is None
+            assert cursor.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_fetchrow_ignore_dup_reraises_other_errors(self):
+        cursor = _FakeOracleCursor(error=RuntimeError("ORA-12899: value too large"))
+        with pytest.raises(RuntimeError, match="ORA-12899"):
+            await _oracle_connection(cursor).fetchrow(_DUP_INSERT, "x", "y")
+        assert cursor.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_fetchrow_failure_logs_and_reraises_and_closes_cursor(self, caplog):
+        cursor = _FakeOracleCursor(error=RuntimeError("ORA-00942: table or view does not exist"))
+        with caplog.at_level("ERROR", logger="hindsight_api.engine.db.oracle"):
+            with pytest.raises(RuntimeError, match="ORA-00942"):
+                await _oracle_connection(cursor).fetchrow("SELECT a FROM t WHERE b = $1", "x")
+        assert "Oracle fetchrow failed. Query: SELECT a FROM t WHERE b = :1" in caplog.text
+        assert cursor.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_fetchval_ignore_dup_returns_none_on_duplicate_and_first_arg_on_success(self):
+        dup = _FakeOracleCursor(error=Exception("ORA-00001: unique constraint violated"))
+        assert await _oracle_connection(dup).fetchval(_DUP_INSERT, "x", "y") is None
+        ok = _FakeOracleCursor()
+        assert await _oracle_connection(ok).fetchval(_DUP_INSERT, "x", "y") == "x"
+        assert dup.closed == 1 and ok.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_fetchval_ignore_dup_reraises_other_errors(self):
+        cursor = _FakeOracleCursor(error=RuntimeError("ORA-12899: value too large"))
+        with pytest.raises(RuntimeError, match="ORA-12899"):
+            await _oracle_connection(cursor).fetchval(_DUP_INSERT, "x", "y")
+        assert cursor.closed == 1
+
+    @pytest.mark.asyncio
+    async def test_fetchval_failure_reraises_without_logging(self, caplog):
+        cursor = _FakeOracleCursor(error=RuntimeError("ORA-00942: table or view does not exist"))
+        with caplog.at_level("ERROR", logger="hindsight_api.engine.db.oracle"):
+            with pytest.raises(RuntimeError, match="ORA-00942"):
+                await _oracle_connection(cursor).fetchval("SELECT a FROM t WHERE b = $1", "x")
+        assert "failed" not in caplog.text
+        assert cursor.closed == 1
+
+
+class TestOracleOpsFetchTemporalNeighbors:
+    """Both directions of the temporal-neighbour query come from one template."""
+
+    @pytest.mark.asyncio
+    async def test_one_fetch_per_unit_with_ordered_args_and_both_sides(self):
+        from hindsight_api.engine.db.ops_oracle import OracleOps
+
+        calls: list[tuple[str, tuple]] = []
+
+        class _Conn:
+            async def fetch(self, sql: str, *args):
+                calls.append((" ".join(sql.split()), args))
+                return []
+
+        d1, d2 = datetime(2024, 1, 1), datetime(2024, 2, 1)
+        await OracleOps().fetch_temporal_neighbors(
+            _Conn(),  # type: ignore[arg-type]
+            "memory_units",
+            "bank-1",
+            ["u1", "u2"],
+            [d1, d2],
+            ["world", "experience"],
+            7,
+        )
+
+        assert [c[1] for c in calls] == [
+            ("u1", d1, "world", "bank-1", 7, "u1"),
+            ("u2", d2, "experience", "bank-1", 7, "u2"),
+        ]
+        for sql, _ in calls:
+            bwd, fwd = sql.split(") bwd UNION ALL ")
+            assert "FROM memory_units mu" in bwd and "FROM memory_units mu" in fwd
+            assert "mu.event_date <= $2 AND mu.id != $6 ORDER BY mu.event_date DESC FETCH FIRST $5 ROWS ONLY" in bwd
+            assert "mu.event_date > $2 AND mu.id != $6 ORDER BY mu.event_date ASC FETCH FIRST $5 ROWS ONLY" in fwd
+            assert fwd.split(") fwd ) combined")[1].endswith(") ranked WHERE rn <= $5")
