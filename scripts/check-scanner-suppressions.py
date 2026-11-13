@@ -73,7 +73,8 @@ BANDIT_ID_RE = re.compile(r"B\d{3}")
 # plugin list before adding it here.
 ALLOWED_BANDIT_IDS = frozenset({"B608"})
 UNKNOWN_BANDIT_ID = (
-    "Bandit test ID not in the approved list; an unknown ID makes Bandit suppress every test on the line"
+    "Bandit test ID not in ALLOWED_BANDIT_IDS; confirm it in Bandit's plugin list before approving it "
+    "(Bandit drops unknown IDs, and a nosec left with none suppresses every test on the line)"
 )
 MALFORMED_NOSEC = "malformed scanner suppression; expected '<code>  # nosec B<nnn>[, B<nnn>...] # <reason>'"
 NOSEC_COMMENT_ONLY = "nosec marker on a comment-only line suppresses nothing; put it after the code it suppresses"

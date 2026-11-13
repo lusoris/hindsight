@@ -221,6 +221,12 @@ def test_24_nosec_invalid_forms_fail(marker: str, message: str) -> None:
     assert check_text("test.py", f"x = 1  {marker}\n", TODAY) == [checker.Problem("test.py", 1, message)]
 
 
+def test_30_unknown_bandit_id_message_names_the_allow_list() -> None:
+    # test_24 compares against the constant, so only this pins its text: the finding has
+    # to tell the reviewer where an ID gets approved, not just that it is unknown.
+    assert "ALLOWED_BANDIT_IDS" in checker.UNKNOWN_BANDIT_ID
+
+
 def test_25_nosec_comment_only_suppresses_nothing() -> None:
     text = '# nosec B608 # bound values category D, expires 2027-01-01\nsql = f"SELECT {cols} FROM t"\n'
     assert check_text("test.py", text, TODAY) == [checker.Problem("test.py", 1, checker.NOSEC_COMMENT_ONLY)]

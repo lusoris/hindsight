@@ -642,6 +642,7 @@ async def test_cleanup_failure_retains_original_error_and_recovery_note(
     assert "atomic-target" in notes
     assert "hindsight bank delete atomic-target" in notes
     assert "DELETE /v1/default/banks/atomic-target" in notes
+    assert "DELETE_BANK" in notes
 
 
 @pytest.mark.asyncio
