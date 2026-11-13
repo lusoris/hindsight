@@ -52,6 +52,9 @@ packages = ["hindsight_pydantic_ai"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Repository-only test helpers (hindsight-integrations/_shared/integration_testing);
+# tests/ is not shipped in the wheel, so the helpers are imported by path, not copied.
+pythonpath = ["../_shared"]
 asyncio_mode = "auto"
 
 [dependency-groups]
