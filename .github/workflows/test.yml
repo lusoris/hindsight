@@ -229,6 +229,7 @@ jobs:
             - 'hindsight-integrations/autogen/**'
           integrations-aider:
             - 'hindsight-integrations/aider/**'
+            - 'hindsight-integrations/_shared/integration_testing/**'
           integrations-langgraph:
             - 'hindsight-integrations/langgraph/**'
           integrations-llamaindex:
