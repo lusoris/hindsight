@@ -1,18 +1,11 @@
-import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
-import postcss, { type Root } from "postcss";
-import tailwind from "@tailwindcss/postcss";
+import type { Root } from "postcss";
 import { beforeAll, expect, it } from "vitest";
+import { compileGlobals } from "./compile-globals";
 
 let compiled: Root;
 
 beforeAll(async () => {
-  const stylesheet = fileURLToPath(new URL("../../src/app/globals.css", import.meta.url));
-  const base = fileURLToPath(new URL("../../", import.meta.url));
-  const result = await postcss([tailwind({ base })]).process(await readFile(stylesheet, "utf8"), {
-    from: stylesheet,
-  });
-  compiled = result.root;
+  compiled = await compileGlobals();
 });
 
 it("generates paragraph, heading and list styles for rendered Markdown", () => {
