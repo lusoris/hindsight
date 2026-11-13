@@ -47,10 +47,11 @@ ALLOWED_RUFF_PREFIXES = (
 ALLOWED_PRETTIER_PREFIXES = ("$PRETTIER --write",)
 
 
-def _recorder(version: str, python: str = sys.executable) -> str:
+def _recorder(version: str, python: str = sys.executable, failing_subcommand: str = "") -> str:
     """A stub tool: appends its call as one JSON line, so a run's tool calls read back as typed records.
 
-    It answers `--version` with `version`, which is how lint.sh asks prettier what it is.
+    It answers `--version` with `version`, which is how lint.sh asks prettier what it is. A call whose first argument
+    is `failing_subcommand` is recorded and then exits 1, which is how a test makes `uv lock --check` fail.
 
     The stub is a /bin/sh launcher that execs `python` on the recording program. It used to name `python` in its
     `#!` line, but that line has no quoting: the kernel ends the interpreter path at the first space or tab, so an
@@ -64,6 +65,8 @@ with open(os.environ["DEV_SCRIPT_CALLS"], "a") as f:
     f.write(json.dumps(record) + "\\n")
 if args == ["--version"]:
     print({version!r})
+if {failing_subcommand!r} and args[:1] == [{failing_subcommand!r}]:
+    sys.exit(1)
 """
     return f'#!/bin/sh\nexec {shlex.quote(python)} -c {shlex.quote(program)} "$0" "$@"\n'
 
@@ -246,6 +249,27 @@ def test_lint_sh_refuses_a_prettier_the_lock_does_not_pin(tmp_path: Path) -> Non
     assert [call.args for call in _read_calls(env)] == [["--version"]]
 
 
+def test_lint_sh_refuses_a_stale_uv_lock(tmp_path: Path) -> None:
+    """A uv.lock that no longer matches the requirements stops lint.sh before uv sync or any task.
+
+    Every CI job installs with `uv sync --frozen`, which does not compare the lock with pyproject.toml, so this check
+    is the one place an unrelocked dependency change fails.
+    """
+    env = _lint_env(tmp_path)
+    (tmp_path / "bin" / "uv").write_text(_recorder("0.0.0-from-path", failing_subcommand="lock"))
+    repo = _make_repo(tmp_path / "repo", env)
+    _install_prettier(repo, LOCKED_PRETTIER)
+
+    result = _run_lint(repo, env, timeout=10)
+
+    assert result.returncode != 0
+    assert "uv.lock does not match" in result.stdout + result.stderr, result
+    assert [(call.command, call.args) for call in _read_calls(env)] == [
+        ("prettier", ["--version"]),
+        ("uv", ["lock", "--check", "--quiet"]),
+    ]
+
+
 def test_lint_sh_runs_pinned_tools(tmp_path: Path) -> None:
     """lint.sh runs only the root node_modules prettier, and ruff only through uv with the root lockfile.
 
@@ -300,6 +324,10 @@ def test_lint_sh_runs_pinned_tools(tmp_path: Path) -> None:
     assert result.returncode == 0, f"lint.sh failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}"
 
     records = _read_calls(env)
+
+    # The lock is checked against the requirements before the frozen sync installs from it
+    uv_calls = [r.args for r in records if r.command == "uv"]
+    assert uv_calls[:2] == [["lock", "--check", "--quiet"], ["sync", "--frozen", "--quiet"]], uv_calls
 
     # Every prettier call came from the fake root node_modules binary, none from PATH
     prettier_calls = [r for r in records if r.command == "prettier"]

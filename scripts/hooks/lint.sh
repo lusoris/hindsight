@@ -53,6 +53,14 @@ run_task() {
     NAMES+=("$name")
 }
 
+echo "  Checking uv.lock against the workspace requirements..."
+# Every CI job and hook installs with --frozen, which takes uv.lock as it is, so a pyproject.toml change that was
+# never relocked passed them all. uv lock --check fails when the lock no longer matches the requirements.
+if ! uv lock --check --quiet; then
+    echo "❌ Error: uv.lock does not match the workspace pyproject.toml files; run uv lock and commit uv.lock." >&2
+    exit 1
+fi
+
 echo "  Syncing Python dependencies..."
 # Run uv sync first to avoid race conditions when multiple uv run commands
 # try to reinstall local packages in parallel (e.g., after version bump).

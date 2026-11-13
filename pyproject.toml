@@ -10,7 +10,12 @@ dev-dependencies = []
 # win32 only, but the universal lock applied that cap everywhere, and 1.20.1 has
 # no cp314 wheels. This forks onnxruntime per platform. Drop it once markitdown
 # allows magika 1.x.
-constraint-dependencies = ["onnxruntime>=1.24.1; sys_platform != 'win32'"]
+# soupsieve>=4.0.0 lifts the lock past GHSA-4j63-6c4x-wfg4 and GHSA-mmhr-3c5m-f64f
+# (beautifulsoup4 via markitdown); soupsieve 4.x needs Python >= 3.11.5, so the
+# environments line narrows the lock to those interpreters. uv sync on Python
+# 3.11.0-3.11.4 refuses this lock; published package metadata is unchanged.
+constraint-dependencies = ["onnxruntime>=1.24.1; sys_platform != 'win32'", "soupsieve>=4.0.0"]
+environments = ["python_full_version >= '3.11.5'"]
 
 # Codacy's ruff runner passes the root config it finds first as `--config`, and
 # measured on Codacy it is not ruff.toml (its I001 findings follow the ruff defaults:
