@@ -27,6 +27,29 @@ from .result import ResultRow as DatabaseResultRow
 ORACLE_IN_LIST_LIMIT = 1000
 
 
+def _temporal_side_sql(mu_table: str, *, after: bool) -> str:
+    """SQL of one direction of the temporal-neighbour search.
+
+    ``after=False`` selects the units at or before ``$2`` (newest first, aliased
+    ``bwd``); ``after=True`` those strictly after it (oldest first, aliased
+    ``fwd``). Both keep the ``half_limit`` closest rows (``$5``) of bank ``$4``
+    and fact type ``$3``, excluding the unit itself (``$6``).
+    """
+    comparison, direction, alias = ("> $2", "ASC", "fwd") if after else ("<= $2", "DESC", "bwd")
+    return f"""SELECT * FROM (
+                            SELECT $1 AS from_id, mu.id, mu.event_date,
+                                   ABS(EXTRACT(DAY FROM (mu.event_date - $2)) * 24
+                                       + EXTRACT(HOUR FROM (mu.event_date - $2))) AS time_diff_hours
+                            FROM {mu_table} mu
+                            WHERE mu.bank_id = $4
+                              AND mu.fact_type = $3
+                              AND mu.event_date {comparison}
+                              AND mu.id != $6
+                            ORDER BY mu.event_date {direction}
+                            FETCH FIRST $5 ROWS ONLY
+                        ) {alias}"""
+
+
 class OracleOps(DataAccessOps):
     """Oracle-specific data access operations."""
 
@@ -691,6 +714,8 @@ class OracleOps(DataAccessOps):
         # Fetch up to half_limit in each direction, then combine and keep the
         # half_limit closest overall via ROW_NUMBER — matching the PG behavior.
         rows: list[ResultRow] = []
+        bwd_sql = _temporal_side_sql(mu_table, after=False)
+        fwd_sql = _temporal_side_sql(mu_table, after=True)
         for uid, edate, ftype in zip(lateral_unit_ids, lateral_event_dates, lateral_fact_types):
             uid_str = str(uid) if not isinstance(uid, str) else uid
             unit_rows = await conn.fetch(
@@ -698,31 +723,9 @@ class OracleOps(DataAccessOps):
                 SELECT from_id, id, event_date, time_diff_hours FROM (
                     SELECT combined.*, ROW_NUMBER() OVER (ORDER BY combined.time_diff_hours) AS rn
                     FROM (
-                        SELECT * FROM (
-                            SELECT $1 AS from_id, mu.id, mu.event_date,
-                                   ABS(EXTRACT(DAY FROM (mu.event_date - $2)) * 24
-                                       + EXTRACT(HOUR FROM (mu.event_date - $2))) AS time_diff_hours
-                            FROM {mu_table} mu
-                            WHERE mu.bank_id = $4
-                              AND mu.fact_type = $3
-                              AND mu.event_date <= $2
-                              AND mu.id != $6
-                            ORDER BY mu.event_date DESC
-                            FETCH FIRST $5 ROWS ONLY
-                        ) bwd
+                        {bwd_sql}
                         UNION ALL
-                        SELECT * FROM (
-                            SELECT $1 AS from_id, mu.id, mu.event_date,
-                                   ABS(EXTRACT(DAY FROM (mu.event_date - $2)) * 24
-                                       + EXTRACT(HOUR FROM (mu.event_date - $2))) AS time_diff_hours
-                            FROM {mu_table} mu
-                            WHERE mu.bank_id = $4
-                              AND mu.fact_type = $3
-                              AND mu.event_date > $2
-                              AND mu.id != $6
-                            ORDER BY mu.event_date ASC
-                            FETCH FIRST $5 ROWS ONLY
-                        ) fwd
+                        {fwd_sql}
                     ) combined
                 ) ranked
                 WHERE rn <= $5
