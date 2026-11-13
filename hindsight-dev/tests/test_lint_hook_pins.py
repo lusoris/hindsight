@@ -25,16 +25,17 @@ LINT_SH = SOURCE_ROOT / "scripts" / "hooks" / "lint.sh"
 LOCKED_PRETTIER = "3.7.4"
 
 
-def _require(tool: str) -> str:
-    """Absolute path of a tool the tests start themselves, resolved before any stub directory joins PATH."""
-    path = shutil.which(tool)
-    if path is None:
+def _require_on_path(tool: str) -> None:
+    """Fail at collection when a tool the tests start by name is missing from PATH."""
+    if shutil.which(tool) is None:
         raise RuntimeError(f"{tool} must be on PATH to run these tests")
-    return path
 
 
-GIT = _require("git")
-BASH = _require("bash")
+# The tests start git and bash by name with literal argv lists, so the Opengrep subprocess audit rule sees a static
+# command. They used to run absolute paths resolved here before any stub directory joined PATH; _lint_env stubs only
+# uv, npx, npm, ruff and prettier, so a PATH lookup of git or bash still reaches the real tools.
+_require_on_path("git")
+_require_on_path("bash")
 
 ALLOWED_RUFF_PREFIXES = (
     "uv run --frozen ruff check",
@@ -109,10 +110,22 @@ def _lint_env(tmp_path: Path) -> dict[str, str]:
 def _make_repo(repo: Path, env: dict[str, str]) -> Path:
     """A git repository with one empty commit (lint.sh diffs against HEAD) and a copy of lint.sh."""
     repo.mkdir()
-    subprocess.run([GIT, "init", "-q", str(repo)], check=True, env=env)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True, env=env)
     subprocess.run(
-        [GIT, "-C", str(repo), "-c", "user.name=Test", "-c", "user.email=test@example.com"]
-        + ["commit", "-q", "--allow-empty", "-m", "init"],
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
         check=True,
         env=env,
     )
@@ -135,7 +148,7 @@ def _install_prettier(repo: Path, version: str) -> Path:
 
 def _run_lint(repo: Path, env: dict[str, str], timeout: int) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [BASH, str(repo / "scripts" / "hooks" / "lint.sh")],
+        ["bash", "scripts/hooks/lint.sh"],
         cwd=repo,
         env=env,
         capture_output=True,
@@ -171,18 +184,18 @@ def test_recorder_stub_runs_under_an_interpreter_path_with_a_space(tmp_path: Pat
     env = {**os.environ, "DEV_SCRIPT_CALLS": str(tmp_path / "calls.jsonl")}
 
     version = subprocess.run(
-        [str(stub), "--version"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10, check=False
+        ["./tool", "--version"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10, check=False
     )
     spaced = subprocess.run(
-        [str(stub), "a b", "", "$HOME"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10, check=False
+        ["./tool", "a b", "", "$HOME"], cwd=tmp_path, env=env, capture_output=True, text=True, timeout=10, check=False
     )
 
     assert (version.returncode, version.stdout) == (0, "9.9.9\n"), version
     assert (spaced.returncode, spaced.stdout) == (0, ""), spaced
     cwd = str(tmp_path.resolve())
     assert _read_calls(env) == [
-        RecordedCall(command="tool", path=str(stub), args=["--version"], cwd=cwd),
-        RecordedCall(command="tool", path=str(stub), args=["a b", "", "$HOME"], cwd=cwd),
+        RecordedCall(command="tool", path=str(Path(cwd, "tool")), args=["--version"], cwd=cwd),
+        RecordedCall(command="tool", path=str(Path(cwd, "tool")), args=["a b", "", "$HOME"], cwd=cwd),
     ]
 
 

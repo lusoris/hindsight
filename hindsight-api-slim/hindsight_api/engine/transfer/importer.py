@@ -482,6 +482,31 @@ def _utf8_exceeds(text: str, start: int, end: int, limit: int) -> bool:
     return len(text[start:end].encode("utf-8")) > limit
 
 
+def _next_json_array_state(name: str, state: str, char: str) -> str | None:
+    """The scan state after ``char`` when it is structural for a top-level JSON array,
+    or None when it starts a value.
+
+    Raises the archive errors for a missing ``[``, data after the array, a missing comma, or a stray separator.
+    """
+    if state == "start":
+        if char != "[":
+            raise ValueError(f"Invalid transfer archive: {name} is not a JSON array")
+        return "first"
+    if state == "finished":
+        raise ValueError(f"Invalid transfer archive: {name} has data after the JSON array")
+    if char == "]" and state in {"first", "separator"}:
+        # Do not return at ']': read through EOF to reject trailing data
+        # and let ZipExtFile verify the CRC, including trailing whitespace.
+        return "finished"
+    if state == "separator":
+        if char != ",":
+            raise ValueError(f"Invalid transfer archive: {name} is missing a comma")
+        return "value"
+    if char in {",", "]"}:
+        raise ValueError(f"Invalid transfer archive: {name} has an unexpected separator")
+    return None
+
+
 def _iter_json_array(zf: zipfile.ZipFile, name: str) -> Iterator[Any]:
     """The items of a top-level JSON array entry, decoded one at a time.
 
@@ -503,26 +528,10 @@ def _iter_json_array(zf: zipfile.ZipFile, name: str) -> Iterator[Any]:
             while pos < len(buf) and buf[pos] in " \t\r\n":
                 pos += 1
             if pos < len(buf):
-                char = buf[pos]
-                if state == "start":
-                    if char != "[":
-                        raise ValueError(f"Invalid transfer archive: {name} is not a JSON array")
-                    state, pos = "first", pos + 1
+                next_state = _next_json_array_state(name, state, buf[pos])
+                if next_state is not None:
+                    state, pos = next_state, pos + 1
                     continue
-                if state == "finished":
-                    raise ValueError(f"Invalid transfer archive: {name} has data after the JSON array")
-                if char == "]" and state in {"first", "separator"}:
-                    # Do not return at ']': read through EOF to reject trailing data
-                    # and let ZipExtFile verify the CRC, including trailing whitespace.
-                    state, pos = "finished", pos + 1
-                    continue
-                if state == "separator":
-                    if char != ",":
-                        raise ValueError(f"Invalid transfer archive: {name} is missing a comma")
-                    state, pos = "value", pos + 1
-                    continue
-                if char in {",", "]"}:
-                    raise ValueError(f"Invalid transfer archive: {name} has an unexpected separator")
                 try:
                     item, end = decoder.raw_decode(buf, pos)
                 except json.JSONDecodeError:
