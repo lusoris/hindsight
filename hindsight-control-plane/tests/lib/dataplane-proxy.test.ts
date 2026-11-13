@@ -1,11 +1,21 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { proxyDataplane, type DataplaneProxyOptions } from "@/lib/dataplane-proxy";
+import { describe, expect, it, vi } from "vitest";
+import { NextResponse } from "next/server";
+import {
+  proxyDataplane,
+  relayBankPost,
+  type BankPostCall,
+  type DataplaneProxyOptions,
+} from "@/lib/dataplane-proxy";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { useFetchSpies } from "./fetch-spies";
 
 const HTTP_OK = 200;
+const HTTP_ACCEPTED = 202;
 const HTTP_BAD_REQUEST = 400;
 const HTTP_NOT_FOUND = 404;
+const HTTP_CONFLICT = 409;
 const HTTP_INTERNAL_ERROR = 500;
+const HTTP_BAD_GATEWAY = 502;
 const HTTP_SERVICE_UNAVAILABLE = 503;
 
 const URL = "http://localhost/api/test";
@@ -69,20 +79,7 @@ function patchRequest(body: string): Request {
 }
 
 describe("proxyDataplane", () => {
-  let fetchSpy: ReturnType<typeof vi.fn<typeof fetch>>;
-  let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
-  const originalFetch = global.fetch;
-
-  beforeEach(() => {
-    fetchSpy = vi.fn<typeof fetch>();
-    global.fetch = fetchSpy;
-    consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-  });
-
-  afterEach(() => {
-    global.fetch = originalFetch;
-    consoleErrorSpy.mockRestore();
-  });
+  const { fetchSpy, consoleErrorSpy } = useFetchSpies();
 
   it.each([
     ["empty", ["bank-1", ""]],
@@ -313,5 +310,127 @@ describe("proxyDataplane", () => {
     const [calledUrl, calledInit] = fetchSpy.mock.calls[0];
     expect(calledUrl).toBe(dataplaneBankUrl("bank-1", SUFFIX));
     expect(calledInit).toStrictEqual(expectedInit);
+  });
+});
+
+describe("relayBankPost", () => {
+  const { fetchSpy, consoleErrorSpy } = useFetchSpies();
+
+  // Bank id with a path separator and a space: the relay must hand it to dataplaneBankUrl as is.
+  const BANK_ID = "team/bank 1";
+  const RELAY_SUFFIX = "/clone?target_bank_id=copy";
+  const RELAY_OPTIONS = {
+    successStatus: HTTP_ACCEPTED,
+    failure: UNTRANSLATED_FAILURE,
+    action: "cloning bank",
+  };
+
+  /** Runs the relay for BANK_ID with a `prepare` that answers `call` (or throws it when an Error). */
+  function relay(call: BankPostCall | NextResponse | Error): Promise<NextResponse> {
+    return relayBankPost(
+      new Request(URL, { method: "POST" }),
+      { params: Promise.resolve({ bankId: BANK_ID }) },
+      RELAY_OPTIONS,
+      async (bankId) => {
+        expect(bankId).toBe(BANK_ID);
+        if (call instanceof Error) throw call;
+        return call;
+      }
+    );
+  }
+
+  it.each([
+    {
+      label: "without a body sends POST with the plain dataplane headers",
+      call: { suffix: RELAY_SUFFIX },
+      expectedInit: { method: "POST", headers: getDataplaneHeaders() },
+    },
+    {
+      label: "with a JSON body sends it with a JSON Content-Type",
+      call: { suffix: RELAY_SUFFIX, jsonBody: { manifest: 1 } },
+      expectedInit: {
+        method: "POST",
+        headers: getDataplaneHeaders({ "Content-Type": "application/json" }),
+        body: JSON.stringify({ manifest: 1 }),
+      },
+    },
+  ])("$label and returns the upstream JSON at successStatus", async ({ call, expectedInit }) => {
+    const upstream = { operation_id: "op-1", status: "pending" };
+    fetchSpy.mockResolvedValueOnce(new Response(JSON.stringify(upstream), { status: HTTP_OK }));
+
+    const response = await relay(call);
+
+    expect(response.status).toBe(HTTP_ACCEPTED);
+    expect(await response.json()).toEqual(upstream);
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const [calledUrl, calledInit] = fetchSpy.mock.calls[0];
+    expect(calledUrl).toBe(dataplaneBankUrl(BANK_ID, RELAY_SUFFIX));
+    expect(calledInit).toStrictEqual(expectedInit);
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns an early response from prepare unchanged without calling the dataplane", async () => {
+    const early = NextResponse.json({ error: "target_bank_id is required" }, { status: 400 });
+
+    const response = await relay(early);
+
+    expect(response).toBe(early);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "the upstream error JSON",
+      upstream: new Response(JSON.stringify({ detail: "Bank exists" }), { status: HTTP_CONFLICT }),
+      status: HTTP_CONFLICT,
+      body: { detail: "Bank exists" },
+    },
+    {
+      label: "the status text when the upstream error is not JSON",
+      upstream: new Response("<html>bad gateway</html>", {
+        status: HTTP_BAD_GATEWAY,
+        statusText: "Bad Gateway",
+      }),
+      status: HTTP_BAD_GATEWAY,
+      body: { detail: "Bad Gateway" },
+    },
+  ])("relays $label at the upstream status", async ({ upstream, status, body }) => {
+    fetchSpy.mockResolvedValueOnce(upstream);
+
+    const response = await relay({ suffix: RELAY_SUFFIX });
+
+    expect(response.status).toBe(status);
+    expect(await response.json()).toEqual(body);
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: "prepare throws",
+      call: new Error("bad request body"),
+      arrange: () => {},
+      fetched: false,
+    },
+    {
+      label: "the dataplane call rejects",
+      call: { suffix: RELAY_SUFFIX },
+      arrange: () => fetchSpy.mockRejectedValueOnce(new Error("connection refused")),
+      fetched: true,
+    },
+    {
+      label: "an upstream success is not JSON",
+      call: { suffix: RELAY_SUFFIX },
+      arrange: () => fetchSpy.mockResolvedValueOnce(new Response("ok", { status: HTTP_OK })),
+      fetched: true,
+    },
+  ])("answers the failure at 500 and logs the action when $label", async (testCase) => {
+    testCase.arrange();
+
+    const response = await relay(testCase.call);
+
+    expect(response.status).toBe(HTTP_INTERNAL_ERROR);
+    expect(await response.json()).toEqual({ error: UNTRANSLATED_FAILURE.error });
+    expect(fetchSpy).toHaveBeenCalledTimes(testCase.fetched ? 1 : 0);
+    expect(consoleErrorSpy).toHaveBeenCalledWith("Error %s:", "cloning bank", expect.any(Error));
   });
 });
