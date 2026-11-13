@@ -132,7 +132,7 @@ from hindsight_system_evals.delta_updates import CASES as DELTA_CASES
 from hindsight_system_evals.delta_updates import MINIMUM_ACCEPTANCE as DELTA_MINIMUM
 from hindsight_system_evals.delta_updates import DeltaUpdate
 from hindsight_system_evals.delta_updates import build as build_delta
-from hindsight_system_evals.pages import PageOutcome, SettleFn, facts
+from hindsight_system_evals.pages import PageOutcome, SettleFn, facts, grade_page, page_record
 from hindsight_system_evals.refresh_cost import (
     FIXTURE,
     PAGES,
@@ -164,34 +164,13 @@ async def _run(
     )
 
     context = f"This is a knowledge page built to answer: {question.question}"
-    verdict = await evaluate(outcome.final_content, question.answer_criteria, context=context)
-    outcome.correct, outcome.correct_reason = verdict.meets_criteria, verdict.reasoning
-
-    if question.must_not_claim:
-        trap = await evaluate(
-            outcome.final_content,
-            f"The page asserts, as currently true, that {question.must_not_claim}.",
-            context=context,
-        )
-        outcome.hit_trap, outcome.trap_reason = trap.meets_criteria, trap.reasoning
+    await grade_page(outcome, question, context)
 
     # A check that re-runs a question for a different property (the collapse
     # check below) must not count as a second graded page: it would inflate the
     # total and weight that one question twice in the published correct rate.
     if record:
-        RECORDED.append(
-            EvalRecord(
-                kind="knowledge_page",
-                question_id=question_id,
-                category=question.category,
-                correct=outcome.correct,
-                hit_trap=outcome.hit_trap,
-                sizes=[w.chars for w in outcome.waves],
-                bank_id=outcome.bank_id,
-                page_id=outcome.page_id,
-                reason=outcome.trap_reason if outcome.hit_trap else outcome.correct_reason,
-            )
-        )
+        RECORDED.append(page_record("knowledge_page", question_id, question, outcome))
     log.info(
         "%s: correct=%s trap=%s sizes=%s",
         question_id,
@@ -275,29 +254,9 @@ async def _run_delta(client: Hindsight, bank_id: str, settled: SettleFn, case: D
         f"{where}\npage reads: {outcome.waves[0].content[:400]}"
     )
 
-    verdict = await evaluate(outcome.final_content, question.answer_criteria, context=context)
-    outcome.correct, outcome.correct_reason = verdict.meets_criteria, verdict.reasoning
-    if question.must_not_claim:
-        trap = await evaluate(
-            outcome.final_content,
-            f"The page asserts, as currently true, that {question.must_not_claim}.",
-            context=context,
-        )
-        outcome.hit_trap, outcome.trap_reason = trap.meets_criteria, trap.reasoning
+    await grade_page(outcome, question, context)
 
-    RECORDED.append(
-        EvalRecord(
-            kind="delta_update",
-            question_id=case_id,
-            category=question.category,
-            correct=outcome.correct,
-            hit_trap=outcome.hit_trap,
-            sizes=[w.chars for w in outcome.waves],
-            bank_id=outcome.bank_id,
-            page_id=outcome.page_id,
-            reason=outcome.trap_reason if outcome.hit_trap else outcome.correct_reason,
-        )
-    )
+    RECORDED.append(page_record("delta_update", case_id, question, outcome))
     log.info(
         "%s: correct=%s trap=%s sizes=%s", case_id, outcome.correct, outcome.hit_trap, [w.chars for w in outcome.waves]
     )

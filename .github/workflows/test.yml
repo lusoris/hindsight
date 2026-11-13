@@ -216,10 +216,12 @@ jobs:
             - 'hindsight-extensions/bank-llm-routing/**'
           integrations-crewai:
             - 'hindsight-integrations/crewai/**'
+            - 'hindsight-integrations/_shared/integration_testing/**'
           integrations-litellm:
             - 'hindsight-integrations/litellm/**'
           integrations-pydantic-ai:
             - 'hindsight-integrations/pydantic-ai/**'
+            - 'hindsight-integrations/_shared/integration_testing/**'
           integrations-hermes:
             - 'hindsight-integrations/hermes/**'
             - 'scripts/test-hermes-compat.sh'
@@ -260,6 +262,7 @@ jobs:
             - 'scripts/check-integration-lockfiles.sh'
           integrations-openai-agents:
             - 'hindsight-integrations/openai-agents/**'
+            - 'hindsight-integrations/_shared/integration_testing/**'
           integrations-openhands:
             - 'hindsight-integrations/openhands/**'
             - 'hindsight-integrations/_shared/integration_testing/**'
