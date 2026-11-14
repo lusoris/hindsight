@@ -3,9 +3,8 @@
 
 set -e
 
-REPO_ROOT="$(git rev-parse --show-toplevel)"
-
 echo "Setting up git hooks..."
-git config core.hooksPath "$REPO_ROOT/.githooks"
+# A relative path uses each checkout's hooks instead of pinning a linked worktree.
+git config core.hooksPath .githooks
 echo "Git hooks configured to use .githooks directory"
 echo "Done!"
