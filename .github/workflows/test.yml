@@ -300,6 +300,9 @@ jobs:
           integrations-roo-code:
             - 'hindsight-integrations/roo-code/**'
           dev:
+            # test_setup_hooks.py verifies hook setup across worktrees.
+            - 'scripts/setup-hooks.sh'
+            - '.githooks/**'
             - 'scripts/sync-integration-config.py'
             - 'scripts/check-codacy-config.py'
             - 'hindsight-integrations/_shared/**'
