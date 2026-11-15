@@ -45,7 +45,7 @@ ALLOWED_SYS_MODULES_ASSIGNMENTS = (ast.Assign,)
 # must require explicit review rather than escaping a list of known dangerous calls.
 ALLOWED_BUILTINS = {"RuntimeError", "all", "any", "dict", "int", "len", "list", "str"}
 
-# All 67 measured attribute names are needed by the fixtures. Checking every
+# All 74 measured attribute names are needed by the fixtures. Checking every
 # attribute also closes paths through local objects, beyond imported-module roots.
 ALLOWED_ATTRIBUTE_NAMES = {
     "CompletedProcess",
@@ -77,6 +77,9 @@ ALLOWED_ATTRIBUTE_NAMES = {
     "findall",
     "get",
     "index",
+    "is_dir",  # test_setup_hooks.py checks the surviving hook directory.
+    "is_file",  # test_setup_hooks.py checks the surviving pre-commit hook.
+    "is_relative_to",  # test_setup_hooks.py rejects hooks in another linked worktree.
     "isoformat",
     "items",
     "join",
@@ -99,6 +102,7 @@ ALLOWED_ATTRIBUTE_NAMES = {
     "quote",
     "read_text",
     "readouterr",
+    "removeprefix",  # test_setup_hooks.py parses Git's worktree listing.
     "replace",
     "resolve",
     "returncode",
@@ -108,8 +112,11 @@ ALLOWED_ATTRIBUTE_NAMES = {
     "split",
     "splitlines",
     "startswith",
+    "stat",  # test_setup_hooks.py reads hook permissions without os.access.
+    "st_mode",  # test_setup_hooks.py checks the executable permission bits.
     "stderr",
     "stdout",
+    "strip",  # test_setup_hooks.py trims Git command output.
     "symlink_to",
     "timedelta",
     "util",
@@ -378,6 +385,8 @@ def test_bandit_excluded_module_starts_processes_only_with_argv_lists(path: str)
         ('subprocess.run(["git"], **kw)', "subprocess.run keyword is not allowed"),
         ('subprocess.Popen(["git"])', "subprocess.Popen is not allowed"),
         ('os.system("git")', "os.system is not allowed"),
+        ('import os\nos.access("hook", os.X_OK)', "os.access is not allowed"),
+        ('import os\nos.access("hook", os.X_OK)', "os.X_OK is not allowed"),
         ("from subprocess import run", "from subprocess import"),
         ("import subprocess as sp", "import subprocess as sp"),
         ("runner = subprocess.run", "subprocess.run used without a direct call"),
