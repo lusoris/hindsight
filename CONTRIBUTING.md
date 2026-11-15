@@ -106,7 +106,7 @@ Set up git hooks to automatically lint and format code before each commit:
 ./scripts/setup-hooks.sh
 ```
 
-This configures git to use the hooks in `.githooks/`, which run all scripts in `scripts/hooks/` on commit. The lint hook runs in parallel:
+This configures git to use the hooks in `.githooks/`, which run all scripts in `scripts/hooks/` on commit. The setting is relative so every worktree uses its own hooks, even after another worktree is removed. The lint hook runs in parallel:
 - **Python**: `ruff check --fix`, `ruff format`, `ty check`
 - **TypeScript**: `eslint --fix`, `prettier`
 
