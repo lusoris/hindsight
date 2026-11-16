@@ -47,6 +47,8 @@ from hindsight_client import Hindsight
 from hindsight_client_api.api.llm_traces_api import LLMTracesApi
 from pydantic import BaseModel
 
+from hindsight_system_evals.waiting import drain_then_fail_on_failed
+
 #: Overridable so a rebuilt archive can be measured before it replaces the committed one.
 FIXTURE = Path(
     os.getenv("HINDSIGHT_EVAL_REFRESH_COST_FIXTURE")
@@ -621,38 +623,13 @@ async def build_bank(
     return _BuildResult(bank_id=bank_id, archive=archive, pages=pages)
 
 
-async def _drain(client: Hindsight, bank_id: str, timeout: float = 7200) -> None:
-    """Wait until nothing is queued, then fail on anything that ended failed.
-
-    Not ``wait_until_settled``: that gives up on the first attempt that errors,
-    while a build runs ~a thousand model calls and a transient provider error is
-    what the worker's retries are for. Only an operation that exhausted them is
-    a broken build.
-    """
-    deadline = asyncio.get_running_loop().time() + timeout
-    while asyncio.get_running_loop().time() < deadline:
-        busy = [
-            op
-            for status in ("pending", "processing")
-            for op in (await client.operations.list_operations(bank_id, status=status, limit=100)).operations
-        ]
-        if not busy:
-            break
-        await asyncio.sleep(5)
-    else:
-        raise TimeoutError(f"bank {bank_id} still busy after {timeout}s")
-    failed = (await client.operations.list_operations(bank_id, status="failed", limit=100)).operations
-    if failed:
-        raise RuntimeError(f"bank {bank_id}: {', '.join(f'{op.task_type}: {op.error_message}' for op in failed)}")
-
-
 async def _build(out: Path, count: int) -> None:
     from hindsight_system_evals.target import eval_target
 
     with eval_target() as target:
         client = Hindsight(base_url=target.url, api_key=target.api_key, timeout=900)
         try:
-            result = await build_bank(client, lambda bank: _drain(client, bank), count)
+            result = await build_bank(client, lambda bank: drain_then_fail_on_failed(client, bank, timeout=7200), count)
         finally:
             await client.aclose()
     out.parent.mkdir(parents=True, exist_ok=True)

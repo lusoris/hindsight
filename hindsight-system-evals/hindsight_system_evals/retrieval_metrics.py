@@ -122,9 +122,7 @@ def ndcg_at_k(ranked: list[str], relevant: dict[str, int], k: int) -> float:
     NFCorpus and TREC-COVID need no second implementation.
     """
     gain = sum(relevant.get(document_id, 0) / math.log2(rank + 2) for rank, document_id in enumerate(ranked[:k]))
-    ideal = sum(
-        grade / math.log2(rank + 2) for rank, grade in enumerate(sorted(relevant.values(), reverse=True)[:k])
-    )
+    ideal = sum(grade / math.log2(rank + 2) for rank, grade in enumerate(sorted(relevant.values(), reverse=True)[:k]))
     return (gain / ideal) if ideal else 0.0
 
 
@@ -155,8 +153,23 @@ def r_precision(ranked: list[str], relevant: dict[str, int]) -> float:
     return precision_at_k(ranked, relevant, len(relevant)) if relevant else 0.0
 
 
+@dataclass(frozen=True, kw_only=True)
+class MetricFields:
+    """Shared ranking metrics; keyword-only fields keep subclass construction stable."""
+
+    ndcg: dict[int, float]
+    map: dict[int, float]
+    recall: dict[int, float]
+    precision: dict[int, float]
+    mrr_at: dict[int, float]
+    hit: dict[int, float]
+    mrr: float
+    """Untruncated, so `mrr_at[10] == 0 < mrr` reads as "returned, ranked too low"."""
+    r_precision: float
+
+
 @dataclass(frozen=True)
-class QueryScore:
+class QueryScore(MetricFields):
     """One query's scores, kept per query so a failure names the query that caused it."""
 
     query_id: str
@@ -167,15 +180,6 @@ class QueryScore:
     """Gold documents anywhere in the response — the ceiling every cutoff is bounded by."""
     first_hit_rank: int | None
     """Rank of the first gold document, or None if none came back. The diagnosis."""
-    ndcg: dict[int, float]
-    map: dict[int, float]
-    recall: dict[int, float]
-    precision: dict[int, float]
-    mrr_at: dict[int, float]
-    hit: dict[int, float]
-    mrr: float
-    """Untruncated, so `mrr_at[10] == 0 < mrr` reads as "returned, ranked too low"."""
-    r_precision: float
 
     @property
     def blame(self) -> str:
@@ -206,18 +210,10 @@ def score_query(query_id: str, ranked: list[str], relevant: dict[str, int]) -> Q
 
 
 @dataclass(frozen=True)
-class RunScore:
+class RunScore(MetricFields):
     """The macro-average over queries — the number a floor is set against."""
 
     queries: int
-    ndcg: dict[int, float]
-    map: dict[int, float]
-    recall: dict[int, float]
-    precision: dict[int, float]
-    mrr_at: dict[int, float]
-    hit: dict[int, float]
-    mrr: float
-    r_precision: float
     #: Mean distinct documents a response reached. Every @k above it is bounded by
     #: the token budget rather than by ranking, so a flat @20/@100 is a budget
     #: reading and not a quality one — which the table has to show, not hide.

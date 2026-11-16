@@ -20,6 +20,7 @@ dependencies = [
     "google-genai>=1.0.0",
     "google-auth>=2.0.0",
     "hindsight-client",
+    "hindsight-system-tests",
     # This package creates the run's database and drops it afterwards; the
     # server's own venv is a subprocess away and cannot do the cleanup for us.
     "pg0-embedded>=0.15.2",
@@ -38,6 +39,8 @@ reference-metrics = ["pytrec_eval-terrier>=0.5.6"]
 # editable, for the same reason the system tests give: a copied client silently
 # freezes the API surface at whenever the venv was last built.
 hindsight-client = { path = "../hindsight-clients/python", editable = true }
+# editable: use the shared wait implementation directly from the system tests.
+hindsight-system-tests = { path = "../hindsight-system-tests", editable = true }
 
 [project.scripts]
 # `run-amb`, not `amb`: AMB's own CLI is named `amb`, and two of them resolving
