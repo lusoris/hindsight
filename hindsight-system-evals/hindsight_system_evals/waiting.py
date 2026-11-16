@@ -17,6 +17,7 @@ import asyncio
 import os
 
 from hindsight_client import Hindsight
+
 from hindsight_system_tests.waiting import wait_until_settled as _wait_until_settled
 
 # Far longer than the system tests use, and for a concrete reason: there a stub

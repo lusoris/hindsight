@@ -73,3 +73,10 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "W", "F", "I"]
 ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+# The root ruff.toml (what Codacy runs) lists hindsight-system-tests as a source
+# root, so it sorts hindsight_system_tests as first-party. Without this line ruff
+# run from this directory sorts it with hindsight_client as third-party, and
+# waiting.py cannot satisfy both.
+known-first-party = ["hindsight_system_tests"]
