@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import type { BankRouteContext } from "@/lib/bank-sdk-route";
+import { validateBankId } from "@/lib/route-validation";
 
 export type ApiFailure = { error: string; errorKey: string };
 
@@ -129,6 +130,67 @@ export async function relayUpstreamJson(
     return relayUpstreamError(response);
   }
   return NextResponse.json(await response.json(), { status: successStatus });
+}
+
+export type BankGetRelayOptions = {
+  /** Path under the bank, including the route's forwarded query. */
+  suffix: (searchParams: URLSearchParams) => string;
+  failure: ApiFailure;
+  /** Log label used in `Error <action>:` and `API error <action>:`. */
+  action: string;
+  onUpstreamError: "detail" | "log" | "relay";
+};
+
+/**
+ * Validates the bank id and relays a GET with route-specific query forwarding. Success JSON
+ * answers at 200; upstream errors use their status and either a localized detail, a logged
+ * text body with the localized failure, or the unchanged JSON/status-text fallback. Anything
+ * that throws answers the localized failure at 500 and logs the route's action.
+ */
+export async function relayBankGet(
+  request: Request,
+  context: BankRouteContext,
+  options: BankGetRelayOptions
+): Promise<NextResponse> {
+  const { action, failure } = options;
+  try {
+    const { bankId } = await context.params;
+    const bankIdError = validateBankId(request, bankId);
+    if (bankIdError) return bankIdError;
+
+    const suffix = options.suffix(new URL(request.url).searchParams);
+    const response = await fetch(dataplaneBankUrl(bankId, suffix), {
+      method: "GET",
+      headers: getDataplaneHeaders(),
+    });
+
+    if (options.onUpstreamError === "detail") {
+      // Audit/LLM routes parse before checking ok: even a non-OK non-JSON body must reach 500.
+      const data = await response.json();
+      return NextResponse.json(
+        response.ok
+          ? data
+          : localizeApiErrorPayload(request, {
+              error: data.detail || failure.error,
+              errorKey: failure.errorKey,
+            }),
+        { status: response.ok ? 200 : response.status }
+      );
+    }
+
+    if (options.onUpstreamError === "log" && !response.ok) {
+      const text = await response.text();
+      console.error("API error %s:", action, text);
+      return NextResponse.json(localizeApiErrorPayload(request, failure), {
+        status: response.status,
+      });
+    }
+
+    return await relayUpstreamJson(response, 200);
+  } catch (error) {
+    console.error("Error %s:", action, error);
+    return NextResponse.json(localizeApiErrorPayload(request, failure), { status: 500 });
+  }
 }
 
 /** One dataplane POST a bank route relays: the path under the bank (query included) and its JSON body. */
