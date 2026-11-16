@@ -8,44 +8,30 @@ that thread as well: its 0.1 s tick became a busy loop on the test's mock, and
 Patch the name the code under test looks up instead, e.g.
 ``monkeypatch.setattr(waiting, "asyncio", SimpleNamespace(sleep=mock))``.
 
-The scan resolves each patch target through the imports of the file it appears in. A target
-rooted in a local object (a fixture value, a ``SimpleNamespace``) is not a module and is not
-checked.
+The scan is static and imports nothing: it expands each patch target through the imports of
+its file and fails when a segment of the patched object's dotted path names a standard-library
+module (``hindsight_system_tests.waiting.asyncio``, ``time``, ``asyncio.Event``). A target rooted
+in a local object (a fixture value, a ``SimpleNamespace``) is not checked. The first version
+imported each target and tested for a module object; Codacy's Opengrep rule
+``non-literal-import`` rejects a computed ``importlib.import_module``, and the path check needs
+no import.
 """
 
 import ast
-import importlib
 import sys
-import types
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
 TESTS = Path(__file__).parent
-_MISSING = object()
 
 
 @dataclass(frozen=True)
 class StdlibPatch:
     path: Path
     line: int
-    module: str
-
-
-def _resolve(dotted: list[str]) -> object:
-    """Import the longest module prefix of ``dotted``, then walk the rest as attributes."""
-    for split in range(len(dotted), 0, -1):
-        try:
-            obj: object = importlib.import_module(".".join(dotted[:split]))
-        except ImportError:
-            continue
-        for attr in dotted[split:]:
-            obj = getattr(obj, attr, _MISSING)
-            if obj is _MISSING:
-                return _MISSING
-        return obj
-    return _MISSING
+    target: str
 
 
 def _imported_names(tree: ast.Module) -> dict[str, list[str]]:
@@ -73,27 +59,27 @@ def _chain(expr: ast.expr) -> list[str] | None:
     return None
 
 
-def _patched_object(call: ast.Call, imported: dict[str, list[str]]) -> object:
-    """The object a patch call mutates, or _MISSING when it is not a patch call or unresolvable."""
+def _patched_path(call: ast.Call, imported: dict[str, list[str]]) -> list[str] | None:
+    """Dotted path of the object a patch call mutates; None when it is no patch call or local."""
     func = _chain(call.func) or []
     if not call.args or not func:
-        return _MISSING
+        return None
     is_setattr = func[-1] == "setattr"
     is_patch = func[-1] == "patch"
     is_patch_object = func[-2:] == ["patch", "object"]
     if not (is_setattr or is_patch or is_patch_object):
-        return _MISSING
+        return None
     target = call.args[0]
     # String form: monkeypatch.setattr("time.sleep", f) and mock.patch("asyncio.sleep") name
     # the attribute last; the object patched is everything before it.
     if (is_setattr and len(call.args) == 2) or is_patch:
         if isinstance(target, ast.Constant) and isinstance(target.value, str) and "." in target.value:
-            return _resolve(target.value.split(".")[:-1])
-        return _MISSING
+            return target.value.split(".")[:-1]
+        return None
     chain = _chain(target)
     if chain is None or chain[0] not in imported:
-        return _MISSING
-    return _resolve([*imported[chain[0]], *chain[1:]])
+        return None
+    return [*imported[chain[0]], *chain[1:]]
 
 
 def find_stdlib_patches(path: Path) -> list[StdlibPatch]:
@@ -103,16 +89,16 @@ def find_stdlib_patches(path: Path) -> list[StdlibPatch]:
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
-        obj = _patched_object(node, imported)
-        if isinstance(obj, types.ModuleType) and obj.__name__.split(".")[0] in sys.stdlib_module_names:
-            found.append(StdlibPatch(path=path, line=node.lineno, module=obj.__name__))
+        dotted = _patched_path(node, imported)
+        if dotted and any(segment in sys.stdlib_module_names for segment in dotted):
+            found.append(StdlibPatch(path=path, line=node.lineno, target=".".join(dotted)))
     return found
 
 
 def test_no_test_patches_a_stdlib_module() -> None:
     found = [patch for path in sorted(TESTS.rglob("*.py")) for patch in find_stdlib_patches(path)]
     assert found == [], "patch the code under test's own binding instead (see module docstring): " + ", ".join(
-        f"{patch.path.relative_to(TESTS)}:{patch.line} patches {patch.module}" for patch in found
+        f"{patch.path.relative_to(TESTS)}:{patch.line} patches {patch.target}" for patch in found
     )
 
 
@@ -125,6 +111,7 @@ _HEADER += "from hindsight_system_tests import waiting\n"
     [
         'monkeypatch.setattr(waiting.asyncio, "sleep", sleep)',  # the fixture form that broke PR 58's CI
         'monkeypatch.setattr(asyncio, "sleep", sleep)',
+        'monkeypatch.setattr(asyncio.Event, "wait", sleep)',
         'monkeypatch.setattr("time.sleep", lambda _: None)',
         'monkeypatch.setattr("hindsight_system_tests.waiting.asyncio.sleep", sleep)',
         'setattr(time, "monotonic", clock)',
