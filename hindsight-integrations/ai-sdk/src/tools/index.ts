@@ -1,5 +1,19 @@
 import { tool } from "ai";
 import { z } from "zod";
+import type {
+  Budget as SharedBudget,
+  EntityState,
+  FactType as SharedFactType,
+  HindsightRetainClient,
+  RecallResult,
+  ReflectFact,
+} from "../../../_shared/ts/hindsight-client-types.js";
+export type {
+  EntityState,
+  RecallResult,
+  ReflectFact,
+  RetainResponse,
+} from "../../../_shared/ts/hindsight-client-types.js";
 
 /**
  * Budget levels for recall/reflect operations.
@@ -13,31 +27,12 @@ export type Budget = z.infer<typeof BudgetSchema>;
 export const FactTypeSchema = z.enum(["world", "experience", "observation"]);
 export type FactType = z.infer<typeof FactTypeSchema>;
 
-/**
- * Recall result item from Hindsight
- */
-export interface RecallResult {
-  id: string;
-  text: string;
-  type?: string | null;
-  entities?: string[] | null;
-  context?: string | null;
-  occurred_start?: string | null;
-  occurred_end?: string | null;
-  mentioned_at?: string | null;
-  document_id?: string | null;
-  metadata?: Record<string, string> | null;
-  chunk_id?: string | null;
-}
-
-/**
- * Entity state with observations
- */
-export interface EntityState {
-  entity_id: string;
-  canonical_name: string;
-  observations: Array<{ text: string; mentioned_at?: string | null }>;
-}
+// Keep the schema-derived public types in sync with the structural client types.
+type Equal<A, B> =
+  (<T>() => T extends A ? 1 : 2) extends <T>() => T extends B ? 1 : 2 ? true : false;
+type Assert<T extends true> = T;
+type BudgetMatchesShared = Assert<Equal<Budget, SharedBudget>>;
+type FactTypeMatchesShared = Assert<Equal<FactType, SharedFactType>>;
 
 /**
  * Chunk data
@@ -60,18 +55,6 @@ export interface RecallResponse {
 }
 
 /**
- * Reflect fact
- */
-export interface ReflectFact {
-  id?: string | null;
-  text: string;
-  type?: string | null;
-  context?: string | null;
-  occurred_start?: string | null;
-  occurred_end?: string | null;
-}
-
-/**
  * Nested based_on structure from Hindsight reflect
  */
 export interface ReflectBasedOn {
@@ -86,16 +69,6 @@ export interface ReflectBasedOn {
 export interface ReflectResponse {
   text: string;
   based_on?: ReflectBasedOn | null;
-}
-
-/**
- * Retain response from Hindsight
- */
-export interface RetainResponse {
-  success: boolean;
-  bank_id: string;
-  items_count: number;
-  async: boolean;
 }
 
 /**
@@ -137,20 +110,7 @@ export interface DocumentResponse {
 /**
  * Hindsight client interface - matches @vectorize-io/hindsight-client
  */
-export interface HindsightClient {
-  retain(
-    bankId: string,
-    content: string,
-    options?: {
-      timestamp?: Date | string;
-      context?: string;
-      metadata?: Record<string, string>;
-      documentId?: string;
-      tags?: string[];
-      async?: boolean;
-    }
-  ): Promise<RetainResponse>;
-
+export interface HindsightClient extends HindsightRetainClient {
   recall(
     bankId: string,
     query: string,
