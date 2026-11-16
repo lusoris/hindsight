@@ -37,7 +37,7 @@
     "mermaid": ">=11.16.1",
     "websocket-driver": ">=0.7.5",
     "http-proxy-middleware": ">=2.0.10 <3",
-    "next": ">=16.4.1 <17",
+    "next": ">=16.4.5 <17",
     "fast-uri": ">=3.1.9 <4",
     "sharp": ">=0.35.4",
     "shell-quote": ">=1.9.0",
