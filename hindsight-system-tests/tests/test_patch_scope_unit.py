@@ -8,23 +8,37 @@ that thread as well: its 0.1 s tick became a busy loop on the test's mock, and
 Patch the name the code under test looks up instead, e.g.
 ``monkeypatch.setattr(waiting, "asyncio", SimpleNamespace(sleep=mock))``.
 
-The scan is static and imports nothing: it expands each patch target through the imports of
-its file and fails when a segment of the patched object's dotted path names a standard-library
-module (``hindsight_system_tests.waiting.asyncio``, ``time``, ``asyncio.Event``). A target rooted
-in a local object (a fixture value, a ``SimpleNamespace``) is not checked. The first version
-imported each target and tested for a module object; Codacy's Opengrep rule
-``non-literal-import`` rejects a computed ``importlib.import_module``, and the path check needs
-no import.
+The scan is static and imports nothing: it expands each patch target through the import
+bindings visible at the call and fails when a segment of the patched object's dotted path
+names a standard-library module (``hindsight_system_tests.waiting.asyncio``, ``time``,
+``asyncio.Event``). A target rooted in a local object (a fixture value, a ``SimpleNamespace``)
+is not checked. The first version imported each target and tested for a module object;
+Codacy's Opengrep rule ``non-literal-import`` rejects a computed ``importlib.import_module``,
+and the path check needs no import. The second version read one file-wide import map and only
+positional targets of ``setattr``/``patch``/``patch.object`` called by those names: a keyword
+``target=``, an aliased ``patch`` import and ``patch.multiple`` slipped through, and a test-local
+``time = SimpleNamespace(...)`` was flagged as the ``time`` module. Bindings are now resolved per
+scope, the way Python resolves the name at that call.
 """
 
 import ast
 import sys
+from collections.abc import Iterator
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 
 import pytest
 
 TESTS = Path(__file__).parent
+
+# A name's binding in one scope: the dotted path it was imported from, or None when the scope
+# binds it to something else (an assignment, a parameter, a def) and the import is shadowed.
+Bindings = dict[str, list[str] | None]
+
+_FUNCTION = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)
+_COMPREHENSION = (ast.ListComp, ast.SetComp, ast.DictComp, ast.GeneratorExp)
+_SCOPE = (*_FUNCTION, ast.ClassDef, *_COMPREHENSION)
 
 
 @dataclass(frozen=True)
@@ -34,19 +48,90 @@ class StdlibPatch:
     target: str
 
 
-def _imported_names(tree: ast.Module) -> dict[str, list[str]]:
-    names: dict[str, list[str]] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                if alias.asname:
-                    names[alias.asname] = alias.name.split(".")
-                else:
-                    root = alias.name.split(".")[0]
-                    names[root] = [root]
-        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-            for alias in node.names:
-                names[alias.asname or alias.name] = [*node.module.split("."), alias.name]
+class _Patcher(Enum):
+    ATTRIBUTE = "attribute"  # setattr/delattr: "pkg.mod.attr" string or (object, name)
+    PATCH = "patch"  # mock.patch: "pkg.mod.attr" string only
+    OBJECT = "object"  # mock.patch.object: (object, name) only
+    MULTIPLE = "multiple"  # mock.patch.multiple: "pkg.mod" string or object, attributes as kwargs
+
+
+def _inner_parts(scope: ast.AST) -> list[ast.AST]:
+    """Children a scope evaluates in its own namespace."""
+    if isinstance(scope, ast.Lambda):
+        return [scope.body]
+    if isinstance(scope, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return list(scope.body)
+    if isinstance(scope, _COMPREHENSION):
+        first, *rest = scope.generators
+        results = [scope.key, scope.value] if isinstance(scope, ast.DictComp) else [scope.elt]
+        return [*results, first.target, *first.ifs, *rest]
+    raise TypeError(f"not a scope: {type(scope).__name__}")
+
+
+def _outer_parts(scope: ast.AST) -> list[ast.AST]:
+    """Children of a nested scope that its enclosing scope evaluates: decorators, defaults, bases."""
+    if isinstance(scope, _FUNCTION):
+        defaults = [*scope.args.defaults, *(d for d in scope.args.kw_defaults if d is not None)]
+        decorators = [] if isinstance(scope, ast.Lambda) else scope.decorator_list
+        return [*decorators, *defaults]
+    if isinstance(scope, ast.ClassDef):
+        return [*scope.decorator_list, *scope.bases, *scope.keywords]
+    if isinstance(scope, _COMPREHENSION):
+        return [scope.generators[0].iter]
+    raise TypeError(f"not a nested scope: {type(scope).__name__}")
+
+
+def _own_nodes(scope: ast.AST) -> Iterator[ast.AST]:
+    """Every node a scope evaluates itself; a nested scope is yielded but not entered."""
+    stack = _inner_parts(scope)
+    while stack:
+        node = stack.pop()
+        yield node
+        stack.extend(_outer_parts(node) if isinstance(node, _SCOPE) else ast.iter_child_nodes(node))
+
+
+def _bound_by(node: ast.AST) -> Bindings:
+    """Names one statement or expression binds in the scope that evaluates it."""
+    if isinstance(node, ast.Import):
+        return {
+            alias.asname or alias.name.split(".")[0]: alias.name.split(".") if alias.asname else [alias.name.split(".")[0]]
+            for alias in node.names
+        }
+    if isinstance(node, ast.ImportFrom):
+        # A relative import binds a project-local module; it shadows like any local name.
+        absolute = node.module is not None and node.level == 0
+        return {
+            alias.asname or alias.name: [*node.module.split("."), alias.name] if absolute and node.module else None
+            for alias in node.names
+        }
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        return {node.id: None}
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {node.name: None}
+    if isinstance(node, (ast.ExceptHandler, ast.MatchAs, ast.MatchStar)) and node.name:
+        return {node.name: None}
+    if isinstance(node, ast.MatchMapping) and node.rest:
+        return {node.rest: None}
+    return {}
+
+
+def _scope_bindings(scope: ast.AST, outer: Bindings, module: Bindings | None) -> Bindings:
+    names = dict(outer)
+    nodes = list(_own_nodes(scope))
+    globals_ = {name for node in nodes if isinstance(node, ast.Global) for name in node.names}
+    nonlocals = {name for node in nodes if isinstance(node, ast.Nonlocal) for name in node.names}
+    if isinstance(scope, _FUNCTION):
+        args = scope.args
+        for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]:
+            if arg is not None:
+                names[arg.arg] = None
+    for node in nodes:
+        for name, binding in _bound_by(node).items():
+            if name not in globals_ and name not in nonlocals:
+                names[name] = binding
+    if module is not None:
+        for name in globals_:
+            names[name] = module.get(name)
     return names
 
 
@@ -59,40 +144,71 @@ def _chain(expr: ast.expr) -> list[str] | None:
     return None
 
 
-def _patched_path(call: ast.Call, imported: dict[str, list[str]]) -> list[str] | None:
+def _expand(chain: list[str], names: Bindings) -> list[str] | None:
+    """Dotted import path of a name chain; None when its root is a local object."""
+    root = names.get(chain[0])
+    return None if root is None else [*root, *chain[1:]]
+
+
+def _patcher(call: ast.Call, names: Bindings) -> _Patcher | None:
+    chain = _chain(call.func)
+    if chain is None:
+        return None
+    # `from unittest.mock import patch as mock_patch` makes `mock_patch(...)` a patch call;
+    # a local root (`monkeypatch.setattr`) keeps its own name.
+    func = _expand(chain, names) or chain
+    if func[-2:] == ["patch", "object"]:
+        return _Patcher.OBJECT
+    if func[-2:] == ["patch", "multiple"]:
+        return _Patcher.MULTIPLE
+    if func[-1] == "patch":
+        return _Patcher.PATCH
+    if func[-1] in ("setattr", "delattr"):
+        return _Patcher.ATTRIBUTE
+    return None
+
+
+def _patched_path(call: ast.Call, names: Bindings) -> list[str] | None:
     """Dotted path of the object a patch call mutates; None when it is no patch call or local."""
-    func = _chain(call.func) or []
-    if not call.args or not func:
+    patcher = _patcher(call, names)
+    if patcher is None:
         return None
-    is_setattr = func[-1] == "setattr"
-    is_patch = func[-1] == "patch"
-    is_patch_object = func[-2:] == ["patch", "object"]
-    if not (is_setattr or is_patch or is_patch_object):
+    # monkeypatch.setattr, mock.patch, patch.object and patch.multiple all name it `target`.
+    target = call.args[0] if call.args else next((kw.value for kw in call.keywords if kw.arg == "target"), None)
+    if target is None:
         return None
-    target = call.args[0]
-    # String form: monkeypatch.setattr("time.sleep", f) and mock.patch("asyncio.sleep") name
-    # the attribute last; the object patched is everything before it.
-    if (is_setattr and len(call.args) == 2) or is_patch:
-        if isinstance(target, ast.Constant) and isinstance(target.value, str) and "." in target.value:
-            return target.value.split(".")[:-1]
+    if isinstance(target, ast.Constant) and isinstance(target.value, str):
+        if patcher is _Patcher.OBJECT:
+            return None
+        segments = target.value.split(".")
+        # "asyncio.sleep" names the attribute last, so the patched object is everything before
+        # it; patch.multiple's string names the object itself.
+        return segments if patcher is _Patcher.MULTIPLE else segments[:-1] or None
+    if patcher is _Patcher.PATCH:
         return None
     chain = _chain(target)
-    if chain is None or chain[0] not in imported:
-        return None
-    return [*imported[chain[0]], *chain[1:]]
+    return None if chain is None else _expand(chain, names)
+
+
+def _scan(scope: ast.AST, outer: Bindings, module: Bindings | None, path: Path) -> list[StdlibPatch]:
+    names = _scope_bindings(scope, outer, module)
+    module = names if module is None else module
+    # A class body's names are invisible to the functions and comprehensions inside it.
+    inner_outer = outer if isinstance(scope, ast.ClassDef) else names
+    found: list[StdlibPatch] = []
+    for node in _own_nodes(scope):
+        if isinstance(node, ast.Call):
+            dotted = _patched_path(node, names)
+            if dotted and any(segment in sys.stdlib_module_names for segment in dotted):
+                found.append(StdlibPatch(path=path, line=node.lineno, target=".".join(dotted)))
+        if isinstance(node, _SCOPE):
+            found.extend(_scan(node, inner_outer, module, path))
+    return found
 
 
 def find_stdlib_patches(path: Path) -> list[StdlibPatch]:
     tree = ast.parse(path.read_text(), filename=str(path))
-    imported = _imported_names(tree)
-    found: list[StdlibPatch] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Call):
-            continue
-        dotted = _patched_path(node, imported)
-        if dotted and any(segment in sys.stdlib_module_names for segment in dotted):
-            found.append(StdlibPatch(path=path, line=node.lineno, target=".".join(dotted)))
-    return found
+    return sorted(_scan(tree, {}, None, path), key=lambda patch: patch.line)
 
 
 def test_no_test_patches_a_stdlib_module() -> None:
@@ -102,8 +218,22 @@ def test_no_test_patches_a_stdlib_module() -> None:
     )
 
 
-_HEADER = "import asyncio\nimport time\nfrom unittest import mock\nfrom unittest.mock import patch\n"
-_HEADER += "from hindsight_system_tests import waiting\n"
+_HEADER = (
+    "import asyncio\n"
+    "import time\n"
+    "from unittest import mock\n"
+    "from unittest.mock import patch\n"
+    "from unittest.mock import patch as mock_patch\n"
+    "from hindsight_system_tests import waiting\n"
+)
+# The planted statement sits on the line after the header, two blank lines and the def.
+_PLANTED_LINE = _HEADER.count("\n") + 4
+
+
+def _plant(tmp_path: Path, line: str) -> Path:
+    source = tmp_path / "test_planted.py"
+    source.write_text(f"{_HEADER}\n\ndef test_x(monkeypatch, sleep, clock, client):\n    {line}\n")
+    return source
 
 
 @pytest.mark.parametrize(
@@ -114,15 +244,28 @@ _HEADER += "from hindsight_system_tests import waiting\n"
         'monkeypatch.setattr(asyncio.Event, "wait", sleep)',
         'monkeypatch.setattr("time.sleep", lambda _: None)',
         'monkeypatch.setattr("hindsight_system_tests.waiting.asyncio.sleep", sleep)',
+        'monkeypatch.setattr(target=asyncio, name="sleep", value=sleep)',
+        'monkeypatch.delattr(time, "monotonic")',
         'setattr(time, "monotonic", clock)',
         'patch("asyncio.sleep")',
+        'patch(target="asyncio.sleep", new=sleep)',
+        'mock_patch("asyncio.sleep", sleep)',
         'mock.patch.object(waiting.time, "monotonic")',
+        'mock.patch.multiple(asyncio, sleep=sleep)',
+        'patch.multiple("asyncio", sleep=sleep)',
+        'import socket; monkeypatch.setattr(socket, "socket", sleep)',  # function-local import
+        'global time; monkeypatch.setattr(time, "monotonic", clock)',
     ],
 )
 def test_planted_stdlib_patch_is_found(tmp_path: Path, line: str) -> None:
+    assert [patch.line for patch in find_stdlib_patches(_plant(tmp_path, line))] == [_PLANTED_LINE]
+
+
+def test_planted_decorator_patch_is_found(tmp_path: Path) -> None:
     source = tmp_path / "test_planted.py"
-    source.write_text(f"{_HEADER}\n\ndef test_x(monkeypatch, sleep, clock):\n    {line}\n")
-    assert [patch.line for patch in find_stdlib_patches(source)] == [9]
+    source.write_text(f'{_HEADER}\n\n@patch.object(asyncio, "sleep")\ndef test_x(asyncio):\n    pass\n')
+    # The decorator runs in the module scope, where `asyncio` is still the import.
+    assert [patch.line for patch in find_stdlib_patches(source)] == [_HEADER.count("\n") + 3]
 
 
 @pytest.mark.parametrize(
@@ -133,9 +276,11 @@ def test_planted_stdlib_patch_is_found(tmp_path: Path, line: str) -> None:
         'monkeypatch.setattr("hindsight_system_tests.waiting.asyncio", SimpleNamespace(sleep=sleep))',
         'monkeypatch.setattr(client.operations, "list_operations", sleep)',
         'patch.object(waiting, "wait_until_settled")',
+        'patch.multiple(waiting, wait_until_settled=sleep)',
+        # A test-local object named like a stdlib module is not that module.
+        'time = SimpleNamespace(monotonic=clock); monkeypatch.setattr(time, "monotonic", clock)',
+        'client.patch("/v1/default/banks/b", json={})',
     ],
 )
 def test_patching_the_code_under_test_binding_passes(tmp_path: Path, line: str) -> None:
-    source = tmp_path / "test_planted.py"
-    source.write_text(f"{_HEADER}\n\ndef test_x(monkeypatch, sleep, clock, client):\n    {line}\n")
-    assert find_stdlib_patches(source) == []
+    assert find_stdlib_patches(_plant(tmp_path, line)) == []
