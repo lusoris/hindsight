@@ -25,7 +25,11 @@ class Page:
 @pytest.fixture
 def scripted_client(monkeypatch: pytest.MonkeyPatch) -> Callable[..., SimpleNamespace]:
     sleep = AsyncMock()
-    monkeypatch.setattr(waiting.asyncio, "sleep", sleep)
+    # Replace waiting's own asyncio binding, not asyncio.sleep itself: the session's
+    # provider-stub thread (uvicorn) awaits asyncio.sleep(0.1) every tick, and a
+    # patched module attribute turned that into a busy loop on this mock, thousands
+    # of awaits that broke assert_not_awaited in the full suite.
+    monkeypatch.setattr(waiting, "asyncio", SimpleNamespace(sleep=sleep))
 
     def make(*pages: Page) -> SimpleNamespace:
         operations = SimpleNamespace(list_operations=AsyncMock(side_effect=pages))
