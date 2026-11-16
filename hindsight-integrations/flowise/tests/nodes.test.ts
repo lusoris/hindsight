@@ -168,82 +168,16 @@ describe("All three nodes share the hindsightApi credential", () => {
   });
 });
 
-// Literal inputs captured from the nodes at 263bd7162, before extracting the core.
-const originalNodeInputs = [
-  {
-    Node: HindsightRecall,
-    inputs: [
-      {
-        label: "Default Bank ID",
-        name: "bankId",
-        type: "string",
-        description:
-          "Default memory bank to recall from when the agent does not pass one. Banks are created on first use.",
-        placeholder: "user-123",
-        optional: true,
-      },
-      {
-        label: "Default Budget",
-        name: "budget",
-        type: "options",
-        options: [
-          { label: "Low", name: "low" },
-          { label: "Mid", name: "mid" },
-          { label: "High", name: "high" },
-        ],
-        default: "mid",
-        optional: true,
-        description: "Default recall budget when the agent does not pass one.",
-      },
-    ],
-  },
-  {
-    Node: HindsightReflect,
-    inputs: [
-      {
-        label: "Default Bank ID",
-        name: "bankId",
-        type: "string",
-        description:
-          "Default memory bank to reflect on when the agent does not pass one. Banks are created on first use.",
-        placeholder: "user-123",
-        optional: true,
-      },
-      {
-        label: "Default Budget",
-        name: "budget",
-        type: "options",
-        options: [
-          { label: "Low", name: "low" },
-          { label: "Mid", name: "mid" },
-          { label: "High", name: "high" },
-        ],
-        default: "mid",
-        optional: true,
-        description: "Default reflect budget when the agent does not pass one.",
-      },
-    ],
-  },
-  {
-    Node: HindsightRetain,
-    inputs: [
-      {
-        label: "Default Bank ID",
-        name: "bankId",
-        type: "string",
-        description:
-          "Default memory bank to retain into when the agent does not pass one. Banks are created on first use.",
-        placeholder: "user-123",
-        optional: true,
-      },
-    ],
-  },
-];
-
-for (const { Node, inputs } of originalNodeInputs) {
+// File snapshots pin the node inputs from 263bd7162, before extracting the core.
+// The trailing newline matches what lint.sh's prettier writes to these .json files;
+// without it, prettier rewrites the snapshots and the CI=true comparison fails.
+for (const Node of [HindsightRecall, HindsightReflect, HindsightRetain]) {
   describe(new Node().type + " shared core contract", () => {
-    it("preserves the complete input list", () => {
-      expect(new Node().inputs).toStrictEqual(inputs);
+    it("matches main node inputs file snapshot", async () => {
+      const node = new Node();
+      await expect(`${JSON.stringify(node.inputs, null, 2)}\n`).toMatchFileSnapshot(
+        `./__snapshots__/${node.type}.inputs.json`
+      );
     });
 
     it.each([

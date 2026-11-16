@@ -1,0 +1,32 @@
+[
+  {
+    "label": "Default Bank ID",
+    "name": "bankId",
+    "type": "string",
+    "description": "Default memory bank to reflect on when the agent does not pass one. Banks are created on first use.",
+    "placeholder": "user-123",
+    "optional": true
+  },
+  {
+    "label": "Default Budget",
+    "name": "budget",
+    "type": "options",
+    "options": [
+      {
+        "label": "Low",
+        "name": "low"
+      },
+      {
+        "label": "Mid",
+        "name": "mid"
+      },
+      {
+        "label": "High",
+        "name": "high"
+      }
+    ],
+    "default": "mid",
+    "optional": true,
+    "description": "Default reflect budget when the agent does not pass one."
+  }
+]
