@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { relayUpstreamJson } from "@/lib/dataplane-proxy";
 import { localizeApiErrorPayload, missingQueryParam } from "@/lib/i18n/api-errors";
 import { sdk, lowLevelClient, dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { respondWithSdk } from "@/lib/sdk-response";
@@ -90,13 +91,7 @@ export async function PATCH(request: NextRequest) {
       }
     );
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ detail: response.statusText }));
-      return NextResponse.json(error, { status: response.status });
-    }
-
-    const data = await response.json();
-    return NextResponse.json(data, { status: 200 });
+    return await relayUpstreamJson(response, 200);
   } catch (error) {
     console.error("Error updating document tags:", error);
     return NextResponse.json(

@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import {
   proxyDataplane,
   relayBankPost,
+  relayUpstreamError,
   type BankPostCall,
   type DataplaneProxyOptions,
 } from "@/lib/dataplane-proxy";
@@ -310,6 +311,30 @@ describe("proxyDataplane", () => {
     const [calledUrl, calledInit] = fetchSpy.mock.calls[0];
     expect(calledUrl).toBe(dataplaneBankUrl("bank-1", SUFFIX));
     expect(calledInit).toStrictEqual(expectedInit);
+  });
+});
+
+describe("relayUpstreamError", () => {
+  it("relays the JSON error body at the upstream status", async () => {
+    const body = { detail: "Bank exists", context: { bank_id: "bank-1" } };
+    const upstream = new Response(JSON.stringify(body), { status: HTTP_CONFLICT });
+
+    const response = await relayUpstreamError(upstream);
+
+    expect(response.status).toBe(HTTP_CONFLICT);
+    expect(await response.json()).toEqual(body);
+  });
+
+  it("uses the status text at the upstream status when the error body is not JSON", async () => {
+    const upstream = new Response("<html>gateway error</html>", {
+      status: HTTP_BAD_GATEWAY,
+      statusText: "Bad Gateway",
+    });
+
+    const response = await relayUpstreamError(upstream);
+
+    expect(response.status).toBe(HTTP_BAD_GATEWAY);
+    expect(await response.json()).toEqual({ detail: "Bad Gateway" });
   });
 });
 
