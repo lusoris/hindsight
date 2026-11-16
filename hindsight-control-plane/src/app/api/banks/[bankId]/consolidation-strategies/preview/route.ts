@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { relayUpstreamJson } from "@/lib/dataplane-proxy";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { DATAPLANE_URL, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { validateBankId } from "@/lib/route-validation";
@@ -21,12 +22,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ ban
       }
     );
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ detail: response.statusText }));
-      return NextResponse.json(error, { status: response.status });
-    }
-
-    return NextResponse.json(await response.json(), { status: 200 });
+    return await relayUpstreamJson(response, 200);
   } catch (error) {
     console.error("Error previewing consolidation strategies:", error);
     return NextResponse.json(

@@ -110,6 +110,12 @@ export async function proxyDataplane(
   }
 }
 
+/** Relays an upstream error's JSON, or `{ detail: statusText }` for non-JSON, at its own status. */
+export async function relayUpstreamError(response: Response): Promise<NextResponse> {
+  const error = await response.json().catch(() => ({ detail: response.statusText }));
+  return NextResponse.json(error, { status: response.status });
+}
+
 /**
  * Answers with what the dataplane answered: its JSON at `successStatus` when the call succeeded,
  * otherwise its error body (or `{ detail: statusText }` when that is not JSON) at its own status.
@@ -120,8 +126,7 @@ export async function relayUpstreamJson(
   successStatus: number
 ): Promise<NextResponse> {
   if (!response.ok) {
-    const error = await response.json().catch(() => ({ detail: response.statusText }));
-    return NextResponse.json(error, { status: response.status });
+    return relayUpstreamError(response);
   }
   return NextResponse.json(await response.json(), { status: successStatus });
 }

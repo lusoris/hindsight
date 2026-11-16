@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { relayUpstreamError } from "@/lib/dataplane-proxy";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { DATAPLANE_URL, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { requireQueryBankId } from "@/lib/route-validation";
@@ -43,10 +44,7 @@ export async function GET(request: NextRequest) {
       signal: request.signal,
     });
 
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ detail: response.statusText }));
-      return NextResponse.json(error, { status: response.status });
-    }
+    if (!response.ok) return await relayUpstreamError(response);
 
     // Stream the body through without parsing it: on a big bank it is several
     // MB, and parsing it only to serialize it again costs the user half a second.

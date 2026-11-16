@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { relayUpstreamJson } from "@/lib/dataplane-proxy";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { appendTagFilter, readTagFilter } from "@/lib/tag-filter-params";
@@ -15,11 +16,7 @@ export async function GET(request: NextRequest) {
     const response = await fetch(dataplaneBankUrl(bankId, `/knowledge-base/tree?${query}`), {
       headers: getDataplaneHeaders(),
     });
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ detail: response.statusText }));
-      return NextResponse.json(error, { status: response.status });
-    }
-    return NextResponse.json(await response.json(), { status: 200 });
+    return await relayUpstreamJson(response, 200);
   } catch (error) {
     console.error("Failed to fetch knowledge base tree:", error);
     return NextResponse.json(
