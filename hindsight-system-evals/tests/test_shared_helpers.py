@@ -9,7 +9,7 @@ from hindsight_system_evals import pages, waiting
 
 
 @pytest.fixture
-def drain_client(monkeypatch):
+def drain_client(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     sleep = AsyncMock()
     # Replace only the helper's clock, not the event loop's own time method.
     loop = SimpleNamespace(time=Mock(side_effect=[0.0, 0.0, 0.5, 2.0]))
@@ -18,11 +18,11 @@ def drain_client(monkeypatch):
     return SimpleNamespace(operations=SimpleNamespace(list_operations=listing), sleep=sleep)
 
 
-def operation_page(*operations):
+def operation_page(*operations: SimpleNamespace) -> SimpleNamespace:
     return SimpleNamespace(operations=list(operations))
 
 
-async def test_drain_stops_on_idle(drain_client):
+async def test_drain_stops_on_idle(drain_client: SimpleNamespace) -> None:
     listing = drain_client.operations.list_operations
     listing.return_value = operation_page()
     await waiting.drain_then_fail_on_failed(drain_client, "b", timeout=1)
@@ -30,7 +30,7 @@ async def test_drain_stops_on_idle(drain_client):
     drain_client.sleep.assert_not_awaited()
 
 
-async def test_drain_waits_for_retry_before_checking_failed(drain_client):
+async def test_drain_waits_for_retry_before_checking_failed(drain_client: SimpleNamespace) -> None:
     retry = SimpleNamespace(task_type="retain", error_message="transient")
     listing = drain_client.operations.list_operations
     listing.side_effect = [operation_page(retry), operation_page(), *[operation_page() for _ in range(3)]]
@@ -39,7 +39,7 @@ async def test_drain_waits_for_retry_before_checking_failed(drain_client):
     assert listing.await_args_list[-1] == call("b", status="failed", limit=100)
 
 
-async def test_drain_times_out_without_querying_failed(drain_client):
+async def test_drain_times_out_without_querying_failed(drain_client: SimpleNamespace) -> None:
     drain_client.operations.list_operations.return_value = operation_page(SimpleNamespace(task_type="retain"))
     with pytest.raises(TimeoutError, match="^bank b still busy after 1s$"):
         await waiting.drain_then_fail_on_failed(drain_client, "b", timeout=1)
@@ -47,7 +47,7 @@ async def test_drain_times_out_without_querying_failed(drain_client):
     assert all(c.kwargs["status"] != "failed" for c in drain_client.operations.list_operations.await_args_list)
 
 
-async def test_drain_reports_all_failed_operations(drain_client):
+async def test_drain_reports_all_failed_operations(drain_client: SimpleNamespace) -> None:
     failed = operation_page(
         SimpleNamespace(task_type="retain", error_message="bad extraction"),
         SimpleNamespace(task_type="consolidation", error_message="bad model"),
@@ -59,7 +59,9 @@ async def test_drain_reports_all_failed_operations(drain_client):
 
 
 @pytest.mark.parametrize("overrides", [{}, {"timeout": 12.0, "allow_failed": True}])
-async def test_evals_wait_forwards_defaults_and_overrides(monkeypatch, overrides):
+async def test_evals_wait_forwards_defaults_and_overrides(
+    monkeypatch: pytest.MonkeyPatch, overrides: dict[str, float | bool]
+) -> None:
     shared = AsyncMock()
     monkeypatch.setattr(waiting, "_wait_until_settled", shared)
     client = object()
@@ -73,7 +75,7 @@ async def test_evals_wait_forwards_defaults_and_overrides(monkeypatch, overrides
     )
 
 
-async def test_page_waves_preserve_items_order_and_snapshots():
+async def test_page_waves_preserve_items_order_and_snapshots() -> None:
     events = Mock()
     events.attach_mock(AsyncMock(), "retain")
     events.attach_mock(AsyncMock(), "settle")
