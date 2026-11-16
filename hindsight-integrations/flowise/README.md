@@ -19,7 +19,7 @@ While the upstream PR is in flight, you can use the nodes by copying them into a
 ```bash
 git clone https://github.com/FlowiseAI/Flowise.git
 cd Flowise
-# Copy the three tool nodes
+# Copy the three tool node directories plus HindsightCommon/
 cp -r /path/to/hindsight/hindsight-integrations/flowise/nodes/tools/Hindsight* \
    packages/components/nodes/tools/
 # Copy the credential class

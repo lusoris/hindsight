@@ -167,3 +167,129 @@ describe("All three nodes share the hindsightApi credential", () => {
     expect(f.credential.credentialNames).toEqual(["hindsightApi"]);
   });
 });
+
+// Literal inputs captured from the nodes at 263bd7162, before extracting the core.
+const originalNodeInputs = [
+  {
+    Node: HindsightRecall,
+    inputs: [
+      {
+        label: "Default Bank ID",
+        name: "bankId",
+        type: "string",
+        description:
+          "Default memory bank to recall from when the agent does not pass one. Banks are created on first use.",
+        placeholder: "user-123",
+        optional: true,
+      },
+      {
+        label: "Default Budget",
+        name: "budget",
+        type: "options",
+        options: [
+          { label: "Low", name: "low" },
+          { label: "Mid", name: "mid" },
+          { label: "High", name: "high" },
+        ],
+        default: "mid",
+        optional: true,
+        description: "Default recall budget when the agent does not pass one.",
+      },
+    ],
+  },
+  {
+    Node: HindsightReflect,
+    inputs: [
+      {
+        label: "Default Bank ID",
+        name: "bankId",
+        type: "string",
+        description:
+          "Default memory bank to reflect on when the agent does not pass one. Banks are created on first use.",
+        placeholder: "user-123",
+        optional: true,
+      },
+      {
+        label: "Default Budget",
+        name: "budget",
+        type: "options",
+        options: [
+          { label: "Low", name: "low" },
+          { label: "Mid", name: "mid" },
+          { label: "High", name: "high" },
+        ],
+        default: "mid",
+        optional: true,
+        description: "Default reflect budget when the agent does not pass one.",
+      },
+    ],
+  },
+  {
+    Node: HindsightRetain,
+    inputs: [
+      {
+        label: "Default Bank ID",
+        name: "bankId",
+        type: "string",
+        description:
+          "Default memory bank to retain into when the agent does not pass one. Banks are created on first use.",
+        placeholder: "user-123",
+        optional: true,
+      },
+    ],
+  },
+];
+
+for (const { Node, inputs } of originalNodeInputs) {
+  describe(new Node().type + " shared core contract", () => {
+    it("preserves the complete input list", () => {
+      expect(new Node().inputs).toStrictEqual(inputs);
+    });
+
+    it.each([
+      ["icon", "hindsight.png"],
+      ["category", "Tools"],
+      ["version", 1.0],
+      [
+        "credential",
+        {
+          label: "Connect Credential",
+          name: "credential",
+          type: "credential",
+          credentialNames: ["hindsightApi"],
+        },
+      ],
+    ] as const)("preserves %s", (field, expected) => {
+      expect(new Node()[field]).toStrictEqual(expected);
+    });
+
+    it("starts baseClasses with the node type", () => {
+      const node = new Node();
+      expect(node.baseClasses[0]).toBe(node.type);
+    });
+
+    it.each([
+      { apiUrl: "http://127.0.0.1:8888", apiKey: "fixture-api-key" },
+      { apiUrl: "http://127.0.0.1:8888", apiKey: "" },
+      { apiUrl: "http://127.0.0.1:8888" },
+      { apiUrl: "", apiKey: "fixture-api-key" },
+      { apiUrl: "", apiKey: "" },
+      {},
+    ])("constructs the client from fixture %j", async (credential) => {
+      clientOpts.length = 0;
+      await new Node().init({ credential: JSON.stringify(credential) }, "", {});
+      expect(clientOpts).toStrictEqual([
+        {
+          baseUrl: credential.apiUrl || "https://api.hindsight.vectorize.io",
+          ...(credential.apiKey ? { apiKey: credential.apiKey } : {}),
+          userAgent: "hindsight-flowise",
+        },
+      ]);
+    });
+  });
+}
+
+it("does not export nodeClass from the shared helper", async () => {
+  const core = await import("../nodes/tools/HindsightCommon/core");
+  expect(core).not.toHaveProperty("nodeClass");
+});

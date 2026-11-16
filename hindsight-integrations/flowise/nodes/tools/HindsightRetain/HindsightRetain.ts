@@ -1,13 +1,8 @@
 import { DynamicStructuredTool } from "@langchain/core/tools";
-import { HindsightClient } from "@vectorize-io/hindsight-client";
 import { z } from "zod";
 
-import { ICommonObject, INode, INodeData, INodeParams } from "../../../src/Interface";
-import { getBaseClasses, getCredentialData, getCredentialParam } from "../../../src/utils";
-
-// Each node dir is copied into Flowise on its own, so there is no shared module or
-// package.json to read a version from.
-const USER_AGENT = "hindsight-flowise";
+import { ICommonObject, INodeData } from "../../../src/Interface";
+import * as common from "../HindsightCommon/core";
 
 const RetainSchema = z.object({
   bankId: z.string().describe("The Hindsight memory bank to retain content into."),
@@ -20,61 +15,20 @@ const RetainSchema = z.object({
     .describe("Optional list of tags to apply to the retained memory."),
 });
 
-class HindsightRetain_Tools implements INode {
-  label: string;
-  name: string;
-  version: number;
-  description: string;
-  type: string;
-  icon: string;
-  category: string;
-  baseClasses: string[];
-  credential: INodeParams;
-  inputs: INodeParams[];
-
+class HindsightRetain_Tools extends common.HindsightToolNode {
   constructor() {
-    this.label = "Hindsight Retain";
-    this.name = "hindsightRetain";
-    this.version = 1.0;
-    this.type = "HindsightRetain";
-    this.icon = "hindsight.png";
-    this.category = "Tools";
-    this.description =
-      "Store free-text content as long-term memory in a Hindsight bank. Hindsight extracts facts asynchronously after the call returns.";
-    this.credential = {
-      label: "Connect Credential",
-      name: "credential",
-      type: "credential",
-      credentialNames: ["hindsightApi"],
-    };
-    this.inputs = [
-      {
-        label: "Default Bank ID",
-        name: "bankId",
-        type: "string",
-        description:
-          "Default memory bank to retain into when the agent does not pass one. Banks are created on first use.",
-        placeholder: "user-123",
-        optional: true,
-      },
-    ];
-    this.baseClasses = [this.type, ...getBaseClasses(DynamicStructuredTool)];
+    super({
+      label: "Hindsight Retain",
+      name: "hindsightRetain",
+      type: "HindsightRetain",
+      inputs: [common.defaultBankInput("retain into")],
+      description:
+        "Store free-text content as long-term memory in a Hindsight bank. Hindsight extracts facts asynchronously after the call returns.",
+    });
   }
 
   async init(nodeData: INodeData, _: string, options: ICommonObject): Promise<unknown> {
-    const credentialData = await getCredentialData(nodeData.credential ?? "", options);
-    const apiUrl =
-      getCredentialParam("apiUrl", credentialData, nodeData) ||
-      "https://api.hindsight.vectorize.io";
-    const apiKey = getCredentialParam("apiKey", credentialData, nodeData);
-
-    const defaultBankId = (nodeData.inputs?.bankId as string) || "";
-
-    const client = new HindsightClient({
-      baseUrl: apiUrl,
-      ...(apiKey ? { apiKey } : {}),
-      userAgent: USER_AGENT,
-    });
+    const { client, defaultBankId } = await common.createToolContext(nodeData, options);
 
     return new DynamicStructuredTool({
       name: "hindsight_retain",
