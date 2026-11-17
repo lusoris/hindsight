@@ -159,6 +159,7 @@ export async function relayBankGet(
     if (bankIdError) return bankIdError;
 
     const suffix = options.suffix(new URL(request.url).searchParams);
+    // nosemgrep: rules_lgpl_javascript_ssrf_rule-node-ssrf -- host is the server-set DATAPLANE_URL and the request adds only the encoded bank id and allow-listed query values, the flow main ran in the four routes this replaces (bank ids "." and ".." still resolve as dot segments, a pre-existing gap this marker does not cover); category C, expires 2026-11-27
     const response = await fetch(dataplaneBankUrl(bankId, suffix), {
       method: "GET",
       headers: getDataplaneHeaders(),
