@@ -149,6 +149,16 @@ for (const route of ROUTES) {
       );
     });
 
+    // Before relayBankGet, observations/scopes interpolated the raw bank id into the URL. Every
+    // route now builds it with dataplaneBankUrl, so a reserved character cannot change the path.
+    it("URL-encodes the bank id in the upstream path", async () => {
+      fetchSpy.mockResolvedValueOnce(Response.json({}));
+      await route.handler(request(), context("team a/b?x"));
+      expect(fetchSpy.mock.calls[0][0]).toBe(
+        `${DATAPLANE_URL}/v1/default/banks/team%20a%2Fb%3Fx/${route.name}`
+      );
+    });
+
     it("answers a thrown fetch with its failure at 500 and the original log label", async () => {
       fetchSpy.mockRejectedValueOnce(new Error("connection refused"));
       const response = await route.handler(request(), context());
