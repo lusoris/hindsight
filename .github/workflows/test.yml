@@ -193,14 +193,17 @@ jobs:
             - 'hindsight-integrations/openclaw/**'
           integrations-ai-sdk:
             - 'hindsight-integrations/ai-sdk/**'
+            - 'hindsight-integrations/_shared/ts/**'
           integrations-eliza:
             - 'hindsight-integrations/eliza/**'
+            - 'hindsight-integrations/_shared/ts/**'
           integrations-agent-framework:
             - 'hindsight-integrations/agent-framework/**'
           integrations-composio:
             - 'hindsight-integrations/composio/**'
           integrations-chat:
             - 'hindsight-integrations/chat/**'
+            - 'hindsight-integrations/_shared/ts/**'
           integrations-coding-agents:
             - 'hindsight-integrations/coding-agents/**'
           integrations-github-copilot:
