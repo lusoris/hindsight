@@ -167,3 +167,63 @@ describe("All three nodes share the hindsightApi credential", () => {
     expect(f.credential.credentialNames).toEqual(["hindsightApi"]);
   });
 });
+
+// File snapshots pin the node inputs from 263bd7162, before extracting the core.
+// The trailing newline matches what lint.sh's prettier writes to these .json files;
+// without it, prettier rewrites the snapshots and the CI=true comparison fails.
+for (const Node of [HindsightRecall, HindsightReflect, HindsightRetain]) {
+  describe(new Node().type + " shared core contract", () => {
+    it("matches main node inputs file snapshot", async () => {
+      const node = new Node();
+      await expect(`${JSON.stringify(node.inputs, null, 2)}\n`).toMatchFileSnapshot(
+        `./__snapshots__/${node.type}.inputs.json`
+      );
+    });
+
+    it.each([
+      ["icon", "hindsight.png"],
+      ["category", "Tools"],
+      ["version", 1.0],
+      [
+        "credential",
+        {
+          label: "Connect Credential",
+          name: "credential",
+          type: "credential",
+          credentialNames: ["hindsightApi"],
+        },
+      ],
+    ] as const)("preserves %s", (field, expected) => {
+      expect(new Node()[field]).toStrictEqual(expected);
+    });
+
+    it("starts baseClasses with the node type", () => {
+      const node = new Node();
+      expect(node.baseClasses[0]).toBe(node.type);
+    });
+
+    it.each([
+      { apiUrl: "http://127.0.0.1:8888", apiKey: "fixture-api-key" },
+      { apiUrl: "http://127.0.0.1:8888", apiKey: "" },
+      { apiUrl: "http://127.0.0.1:8888" },
+      { apiUrl: "", apiKey: "fixture-api-key" },
+      { apiUrl: "", apiKey: "" },
+      {},
+    ])("constructs the client from fixture %j", async (credential) => {
+      clientOpts.length = 0;
+      await new Node().init({ credential: JSON.stringify(credential) }, "", {});
+      expect(clientOpts).toStrictEqual([
+        {
+          baseUrl: credential.apiUrl || "https://api.hindsight.vectorize.io",
+          ...(credential.apiKey ? { apiKey: credential.apiKey } : {}),
+          userAgent: "hindsight-flowise",
+        },
+      ]);
+    });
+  });
+}
+
+it("does not export nodeClass from the shared helper", async () => {
+  const core = await import("../nodes/tools/HindsightCommon/core");
+  expect(core).not.toHaveProperty("nodeClass");
+});
