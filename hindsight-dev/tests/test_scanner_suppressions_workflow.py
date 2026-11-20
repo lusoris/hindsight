@@ -52,3 +52,13 @@ def test_job_listed_in_report_pr_status_needs() -> None:
     report_job = workflow["jobs"]["report-pr-status"]
     needs = report_job.get("needs", [])
     assert JOB in needs
+
+
+def test_test_dev_runs_when_the_real_marker_file_changes() -> None:
+    """test_check_scanner_suppressions.py judges knowledge-base-proxy.ts, so a change to it alone runs test-dev."""
+    # Without this rule, a pull request that renews only that file's marker skips test-dev: PR 62's
+    # renewal was green until a later commit touched core and test-dev ran test 17 on it.
+    workflow = _load_workflow()
+    filter_step = next(step for step in workflow["jobs"]["detect-changes"]["steps"] if step.get("id") == "filter")
+    dev_rules: list[str | dict[str, str]] = yaml.safe_load(filter_step["with"]["filters"])["dev"]
+    assert "hindsight-control-plane/src/lib/knowledge-base-proxy.ts" in dev_rules

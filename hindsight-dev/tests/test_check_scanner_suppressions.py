@@ -171,11 +171,15 @@ def test_21_no_space_after_comment_leader_fails() -> None:
 
 
 def test_17_real_knowledge_base_proxy_file_passes() -> None:
+    # test_scanner_suppressions_workflow.py keeps this path in the `dev` filter that runs this file.
     real_path = (
         Path(__file__).resolve().parents[2] / "hindsight-control-plane" / "src" / "lib" / "knowledge-base-proxy.ts"
     )
     text = real_path.read_text(encoding="utf-8")
-    assert check_text(str(real_path), text, TODAY) == []
+    # Judge the real file on today's UTC date, as the checker's main() does in CI. This used to
+    # pass the pinned TODAY, which accepted the marker after it expired on 2026-11-18 and refused
+    # any expiry past 2027-03-08 (TODAY + 120 days), such as the category D renewal to 2027-03-20.
+    assert check_text(str(real_path), text, datetime.datetime.now(datetime.UTC).date()) == []
 
 
 def test_23_nosec_with_ids_and_metadata_passes() -> None:
