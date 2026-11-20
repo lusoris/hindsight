@@ -22,7 +22,10 @@ import * as routeValidation from "@/lib/route-validation";
  * validator passed, and it read only `function` declarations, so a `const GET = async () => ...`
  * handler was never walked. The third checked only the statements before the call, not the code
  * beside it, so a fetch in another declaration of the validator's `const`, or in the `catch` or
- * `finally` of a `try` around it, passed.
+ * `finally` of a `try` around it, passed. The fourth checked a `catch` and `finally` only for the
+ * calls they make, so a `catch` that fell through to a fetch after the `try`, or a `finally` that
+ * returned its own response over the 400, passed; a `try` is now accepted only in the shape the
+ * routes use.
  *
  * The walk guards against a handler that forgets or misplaces its validator. It does not check
  * which value a validator is given, or code that reassigns a bank id after its guard.
@@ -43,14 +46,13 @@ const BANK_SEGMENT = /\[(bankId|agentId)\]/;
 
 /**
  * Nodes a call may sit in and still run whenever the statement around it runs. Their other
- * children (another declaration in the same list, a `catch` or `finally`) are checked as code that
- * runs before the answer.
+ * children (another declaration in the same list) are checked as code that runs before the answer.
+ * A `try` is accepted separately, in one shape only (see `answersFirst`).
  */
 const STRAIGHT_LINE = new Set([
   ts.SyntaxKind.AwaitExpression,
   ts.SyntaxKind.ParenthesizedExpression,
   ts.SyntaxKind.VariableDeclarationList,
-  ts.SyntaxKind.TryStatement,
 ]);
 
 /**
@@ -124,11 +126,14 @@ function onlyRequestReads(nodes: readonly ts.Node[]): boolean {
  *
  * - Only awaits, one variable declaration, a return, the function body or a try block may stand
  *   between the call and `fn`, so a call under an `if`, loop, callback or dead branch fails.
+ * - A `try` around the call has no `finally` and its `catch` ends in a return, the shape every
+ *   real route uses. A `finally` can replace the 400 with its own return, and a `catch` that falls
+ *   through runs the code after the `try` with the validator skipped (an earlier read threw).
  * - Everything else that can run before its 400 reaches the client may only make `BEFORE_ANSWER`
  *   calls, so a fetch that runs first fails: its own arguments, the statements before it in each
  *   enclosing block, and every other child of the nodes in between (another declaration in the same
  *   `const`, before or after it; the `catch` of a `try` around it, which runs when an earlier read
- *   throws; the `finally`, which runs before the return completes).
+ *   throws).
  * - The result is returned directly (`return relayBankGet(...)`), or the variable it initialises is
  *   returned by the very next statement, in one of the two guard forms the routes use (`if
  *   (bankIdError) return bankIdError;`, `if (bankId instanceof NextResponse) return bankId;`), so a
@@ -156,6 +161,9 @@ function answersFirst(call: IdentifierCall, fn: RouteFunction): boolean {
       declared = node.name.text;
     } else if (ts.isVariableStatement(node)) {
       statement = node;
+    } else if (ts.isTryStatement(node)) {
+      const last = node.catchClause?.block.statements.at(-1);
+      if (node.finallyBlock || !last || !ts.isReturnStatement(last)) return false;
     } else if (!STRAIGHT_LINE.has(node.kind)) {
       return false;
     }
@@ -477,6 +485,8 @@ describe("bank id validation in every route handler", () => {
             const bankIdError = validateBankId(request, bankId);
             if (bankIdError) return bankIdError;
             return fetch(dataplaneBankUrl(bankId, "/thing"));
+          } catch (error) {
+            return NextResponse.json({ error: String(error) }, { status: 500 });
           } finally {
             await fetch(dataplaneBankUrl(bankId, "/warm"));
           }
@@ -494,6 +504,37 @@ describe("bank id validation in every route handler", () => {
             return fetch(dataplaneBankUrl(bankId, "/thing"), { body });
           } catch {
             return fetch(dataplaneBankUrl(bankId, "/fallback"));
+          }
+        }`,
+      },
+      {
+        label: "a catch that falls through to a fetch after the try",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function POST(request, { params }) {
+          const { bankId } = await params;
+          try {
+            const body = await request.json();
+            const bankIdError = validateBankId(request, bankId);
+            if (bankIdError) return bankIdError;
+          } catch {
+            console.error("body read failed");
+          }
+          return fetch(dataplaneBankUrl(bankId, "/thing"));
+        }`,
+      },
+      {
+        label: "a finally that returns over the validator's 400",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function GET(request, { params }) {
+          const { bankId } = await params;
+          try {
+            const bankIdError = validateBankId(request, bankId);
+            if (bankIdError) return bankIdError;
+            return fetch(dataplaneBankUrl(bankId, "/thing"));
+          } catch (error) {
+            return NextResponse.json({ error: String(error) }, { status: 500 });
+          } finally {
+            return NextResponse.json({});
           }
         }`,
       },
