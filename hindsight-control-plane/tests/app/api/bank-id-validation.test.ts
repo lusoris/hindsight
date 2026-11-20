@@ -4,15 +4,15 @@ import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import * as bankSdkRoute from "@/lib/bank-sdk-route";
 import * as dataplaneProxy from "@/lib/dataplane-proxy";
+import * as knowledgeBaseProxy from "@/lib/knowledge-base-proxy";
 import * as routeValidation from "@/lib/route-validation";
 
 /**
  * Every route handler that takes a bank id must refuse "." and ".." before it builds a dataplane
  * URL or SDK call: a URL parser resolves them out of `/v1/default/banks/<id>`, so the request
  * would reach another endpoint. The handlers that missed it were found one review comment at a
- * time, so this walks every `src/app/api/**\/route.ts` and fails on a handler that names a bank
- * id (a `[bankId]`/`[agentId]` route segment, or one of `BANK_NAMES` in its body or in a helper of
- * the same file it calls) without calling one of the validators below.
+ * time, so this walks every `src/app/api/**\/route.ts` and fails on a handler that does not call one
+ * of the validators below first, unless `NO_BANK_ID` lists it as taking no bank id.
  *
  * A call counts only when its 400 reaches the client before anything else runs (see
  * `answersFirst`). The first version counted any call anywhere in the handler, so a validator
@@ -32,19 +32,74 @@ import * as routeValidation from "@/lib/route-validation";
  * the functions a validator is handed, and runs after it validates, are skipped now. The seventh
  * checked the other declarations beside a guarded result only for their calls, so one that cleared
  * the result without a call (`let error = validateBankId(...), cleared = (error = null);`) passed;
- * a guarded result must now be the only declaration in its statement.
+ * a guarded result must now be the only declaration in its statement. The eighth chose the
+ * handlers to check by the bank names in their text, so one that kept its bank id under another
+ * name (`const bank = requireQueryBankId(request)`, as the knowledge-base node routes do) or reached
+ * it through a method of a same-file object was never checked; every handler outside `NO_BANK_ID`
+ * is checked now. It also let a success answer run before the validator (see `isErrorAnswer`),
+ * accepted an `instanceof` guard on an async validator's unawaited promise (see `VALIDATORS`),
+ * credited a local function named like a validator (see `misboundValidators`), and matched a guard
+ * on its source text, so a braced one failed (see `isGuard`).
  *
  * The walk guards against a handler that forgets or misplaces its validator. It does not check
  * which value a validator is given, or code that reassigns a bank id after its guard.
  */
-const VALIDATORS = {
-  validateBankId: routeValidation.validateBankId,
-  requireQueryBankId: routeValidation.requireQueryBankId,
-  respondWithBankSdk: bankSdkRoute.respondWithBankSdk,
-  proxyDataplane: dataplaneProxy.proxyDataplane,
-  relayBankGet: dataplaneProxy.relayBankGet,
-  relayBankPost: dataplaneProxy.relayBankPost,
-} as const;
+type Validator = {
+  fn: unknown;
+  /** The module a route imports it from; any other binding of its name fails the walk. */
+  module: string;
+  /** The guard a route checks a stored result with; without one the result must be returned. */
+  guard?: GuardForm;
+};
+type GuardForm = "truthy" | "instanceof";
+
+/**
+ * The shared validators. `validateBankId` returns a 400 or null and `requireQueryBankId` the bank
+ * id or a 400, so each has its own guard (`if (bankIdError) return bankIdError;`, `if (bankId
+ * instanceof NextResponse) return bankId;`). The others are async and answer the whole request, so
+ * a route returns their result: an unawaited promise is never a `NextResponse`, so an `instanceof`
+ * guard on one falls through and the 400 is lost. Each one's own test under `tests/lib/` shows it
+ * refusing "." and ".." before it fetches.
+ */
+const VALIDATORS = new Map<string, Validator>([
+  [
+    "validateBankId",
+    { fn: routeValidation.validateBankId, module: "@/lib/route-validation", guard: "truthy" },
+  ],
+  [
+    "requireQueryBankId",
+    {
+      fn: routeValidation.requireQueryBankId,
+      module: "@/lib/route-validation",
+      guard: "instanceof",
+    },
+  ],
+  ["respondWithBankSdk", { fn: bankSdkRoute.respondWithBankSdk, module: "@/lib/bank-sdk-route" }],
+  ["proxyDataplane", { fn: dataplaneProxy.proxyDataplane, module: "@/lib/dataplane-proxy" }],
+  ["relayBankGet", { fn: dataplaneProxy.relayBankGet, module: "@/lib/dataplane-proxy" }],
+  ["relayBankPost", { fn: dataplaneProxy.relayBankPost, module: "@/lib/dataplane-proxy" }],
+  [
+    "createKnowledgeBaseNode",
+    { fn: knowledgeBaseProxy.createKnowledgeBaseNode, module: "@/lib/knowledge-base-proxy" },
+  ],
+]);
+
+/**
+ * The handlers that take no bank id (route file and export), with what each does instead. Every
+ * other handler is checked. A listed handler that names a bank id (a `[bankId]`/`[agentId]` route
+ * segment, or one of `BANK_NAMES` in its body or in a same-file helper it calls) fails, and so does
+ * an entry no route has, so the list cannot hide a bank route or outlive one.
+ */
+const NO_BANK_ID = new Map([
+  ["auth/login/route.ts POST", "checks the access key and sets the session cookie"],
+  ["auth/logout/route.ts POST", "clears the session cookie"],
+  ["banks/route.ts GET", "lists the banks"],
+  ["chunks/route.ts GET", "reads one chunk by its chunk id"],
+  ["files/download/route.ts GET", "proxies only /v1/default/files/download/ paths"],
+  ["health/route.ts GET", "checks the dataplane health"],
+  ["list/route.ts DELETE", "always answers 501"],
+  ["version/route.ts GET", "reads the dataplane version"],
+]);
 
 const API_DIR = join(__dirname, "../../../src/app/api");
 // `\b` treats `_` as a word character, so `bank_id` does not match inside `target_bank_id`.
@@ -68,7 +123,8 @@ const STRAIGHT_LINE = new Set([
  * missing parameter or, in a `catch` around the validator, a failure (logging it and building a
  * 500). Matched on the callee text with whitespace removed (`new X` for a constructor), so a new
  * route that reads the request through another receiver name needs an entry here; anything else
- * that runs first (a `fetch`, an SDK call, `dataplaneBankUrl`, `new URL`) fails the walk.
+ * that runs first (a `fetch`, an SDK call, `dataplaneBankUrl`, `new URL`) fails the walk. Building
+ * a response is allowed only as an error answer (see `isErrorAnswer`).
  */
 const BEFORE_ANSWER = new Set([
   "JSON.parse",
@@ -133,6 +189,75 @@ function onlyRequestReads(nodes: readonly ts.Node[], later: ReadonlySet<ts.Node>
 }
 
 /**
+ * Whether `answer`, returned before a validator's answer, refuses the request: `missingQueryParam`
+ * (always a 400), or `NextResponse.json(body, { status })` / `new NextResponse(body, { status })`
+ * with a literal status of 400 or more (the `Response` constructor throws on one above 599) and no
+ * spread that could replace it. A success answer that runs first (`if (body.dry_run) return
+ * NextResponse.json({ ok: true })`) would serve the request with its bank id never checked. In a
+ * `catch`, the status may also be a name, as the retain route relays the status of the error it
+ * caught; the walk does not track values, so such a name could still hold a success status.
+ */
+function isErrorAnswer(answer: ts.Expression | undefined, caught: boolean): boolean {
+  if (!answer || !(ts.isCallExpression(answer) || ts.isNewExpression(answer))) return false;
+  const callee = answer.expression.getText().replace(/\s+/g, "");
+  if (ts.isCallExpression(answer) && callee === "missingQueryParam") return true;
+  const builds = ts.isCallExpression(answer)
+    ? callee === "NextResponse.json"
+    : callee === "NextResponse";
+  const init = answer.arguments?.[1];
+  if (!builds || !init || !ts.isObjectLiteralExpression(init)) return false;
+  if (init.properties.some(ts.isSpreadAssignment)) return false;
+  const status = init.properties.find(
+    (p): p is ts.PropertyAssignment => ts.isPropertyAssignment(p) && p.name.getText() === "status"
+  )?.initializer;
+  if (status && ts.isNumericLiteral(status)) return Number(status.text) >= 400;
+  return caught && status !== undefined && ts.isIdentifier(status);
+}
+
+/** Whether every return in `nodes`, outside the functions they define, is an error answer. */
+function onlyErrorAnswers(nodes: readonly ts.Node[], fn: RouteFunction): boolean {
+  let clean = true;
+  const visit = (node: ts.Node) => {
+    if (ts.isFunctionLike(node)) return;
+    if (ts.isReturnStatement(node)) {
+      let caught = false;
+      for (let up = node.parent; up !== fn; up = up.parent) caught ||= ts.isCatchClause(up);
+      clean &&= isErrorAnswer(node.expression, caught);
+    }
+    ts.forEachChild(node, visit);
+  };
+  nodes.forEach(visit);
+  return clean;
+}
+
+/**
+ * Whether `next` is the guard `form` names for the variable `declared`, matched on its syntax:
+ * `if (declared) return declared;` (truthy) or `if (declared instanceof NextResponse) return
+ * declared;` (instanceof), the return braced or not, alone in its braces.
+ */
+function isGuard(next: ts.Statement | undefined, declared: string, form: GuardForm): boolean {
+  if (!next || !ts.isIfStatement(next)) return false;
+  const isDeclared = (node: ts.Node) => ts.isIdentifier(node) && node.text === declared;
+  const test = next.expression;
+  const tested =
+    form === "truthy"
+      ? isDeclared(test)
+      : ts.isBinaryExpression(test) &&
+        test.operatorToken.kind === ts.SyntaxKind.InstanceOfKeyword &&
+        isDeclared(test.left) &&
+        ts.isIdentifier(test.right) &&
+        test.right.text === "NextResponse";
+  const then = next.thenStatement;
+  const answer = ts.isBlock(then) && then.statements.length === 1 ? then.statements[0] : then;
+  return (
+    tested &&
+    ts.isReturnStatement(answer) &&
+    answer.expression !== undefined &&
+    isDeclared(answer.expression)
+  );
+}
+
+/**
  * Whether `call` is the first thing `fn` does on every path, apart from reading the request, and
  * whether its result reaches the client.
  *
@@ -150,11 +275,12 @@ function onlyRequestReads(nodes: readonly ts.Node[], later: ReadonlySet<ts.Node>
  *   only after it validates (`respondWithBankSdk`'s `call`, `relayBankPost`'s `prepare`,
  *   `relayBankGet`'s `suffix`). A function anywhere else in an argument may run while the arguments
  *   are evaluated, before the validator starts.
+ * - Every return in that code is an error answer (see `isErrorAnswer`).
  * - The result is returned directly (`return relayBankGet(...)`), or the variable it initialises,
- *   the only declaration in its statement, is returned by the very next statement, in one of the
- *   two guard forms the routes use (`if (bankIdError) return bankIdError;`, `if (bankId instanceof
- *   NextResponse) return bankId;`), so a dropped 400, an inverted guard, or a reassignment before
- *   the guard fails, another declaration beside it included.
+ *   the only declaration in its statement, is returned by the very next statement, in the guard
+ *   form `VALIDATORS` gives that validator (see `isGuard`), so a dropped 400, an inverted guard, a
+ *   guard of the other validator's form, or a reassignment before the guard fails, another
+ *   declaration beside it included. A same-file helper has no guard form, so its result is returned.
  */
 function answersFirst(call: IdentifierCall, fn: RouteFunction): boolean {
   const beforeAnswer: ts.Node[] = [];
@@ -199,18 +325,16 @@ function answersFirst(call: IdentifierCall, fn: RouteFunction): boolean {
     )
     .filter((node) => ts.isArrowFunction(node) || ts.isFunctionExpression(node));
   if (!onlyRequestReads([...call.arguments, ...beforeAnswer], new Set(handed))) return false;
+  if (!onlyErrorAnswers(beforeAnswer, fn)) return false;
   if (returned) return true;
-  if (!statement || !declared || !ts.isBlock(statement.parent)) return false;
+  const form = VALIDATORS.get(call.expression.text)?.guard;
+  if (!form || !statement || !declared || !ts.isBlock(statement.parent)) return false;
   // The other declarations were checked above only for their calls, and one can clear the result
   // without a call (`let error = validateBankId(...), cleared = (error = null);`). Every real route
   // declares a validator result on its own, so that is the only shape accepted.
   if (statement.declarationList.declarations.length !== 1) return false;
   const siblings = statement.parent.statements;
-  const guard = siblings[siblings.indexOf(statement) + 1]?.getText().replace(/\s+/g, " ");
-  return (
-    guard === `if (${declared}) return ${declared};` ||
-    guard === `if (${declared} instanceof NextResponse) return ${declared};`
-  );
+  return isGuard(siblings[siblings.indexOf(statement) + 1], declared, form);
 }
 
 /** `start` and the same-file helpers it reaches through the calls `follow` accepts. */
@@ -235,15 +359,49 @@ function reachable(
 }
 
 /**
- * The exported handlers of one route file that name a bank id without validating it first, plus an
- * `unsupported export` entry for each export the walk cannot see into.
- * `routePath` is the file's path under `src/app/api`, which carries the dynamic segments.
+ * An entry for each place a validator's name is bound to something other than its own unrenamed
+ * import (a local function or variable, a parameter, a renamed import, an import from another
+ * module), or used other than as a callee. The walk credits a validator by its name, so a local
+ * `validateBankId` that checks nothing would otherwise count as validation. A call with no import
+ * at all fails the type check, so the import itself is not required.
  */
-function unvalidatedHandlers(source: string, routePath: string): string[] {
+function misboundValidators(file: ts.SourceFile): string[] {
+  const failing: string[] = [];
+  const visit = (node: ts.Node) => {
+    const validator = ts.isIdentifier(node) ? VALIDATORS.get(node.text) : undefined;
+    if (validator) {
+      const parent = node.parent;
+      const declaration = ts.isImportSpecifier(parent) ? parent.parent.parent.parent : undefined;
+      const imported =
+        ts.isImportSpecifier(parent) &&
+        parent.name === node &&
+        !parent.propertyName &&
+        declaration !== undefined &&
+        ts.isImportDeclaration(declaration) &&
+        ts.isStringLiteral(declaration.moduleSpecifier) &&
+        declaration.moduleSpecifier.text === validator.module;
+      const called = ts.isCallExpression(parent) && parent.expression === node;
+      if (!imported && !called)
+        failing.push(`validator ${node.getText()} bound outside its import`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return failing;
+}
+
+/**
+ * The exported handlers of one route file that do not validate a bank id first and are not in
+ * `NO_BANK_ID`, the listed ones that name a bank id anyway, an entry for each misbound validator
+ * name (see `misboundValidators`), and an `unsupported export` entry for each export the walk cannot
+ * see into. `routePath` is the file's path under `src/app/api`, which carries the dynamic segments;
+ * each handler's `NO_BANK_ID` key is added to `seen`.
+ */
+function unvalidatedHandlers(source: string, routePath: string, seen?: Set<string>): string[] {
   const file = ts.createSourceFile(routePath, source, ts.ScriptTarget.Latest, true);
   const local = new Map<string, RouteFunction>();
   const handlers: string[] = [];
-  const failing: string[] = [];
+  const failing = misboundValidators(file);
   for (const statement of file.statements) {
     const exported =
       ts.canHaveModifiers(statement) &&
@@ -287,19 +445,26 @@ function unvalidatedHandlers(source: string, routePath: string): string[] {
   const pathScoped = BANK_SEGMENT.test(routePath);
   for (const name of handlers) {
     const handler = local.get(name)!;
-    // Any same-file helper the handler calls (proxyAlias, proxyDirective, ...) can name a bank id.
-    const reached = reachable(handler, local, () => true);
-    const text = [...reached].map((fn) => fn.getText(file)).join("\n");
-    const scoped = pathScoped || BANK_NAMES.test(text);
+    const key = `${routePath} ${name}`;
+    seen?.add(key);
+    if (NO_BANK_ID.has(key)) {
+      // Any same-file helper the handler calls (proxyAlias, proxyDirective, ...) can name a bank id.
+      // Choosing the handlers to check by these names missed a bank id kept under another name, so
+      // they only check the list now.
+      const reached = reachable(handler, local, () => true);
+      const text = [...reached].map((fn) => fn.getText(file)).join("\n");
+      if (pathScoped || BANK_NAMES.test(text)) failing.push(`${name} listed in NO_BANK_ID`);
+      continue;
+    }
     // A helper's validator guards the handler only when the handler calls that helper first and
     // returns its result, so validation follows only those calls.
     const guarded = reachable(handler, local, answersFirst);
     const validated = [...guarded].some((fn) =>
       identifierCalls(fn).some(
-        (call) => Object.hasOwn(VALIDATORS, call.expression.text) && answersFirst(call, fn)
+        (call) => VALIDATORS.has(call.expression.text) && answersFirst(call, fn)
       )
     );
-    if (scoped && !validated) {
+    if (!validated) {
       failing.push(name);
     }
   }
@@ -308,25 +473,28 @@ function unvalidatedHandlers(source: string, routePath: string): string[] {
 
 describe("bank id validation in every route handler", () => {
   it("names only validators the shared modules still export", () => {
-    for (const validator of Object.values(VALIDATORS)) {
-      expect(validator).toBeTypeOf("function");
+    for (const [name, validator] of VALIDATORS) {
+      expect(validator.fn, name).toBeTypeOf("function");
     }
   });
 
   it("finds no route handler that skips bank id validation", () => {
     const failing: string[] = [];
+    const seen = new Set<string>();
     let handlers = 0;
     for (const path of routeFiles(API_DIR)) {
       const routePath = relative(API_DIR, path);
       const source = readFileSync(path, "utf8");
       handlers += (source.match(/^export async function /gm) ?? []).length;
-      for (const name of unvalidatedHandlers(source, routePath)) {
+      for (const name of unvalidatedHandlers(source, routePath, seen)) {
         failing.push(`${routePath} ${name}`);
       }
     }
     // Guards against a walk that silently finds nothing (moved directory, changed export form).
     expect(handlers).toBeGreaterThan(50);
     expect(failing).toEqual([]);
+    // An entry for a handler that no longer exists would let a new one of that name skip the check.
+    expect([...NO_BANK_ID.keys()].filter((key) => !seen.has(key))).toEqual([]);
   });
 
   describe("planted cases", () => {
@@ -578,6 +746,23 @@ describe("bank id validation in every route handler", () => {
         }`,
       },
       {
+        // The error-answer check passes this return, so only the rule against a finally catches it.
+        label: "a finally that answers 500 over the validator's 400",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function GET(request, { params }) {
+          const { bankId } = await params;
+          try {
+            const bankIdError = validateBankId(request, bankId);
+            if (bankIdError) return bankIdError;
+            return fetch(dataplaneBankUrl(bankId, "/thing"));
+          } catch (error) {
+            return NextResponse.json({ error: String(error) }, { status: 500 });
+          } finally {
+            return NextResponse.json({ error: "Failed" }, { status: 500 });
+          }
+        }`,
+      },
+      {
         label: "a fetch in a callback a body read runs first",
         path: "banks/[bankId]/thing/route.ts",
         source: `export async function POST(request, { params }) {
@@ -639,6 +824,178 @@ describe("bank id validation in every route handler", () => {
           return fetch(dataplaneBankUrl(bankId, "/thing"));
         }
         export { getThing as GET };`,
+      },
+      {
+        label: "a success answer before the validator",
+        path: "recall/route.ts",
+        source: `export async function POST(request) {
+          const body = await request.json();
+          if (body.dry_run) return NextResponse.json({ ok: true });
+          const bankIdError = validateBankId(request, body.bank_id);
+          if (bankIdError) return bankIdError;
+          return sdk.recall({ path: { bank_id: body.bank_id } });
+        }`,
+      },
+      {
+        label: "a catch that answers success when the body read throws",
+        path: "recall/route.ts",
+        source: `export async function POST(request) {
+          try {
+            const body = await request.json();
+            const bankIdError = validateBankId(request, body.bank_id);
+            if (bankIdError) return bankIdError;
+            return sdk.recall({ path: { bank_id: body.bank_id } });
+          } catch {
+            return NextResponse.json({ ok: true }, { status: 200 });
+          }
+        }`,
+      },
+      {
+        label: "an answer before the validator whose status is a name outside a catch",
+        path: "recall/route.ts",
+        source: `export async function POST(request) {
+          const body = await request.json();
+          const code = 200;
+          if (body.dry_run) return NextResponse.json({ ok: true }, { status: code });
+          const bankIdError = validateBankId(request, body.bank_id);
+          if (bankIdError) return bankIdError;
+          return sdk.recall({ path: { bank_id: body.bank_id } });
+        }`,
+      },
+      {
+        label: "an error status a spread can replace",
+        path: "recall/route.ts",
+        source: `export async function POST(request) {
+          const body = await request.json();
+          if (body.dry_run) return NextResponse.json({ ok: true }, { status: 400, ...body.init });
+          const bankIdError = validateBankId(request, body.bank_id);
+          if (bankIdError) return bankIdError;
+          return sdk.recall({ path: { bank_id: body.bank_id } });
+        }`,
+      },
+      {
+        label: "an async validator's unawaited result guarded as a response",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function POST(request, context) {
+          const answer = respondWithBankSdk(request, context, "Failed to run thing", (bankId) =>
+            sdk.runThing({ path: { bank_id: bankId } })
+          );
+          if (answer instanceof NextResponse) return answer;
+          return fetch(DATAPLANE_URL);
+        }`,
+      },
+      {
+        label: "a query bank id under the truthy guard",
+        path: "documents/route.ts",
+        source: `export async function GET(request) {
+          const bankId = requireQueryBankId(request);
+          if (bankId) return bankId;
+          return sdk.listDocuments({ path: { bank_id: bankId } });
+        }`,
+      },
+      {
+        label: "a guard that returns another answer",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function GET(request, { params }) {
+          const { bankId } = await params;
+          const bankIdError = validateBankId(request, bankId);
+          if (bankIdError) return NextResponse.json({ ok: true });
+          return fetch(dataplaneBankUrl(bankId, "/thing"));
+        }`,
+      },
+      {
+        label: "a query bank id guarded against another class",
+        path: "documents/route.ts",
+        source: `export async function GET(request) {
+          const bankId = requireQueryBankId(request);
+          if (bankId instanceof URL) return bankId;
+          return sdk.listDocuments({ path: { bank_id: bankId } });
+        }`,
+      },
+      {
+        label: "a query bank id compared to NextResponse",
+        path: "documents/route.ts",
+        source: `export async function GET(request) {
+          const bankId = requireQueryBankId(request);
+          if (bankId === NextResponse) return bankId;
+          return sdk.listDocuments({ path: { bank_id: bankId } });
+        }`,
+      },
+      {
+        label: "a braced guard that fetches before it returns",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function GET(request, { params }) {
+          const { bankId } = await params;
+          const bankIdError = validateBankId(request, bankId);
+          if (bankIdError) {
+            await fetch(dataplaneBankUrl(bankId, "/warm"));
+            return bankIdError;
+          }
+          return fetch(dataplaneBankUrl(bankId, "/thing"));
+        }`,
+      },
+      {
+        label: "a handler that delegates to a method of a same-file object",
+        path: "thing/route.ts",
+        source: `const actions = {
+          async run(request) {
+            const body = await request.json();
+            return fetch(dataplaneBankUrl(body.bank_id, "/thing"));
+          },
+        };
+        export async function POST(request) {
+          return actions.run(request);
+        }`,
+      },
+      {
+        label: "a handler that keeps its query bank id under another name",
+        path: "knowledge-base/nodes/[nodeId]/route.ts",
+        source: `export async function DELETE(request, { params }) {
+          const { nodeId } = await params;
+          const bank = bankFromQuery(request);
+          return fetch(dataplaneBankUrl(bank, \`/knowledge-base/nodes/\${nodeId}\`));
+        }`,
+      },
+      {
+        label: "a NO_BANK_ID handler that reads a bank id",
+        path: "version/route.ts",
+        source: `export async function GET(request) {
+          const bankId = request.nextUrl.searchParams.get("bank_id");
+          return fetch(dataplaneBankUrl(bankId, "/version"));
+        }`,
+      },
+      {
+        label: "a validator name bound to a local function",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function GET(request, { params }) {
+          const validateBankId = (request, bankId) => null;
+          const { bankId } = await params;
+          const bankIdError = validateBankId(request, bankId);
+          if (bankIdError) return bankIdError;
+          return fetch(dataplaneBankUrl(bankId, "/thing"));
+        }`,
+      },
+      {
+        label: "a validator imported from another module",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `import { validateBankId } from "@/lib/other-validation";
+        export async function GET(request, { params }) {
+          const { bankId } = await params;
+          const bankIdError = validateBankId(request, bankId);
+          if (bankIdError) return bankIdError;
+          return fetch(dataplaneBankUrl(bankId, "/thing"));
+        }`,
+      },
+      {
+        label: "another export imported under a validator's name",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `import { missingQueryParam as validateBankId } from "@/lib/route-validation";
+        export async function GET(request, { params }) {
+          const { bankId } = await params;
+          const bankIdError = validateBankId(request, bankId);
+          if (bankIdError) return bankIdError;
+          return fetch(dataplaneBankUrl(bankId, "/thing"));
+        }`,
       },
     ])("flags $label", ({ path, source }) => {
       expect(unvalidatedHandlers(source, path)).toHaveLength(1);
@@ -764,6 +1121,56 @@ describe("bank id validation in every route handler", () => {
         path: "version/route.ts",
         source: `export async function GET() {
           return fetch(DATAPLANE_URL + "/version");
+        }`,
+      },
+      {
+        label: "a braced guard",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function GET(request, { params }) {
+          const { bankId } = await params;
+          const bankIdError = validateBankId(request, bankId);
+          if (bankIdError) {
+            return bankIdError;
+          }
+          return fetch(dataplaneBankUrl(bankId, "/thing"));
+        }`,
+      },
+      {
+        label: "a catch that relays the caught error's status",
+        path: "memories/retain/route.ts",
+        source: `export async function POST(request) {
+          try {
+            const body = await request.json();
+            const bankIdError = validateBankId(request, body.bank_id);
+            if (bankIdError) return bankIdError;
+            return sdk.retainMemories({ path: { bank_id: body.bank_id } });
+          } catch (error) {
+            const statusCode = error.statusCode;
+            if (statusCode && typeof statusCode === "number") {
+              return NextResponse.json({ error: String(error) }, { status: statusCode });
+            }
+            return NextResponse.json({ error: String(error) }, { status: 500 });
+          }
+        }`,
+      },
+      {
+        label: "a handler with its validator's own import",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `import { NextResponse } from "next/server";
+        import { validateBankId } from "@/lib/route-validation";
+        export async function GET(request, { params }) {
+          const { bankId } = await params;
+          const bankIdError = validateBankId(request, bankId);
+          if (bankIdError) return bankIdError;
+          return fetch(dataplaneBankUrl(bankId, "/thing"));
+        }`,
+      },
+      {
+        label: "a knowledge-base node created through its shared helper",
+        path: "knowledge-base/folders/route.ts",
+        source: `import { createKnowledgeBaseNode } from "@/lib/knowledge-base-proxy";
+        export async function POST(request) {
+          return createKnowledgeBaseNode(request, "folders", { error: "Failed", errorKey: "api.errors.kb" });
         }`,
       },
     ])("passes $label", ({ path, source }) => {
