@@ -2055,6 +2055,7 @@
       },
       "validation": {
         "bankIdRequired": "bank_id 為必填欄位",
+        "bankIdDotSegment": "bank_id 不能為 \".\" 或 \"..\"",
         "bankAndDirectiveIdRequired": "bank_id 和 directive_id 為必填欄位",
         "bankAndMentalModelIdRequired": "bank_id 和 mental_model_id 為必填欄位",
         "bankAndModelIdRequired": "bank_id 和 model_id 為必填欄位",

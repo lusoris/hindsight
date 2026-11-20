@@ -2055,6 +2055,7 @@
       },
       "validation": {
         "bankIdRequired": "bank_id は必須です",
+        "bankIdDotSegment": "bank_id に \".\" または \"..\" は使用できません",
         "bankAndDirectiveIdRequired": "bank_id と directive_id は必須です",
         "bankAndMentalModelIdRequired": "bank_id と mental_model_id は必須です",
         "bankAndModelIdRequired": "bank_id と model_id は必須です",

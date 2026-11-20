@@ -10,6 +10,7 @@ import {
   createConfig,
   sdk,
 } from "@vectorize-io/hindsight-client";
+import { isDotSegmentBankId } from "@/lib/bank-id";
 import { version } from "../../package.json";
 
 export const DATAPLANE_URL = process.env.HINDSIGHT_CP_DATAPLANE_API_URL || "http://localhost:8888";
@@ -33,8 +34,14 @@ export function getDataplaneHeaders(extra?: Record<string, string>): Record<stri
  * Build a dataplane URL for a bank-scoped endpoint with the bank id properly encoded.
  * Bank ids may contain `:`, `/`, `%`, etc. (e.g. openclaw `agent::channel::user`),
  * which must be percent-encoded before being interpolated into a URL path.
+ * Throws a RangeError for "." and "..", which no encoding keeps inside the segment.
  */
 export function dataplaneBankUrl(bankId: string, suffix = ""): string {
+  // Route handlers answer these with a 400 first (validateBankId); this throw is the second
+  // barrier for any caller that builds a URL without validating.
+  if (isDotSegmentBankId(bankId)) {
+    throw new RangeError(`bank id ${JSON.stringify(bankId)} is a URL dot segment`);
+  }
   return `${DATAPLANE_URL}/v1/default/banks/${encodeURIComponent(bankId)}${suffix}`;
 }
 

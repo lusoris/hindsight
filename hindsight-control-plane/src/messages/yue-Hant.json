@@ -2055,6 +2055,7 @@
       },
       "validation": {
         "bankIdRequired": "必須提供 bank_id",
+        "bankIdDotSegment": "bank_id 唔可以係 \".\" 或 \"..\"",
         "bankAndDirectiveIdRequired": "必須提供 bank_id 及 directive_id",
         "bankAndMentalModelIdRequired": "必須提供 bank_id 及 mental_model_id",
         "bankAndModelIdRequired": "必須提供 bank_id 及 model_id",

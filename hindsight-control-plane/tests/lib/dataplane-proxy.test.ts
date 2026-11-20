@@ -518,6 +518,23 @@ describe("relayBankGet", () => {
     expect(consoleErrorSpy).not.toHaveBeenCalled();
   });
 
+  it.each([".", ".."])(
+    "refuses the dot-segment bank id %j before building a suffix or fetching",
+    async (dotBankId) => {
+      const suffix = vi.fn(() => "/unused");
+      const response = await relayBankGet(
+        new Request(URL),
+        { params: Promise.resolve({ bankId: dotBankId }) },
+        { ...getOptions("relay"), suffix }
+      );
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'bank_id cannot be "." or ".."' });
+      expect(suffix).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    }
+  );
+
   it.each(["dataplane detail", "", undefined])(
     "detail uses %s or the untranslated fallback",
     async (detail) => {

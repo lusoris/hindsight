@@ -15,7 +15,7 @@ export async function createKnowledgeBaseNode(
     if (bankId instanceof NextResponse) return bankId;
 
     const body = await request.json();
-    // nosemgrep: rules_lgpl_javascript_ssrf_rule-node-ssrf -- host is the server-set DATAPLANE_URL; the bank id is one encodeURIComponent path segment (tests/lib/knowledge-base-proxy.test.ts); category C, expires 2026-11-18
+    // nosemgrep: rules_lgpl_javascript_ssrf_rule-node-ssrf -- host is the server-set DATAPLANE_URL, kind is the "folders" | "pages" literal, and the bank id is one encodeURIComponent path segment; "." and "..", which a URL parser resolves out of the bank path, get a 400 from requireQueryBankId and a RangeError from dataplaneBankUrl (tests/lib/knowledge-base-proxy.test.ts, tests/lib/hindsight-client.test.ts); category D, expires 2027-03-20, ends when this fetch moves to the generated SDK client
     const response = await fetch(dataplaneBankUrl(bankId, `/knowledge-base/${kind}`), {
       method: "POST",
       headers: getDataplaneHeaders({ "Content-Type": "application/json" }),

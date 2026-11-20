@@ -2055,6 +2055,7 @@
       },
       "validation": {
         "bankIdRequired": "bank_id ist erforderlich",
+        "bankIdDotSegment": "bank_id darf nicht \".\" oder \"..\" sein",
         "bankAndDirectiveIdRequired": "bank_id und directive_id sind erforderlich",
         "bankAndMentalModelIdRequired": "bank_id und mental_model_id sind erforderlich",
         "bankAndModelIdRequired": "bank_id und model_id sind erforderlich",
