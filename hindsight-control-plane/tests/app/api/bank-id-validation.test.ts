@@ -20,7 +20,12 @@ import * as routeValidation from "@/lib/route-validation";
  * reached the URL builder. The second counted any later `return <result>` and ignored what ran
  * before the call, so an inverted guard (`if (!error) return error;`) or a fetch ahead of the
  * validator passed, and it read only `function` declarations, so a `const GET = async () => ...`
- * handler was never walked.
+ * handler was never walked. The third checked only the statements before the call, not the code
+ * beside it, so a fetch in another declaration of the validator's `const`, or in the `catch` or
+ * `finally` of a `try` around it, passed.
+ *
+ * The walk guards against a handler that forgets or misplaces its validator. It does not check
+ * which value a validator is given, or code that reassigns a bank id after its guard.
  */
 const VALIDATORS = {
   validateBankId: routeValidation.validateBankId,
@@ -36,7 +41,11 @@ const API_DIR = join(__dirname, "../../../src/app/api");
 const BANK_NAMES = /\b(bankId|bank_id|agentId|agent_id|targetBankId|target_bank_id)\b/;
 const BANK_SEGMENT = /\[(bankId|agentId)\]/;
 
-/** Nodes a call may sit in and still run whenever the statement around it runs. */
+/**
+ * Nodes a call may sit in and still run whenever the statement around it runs. Their other
+ * children (another declaration in the same list, a `catch` or `finally`) are checked as code that
+ * runs before the answer.
+ */
 const STRAIGHT_LINE = new Set([
   ts.SyntaxKind.AwaitExpression,
   ts.SyntaxKind.ParenthesizedExpression,
@@ -45,19 +54,23 @@ const STRAIGHT_LINE = new Set([
 ]);
 
 /**
- * The calls a handler may make before its bank id is validated: reading the request, encoding a
- * path segment for the validator's own `suffix` argument, and answering a missing parameter.
- * Matched on the callee text with whitespace removed, so a new route that reads the request through
- * another receiver name needs an entry here; anything else that runs first (a `fetch`, an SDK call,
- * `dataplaneBankUrl`, a `new` expression) fails the walk.
+ * The calls a handler may make before its validator's answer reaches the client: reading the
+ * request, encoding a path segment for the validator's own `suffix` argument, and answering a
+ * missing parameter or, in a `catch` around the validator, a failure (logging it and building a
+ * 500). Matched on the callee text with whitespace removed (`new X` for a constructor), so a new
+ * route that reads the request through another receiver name needs an entry here; anything else
+ * that runs first (a `fetch`, an SDK call, `dataplaneBankUrl`, `new URL`) fails the walk.
  */
-const BEFORE_VALIDATION = new Set([
+const BEFORE_ANSWER = new Set([
   "JSON.parse",
   "NextResponse.json",
+  "String",
+  "console.error",
   "encodeURIComponent",
   "formData.get",
   "localizeApiErrorPayload",
   "missingQueryParam",
+  "new NextResponse",
   "request.formData",
   "request.json",
   "request.json().catch",
@@ -90,14 +103,14 @@ function identifierCalls(fn: RouteFunction): IdentifierCall[] {
   return calls;
 }
 
-/** Whether `nodes`, outside the functions they define, call only what `BEFORE_VALIDATION` lists. */
+/** Whether `nodes`, outside the functions they define, call only what `BEFORE_ANSWER` lists. */
 function onlyRequestReads(nodes: readonly ts.Node[]): boolean {
   let clean = true;
   const visit = (node: ts.Node) => {
     if (ts.isFunctionLike(node)) return;
-    if (ts.isNewExpression(node)) clean = false;
-    if (ts.isCallExpression(node)) {
-      clean &&= BEFORE_VALIDATION.has(node.expression.getText().replace(/\s+/g, ""));
+    if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
+      const callee = node.expression.getText().replace(/\s+/g, "");
+      clean &&= BEFORE_ANSWER.has(ts.isNewExpression(node) ? `new ${callee}` : callee);
     }
     ts.forEachChild(node, visit);
   };
@@ -111,38 +124,49 @@ function onlyRequestReads(nodes: readonly ts.Node[]): boolean {
  *
  * - Only awaits, one variable declaration, a return, the function body or a try block may stand
  *   between the call and `fn`, so a call under an `if`, loop, callback or dead branch fails.
- * - The statements before it, and its own arguments, may only make `BEFORE_VALIDATION` calls, so a
- *   fetch that runs before the validator fails.
+ * - Everything else that can run before its 400 reaches the client may only make `BEFORE_ANSWER`
+ *   calls, so a fetch that runs first fails: its own arguments, the statements before it in each
+ *   enclosing block, and every other child of the nodes in between (another declaration in the same
+ *   `const`, before or after it; the `catch` of a `try` around it, which runs when an earlier read
+ *   throws; the `finally`, which runs before the return completes).
  * - The result is returned directly (`return relayBankGet(...)`), or the variable it initialises is
  *   returned by the very next statement, in one of the two guard forms the routes use (`if
  *   (bankIdError) return bankIdError;`, `if (bankId instanceof NextResponse) return bankId;`), so a
  *   dropped 400, an inverted guard, or a reassignment before the guard fails.
  */
 function answersFirst(call: IdentifierCall, fn: RouteFunction): boolean {
-  const earlier: ts.Node[] = [...call.arguments];
+  const beforeAnswer: ts.Node[] = [...call.arguments];
   let statement: ts.VariableStatement | undefined;
   let declared: string | undefined;
   let returned = false;
   let child: ts.Node = call;
   for (let node: ts.Node = call.parent; node !== fn; child = node, node = node.parent) {
+    if (ts.isBlock(node)) {
+      const owner = node.parent;
+      if (owner !== fn && !(ts.isTryStatement(owner) && owner.tryBlock === node)) return false;
+      // The statements after the call run once its answer is out (the guard is checked below).
+      beforeAnswer.push(
+        ...node.statements.slice(0, node.statements.indexOf(child as ts.Statement))
+      );
+      continue;
+    }
     if (ts.isReturnStatement(node)) {
       returned = true;
     } else if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
       declared = node.name.text;
     } else if (ts.isVariableStatement(node)) {
       statement = node;
-    } else if (ts.isBlock(node)) {
-      const owner = node.parent;
-      if (owner !== fn && !(ts.isTryStatement(owner) && owner.tryBlock === node)) return false;
-      earlier.push(...node.statements.slice(0, node.statements.indexOf(child as ts.Statement)));
     } else if (!STRAIGHT_LINE.has(node.kind)) {
       return false;
     }
+    ts.forEachChild(node, (other) => {
+      if (other !== child) beforeAnswer.push(other);
+    });
   }
   // An arrow function with an expression body returns that expression.
   const body = fn.body;
   if (body && child === body && !ts.isBlock(body)) returned = true;
-  if (!onlyRequestReads(earlier)) return false;
+  if (!onlyRequestReads(beforeAnswer)) return false;
   if (returned) return true;
   if (!statement || !declared || !ts.isBlock(statement.parent)) return false;
   const siblings = statement.parent.statements;
@@ -412,6 +436,68 @@ describe("bank id validation in every route handler", () => {
         }`,
       },
       {
+        label: "a URL built before the validator",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function GET(request, { params }) {
+          const { bankId } = await params;
+          const url = new URL(\`/v1/default/banks/\${bankId}/thing\`, "http://dataplane");
+          const bankIdError = validateBankId(request, bankId);
+          if (bankIdError) return bankIdError;
+          return fetch(url);
+        }`,
+      },
+      {
+        label: "a fetch declared before the validator in its const",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function GET(request, { params }) {
+          const { bankId } = await params;
+          const warm = await fetch(dataplaneBankUrl(bankId, "/warm")),
+            bankIdError = validateBankId(request, bankId);
+          if (bankIdError) return bankIdError;
+          return warm;
+        }`,
+      },
+      {
+        label: "a fetch declared after the validator in its const",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function GET(request, { params }) {
+          const { bankId } = await params;
+          const bankIdError = validateBankId(request, bankId),
+            warm = await fetch(dataplaneBankUrl(bankId, "/warm"));
+          if (bankIdError) return bankIdError;
+          return warm;
+        }`,
+      },
+      {
+        label: "a fetch in a finally around the validator",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function GET(request, { params }) {
+          const { bankId } = await params;
+          try {
+            const bankIdError = validateBankId(request, bankId);
+            if (bankIdError) return bankIdError;
+            return fetch(dataplaneBankUrl(bankId, "/thing"));
+          } finally {
+            await fetch(dataplaneBankUrl(bankId, "/warm"));
+          }
+        }`,
+      },
+      {
+        label: "a catch that fetches when the body read throws",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function POST(request, { params }) {
+          const { bankId } = await params;
+          try {
+            const body = await request.json();
+            const bankIdError = validateBankId(request, bankId);
+            if (bankIdError) return bankIdError;
+            return fetch(dataplaneBankUrl(bankId, "/thing"), { body });
+          } catch {
+            return fetch(dataplaneBankUrl(bankId, "/fallback"));
+          }
+        }`,
+      },
+      {
         label: "a helper that fetches before it validates",
         path: "banks/[bankId]/thing/[id]/route.ts",
         source: `async function proxyThing(request, { params }) {
@@ -487,7 +573,8 @@ describe("bank id validation in every route handler", () => {
             if (bankIdError) return bankIdError;
             return fetch(dataplaneBankUrl(bankId, "/thing"));
           } catch (error) {
-            return new Response(null, { status: 500 });
+            console.error("thing failed", error);
+            return NextResponse.json({ error: String(error) }, { status: 500 });
           }
         }`,
       },
