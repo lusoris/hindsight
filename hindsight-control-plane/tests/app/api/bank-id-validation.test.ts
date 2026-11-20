@@ -29,7 +29,10 @@ import * as routeValidation from "@/lib/route-validation";
  * callback that a request read runs (`request.json().catch(() => fetch(...))`) passed. The sixth
  * skipped every function in the validator's own arguments, so such a callback passed there too
  * (`respondWithBankSdk(request, context, await request.json().catch(() => fetch(...)), call)`); only
- * the functions a validator is handed, and runs after it validates, are skipped now.
+ * the functions a validator is handed, and runs after it validates, are skipped now. The seventh
+ * checked the other declarations beside a guarded result only for their calls, so one that cleared
+ * the result without a call (`let error = validateBankId(...), cleared = (error = null);`) passed;
+ * a guarded result must now be the only declaration in its statement.
  *
  * The walk guards against a handler that forgets or misplaces its validator. It does not check
  * which value a validator is given, or code that reassigns a bank id after its guard.
@@ -147,10 +150,11 @@ function onlyRequestReads(nodes: readonly ts.Node[], later: ReadonlySet<ts.Node>
  *   only after it validates (`respondWithBankSdk`'s `call`, `relayBankPost`'s `prepare`,
  *   `relayBankGet`'s `suffix`). A function anywhere else in an argument may run while the arguments
  *   are evaluated, before the validator starts.
- * - The result is returned directly (`return relayBankGet(...)`), or the variable it initialises is
- *   returned by the very next statement, in one of the two guard forms the routes use (`if
- *   (bankIdError) return bankIdError;`, `if (bankId instanceof NextResponse) return bankId;`), so a
- *   dropped 400, an inverted guard, or a reassignment before the guard fails.
+ * - The result is returned directly (`return relayBankGet(...)`), or the variable it initialises,
+ *   the only declaration in its statement, is returned by the very next statement, in one of the
+ *   two guard forms the routes use (`if (bankIdError) return bankIdError;`, `if (bankId instanceof
+ *   NextResponse) return bankId;`), so a dropped 400, an inverted guard, or a reassignment before
+ *   the guard fails, another declaration beside it included.
  */
 function answersFirst(call: IdentifierCall, fn: RouteFunction): boolean {
   const beforeAnswer: ts.Node[] = [];
@@ -197,6 +201,10 @@ function answersFirst(call: IdentifierCall, fn: RouteFunction): boolean {
   if (!onlyRequestReads([...call.arguments, ...beforeAnswer], new Set(handed))) return false;
   if (returned) return true;
   if (!statement || !declared || !ts.isBlock(statement.parent)) return false;
+  // The other declarations were checked above only for their calls, and one can clear the result
+  // without a call (`let error = validateBankId(...), cleared = (error = null);`). Every real route
+  // declares a validator result on its own, so that is the only shape accepted.
+  if (statement.declarationList.declarations.length !== 1) return false;
   const siblings = statement.parent.statements;
   const guard = siblings[siblings.indexOf(statement) + 1]?.getText().replace(/\s+/g, " ");
   return (
@@ -448,6 +456,17 @@ describe("bank id validation in every route handler", () => {
           const { bankId } = await params;
           let bankIdError = validateBankId(request, bankId);
           bankIdError = null;
+          if (bankIdError) return bankIdError;
+          return fetch(dataplaneBankUrl(bankId, "/thing"));
+        }`,
+      },
+      {
+        label: "a result cleared by another declaration in its statement",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function GET(request, { params }) {
+          const { bankId } = await params;
+          let bankIdError = validateBankId(request, bankId),
+            cleared = (bankIdError = null);
           if (bankIdError) return bankIdError;
           return fetch(dataplaneBankUrl(bankId, "/thing"));
         }`,
