@@ -25,7 +25,8 @@ import * as routeValidation from "@/lib/route-validation";
  * `finally` of a `try` around it, passed. The fourth checked a `catch` and `finally` only for the
  * calls they make, so a `catch` that fell through to a fetch after the `try`, or a `finally` that
  * returned its own response over the 400, passed; a `try` is now accepted only in the shape the
- * routes use.
+ * routes use. The fifth skipped the functions defined in the code that runs first, so a fetch in a
+ * callback that a request read runs (`request.json().catch(() => fetch(...))`) passed.
  *
  * The walk guards against a handler that forgets or misplaces its validator. It does not check
  * which value a validator is given, or code that reassigns a bank id after its guard.
@@ -105,11 +106,17 @@ function identifierCalls(fn: RouteFunction): IdentifierCall[] {
   return calls;
 }
 
-/** Whether `nodes`, outside the functions they define, call only what `BEFORE_ANSWER` lists. */
-function onlyRequestReads(nodes: readonly ts.Node[]): boolean {
+/**
+ * Whether `nodes` call only what `BEFORE_ANSWER` lists. With `intoCallbacks`, the bodies of the
+ * functions they define count too: a callback handed to a request read runs before the answer
+ * (`request.json().catch(cb)` runs `cb` on a malformed body). The validator's own arguments are
+ * checked without them, since every validator runs its callback only after it validates
+ * (`respondWithBankSdk(request, context, label, (bankId) => sdk.call(...))`).
+ */
+function onlyRequestReads(nodes: readonly ts.Node[], intoCallbacks: boolean): boolean {
   let clean = true;
   const visit = (node: ts.Node) => {
-    if (ts.isFunctionLike(node)) return;
+    if (!intoCallbacks && ts.isFunctionLike(node)) return;
     if (ts.isCallExpression(node) || ts.isNewExpression(node)) {
       const callee = node.expression.getText().replace(/\s+/g, "");
       clean &&= BEFORE_ANSWER.has(ts.isNewExpression(node) ? `new ${callee}` : callee);
@@ -130,17 +137,17 @@ function onlyRequestReads(nodes: readonly ts.Node[]): boolean {
  *   real route uses. A `finally` can replace the 400 with its own return, and a `catch` that falls
  *   through runs the code after the `try` with the validator skipped (an earlier read threw).
  * - Everything else that can run before its 400 reaches the client may only make `BEFORE_ANSWER`
- *   calls, so a fetch that runs first fails: its own arguments, the statements before it in each
- *   enclosing block, and every other child of the nodes in between (another declaration in the same
- *   `const`, before or after it; the `catch` of a `try` around it, which runs when an earlier read
- *   throws).
+ *   calls, so a fetch that runs first fails: its own arguments (not the callbacks among them), the
+ *   statements before it in each enclosing block, and every other child of the nodes in between
+ *   (another declaration in the same `const`, before or after it; the `catch` of a `try` around it,
+ *   which runs when an earlier read throws), the callbacks these define included.
  * - The result is returned directly (`return relayBankGet(...)`), or the variable it initialises is
  *   returned by the very next statement, in one of the two guard forms the routes use (`if
  *   (bankIdError) return bankIdError;`, `if (bankId instanceof NextResponse) return bankId;`), so a
  *   dropped 400, an inverted guard, or a reassignment before the guard fails.
  */
 function answersFirst(call: IdentifierCall, fn: RouteFunction): boolean {
-  const beforeAnswer: ts.Node[] = [...call.arguments];
+  const beforeAnswer: ts.Node[] = [];
   let statement: ts.VariableStatement | undefined;
   let declared: string | undefined;
   let returned = false;
@@ -174,7 +181,9 @@ function answersFirst(call: IdentifierCall, fn: RouteFunction): boolean {
   // An arrow function with an expression body returns that expression.
   const body = fn.body;
   if (body && child === body && !ts.isBlock(body)) returned = true;
-  if (!onlyRequestReads(beforeAnswer)) return false;
+  if (!onlyRequestReads(call.arguments, false) || !onlyRequestReads(beforeAnswer, true)) {
+    return false;
+  }
   if (returned) return true;
   if (!statement || !declared || !ts.isBlock(statement.parent)) return false;
   const siblings = statement.parent.statements;
@@ -539,6 +548,17 @@ describe("bank id validation in every route handler", () => {
         }`,
       },
       {
+        label: "a fetch in a callback a body read runs first",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function POST(request, { params }) {
+          const { bankId } = await params;
+          const body = await request.json().catch(() => fetch(dataplaneBankUrl(bankId, "/warm")));
+          const bankIdError = validateBankId(request, bankId);
+          if (bankIdError) return bankIdError;
+          return fetch(dataplaneBankUrl(bankId, "/thing"));
+        }`,
+      },
+      {
         label: "a helper that fetches before it validates",
         path: "banks/[bankId]/thing/[id]/route.ts",
         source: `async function proxyThing(request, { params }) {
@@ -602,6 +622,15 @@ describe("bank id validation in every route handler", () => {
         }
         export async function PATCH(request, context) {
           return proxyThing(request, context);
+        }`,
+      },
+      {
+        label: "a validator handed the SDK call it runs after it validates",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function POST(request, context) {
+          return respondWithBankSdk(request, context, "Failed to run thing", (bankId) =>
+            sdk.runThing({ path: { bank_id: bankId } })
+          );
         }`,
       },
       {
