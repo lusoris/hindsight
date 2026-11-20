@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { relayUpstreamJson } from "@/lib/dataplane-proxy";
 import { localizeApiErrorPayload, missingQueryParam } from "@/lib/i18n/api-errors";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { validateBankId } from "@/lib/route-validation";
 
 export async function POST(request: NextRequest) {
   try {
@@ -10,6 +11,8 @@ export async function POST(request: NextRequest) {
     const documentId = searchParams.get("document_id");
 
     if (!bankId) return missingQueryParam(request, "bank_id");
+    const bankIdError = validateBankId(request, bankId);
+    if (bankIdError) return bankIdError;
     if (!documentId) return missingQueryParam(request, "document_id");
 
     const response = await fetch(

@@ -1,13 +1,16 @@
 import { type NextRequest, NextResponse } from "next/server";
 import { isDotSegmentBankId } from "@/lib/bank-id";
-import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
+import { localizeApiErrorPayload, type RequestLike } from "@/lib/i18n/api-errors";
 
 /**
  * `null` for a usable bank id, else the 400 response: `api.errors.validation.bankIdRequired`
  * when it is empty, `api.errors.validation.bankIdDotSegment` when it is "." or ".." (a URL
  * parser would resolve it out of the bank path; see `isDotSegmentBankId`).
  */
-export function validateBankId(request: Request, bankId: string | undefined): NextResponse | null {
+export function validateBankId(
+  request: RequestLike,
+  bankId: string | undefined
+): NextResponse | null {
   if (!bankId) {
     return NextResponse.json(
       localizeApiErrorPayload(request, {

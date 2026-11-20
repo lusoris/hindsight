@@ -4,6 +4,7 @@ import { localizeApiErrorPayload, missingQueryParam } from "@/lib/i18n/api-error
 import { sdk, lowLevelClient, dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { respondWithSdk } from "@/lib/sdk-response";
 import { readOptionalNumber } from "@/lib/query-params";
+import { validateBankId } from "@/lib/route-validation";
 
 // Tag matching modes accepted by the dataplane's list_documents endpoint.
 const TAGS_MATCH_MODES = new Set(["any", "all", "any_strict", "all_strict", "exact"]);
@@ -20,6 +21,8 @@ export async function GET(request: NextRequest) {
   const bankId = searchParams.get("bank_id");
 
   if (!bankId) return missingQueryParam(request, "bank_id");
+  const bankIdError = validateBankId(request, bankId);
+  if (bankIdError) return bankIdError;
 
   // A `document_id` narrows the collection to one document. It rides in the query
   // string rather than a path segment because document ids routinely contain `/`;
@@ -78,6 +81,8 @@ export async function PATCH(request: NextRequest) {
   const documentId = searchParams.get("document_id");
 
   if (!bankId) return missingQueryParam(request, "bank_id");
+  const bankIdError = validateBankId(request, bankId);
+  if (bankIdError) return bankIdError;
   if (!documentId) return missingQueryParam(request, "document_id");
 
   try {
@@ -111,6 +116,8 @@ export async function DELETE(request: NextRequest) {
   const documentId = searchParams.get("document_id");
 
   if (!bankId) return missingQueryParam(request, "bank_id");
+  const bankIdError = validateBankId(request, bankId);
+  if (bankIdError) return bankIdError;
   if (!documentId) return missingQueryParam(request, "document_id");
 
   const response = await sdk.deleteDocument({

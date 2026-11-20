@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import type { BankRouteContext } from "@/lib/bank-sdk-route";
+import { isDotSegmentBankId } from "@/lib/bank-id";
 import { relayBankPost } from "@/lib/dataplane-proxy";
 
 const CLONE_SCOPE_FLAGS = ["include_data", "include_bank_config", "include_history"] as const;
@@ -30,6 +31,16 @@ export async function POST(request: NextRequest, context: BankRouteContext) {
           localizeApiErrorPayload(request, {
             error: "target_bank_id is required",
             errorKey: "api.errors.validation.targetBankIdRequired",
+          }),
+          { status: 400 }
+        );
+      }
+      // A "." or ".." bank could never be reached again: every bank route refuses those ids.
+      if (isDotSegmentBankId(targetBankId)) {
+        return NextResponse.json(
+          localizeApiErrorPayload(request, {
+            error: 'target_bank_id cannot be "." or ".."',
+            errorKey: "api.errors.validation.targetBankIdDotSegment",
           }),
           { status: 400 }
         );

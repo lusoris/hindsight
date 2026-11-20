@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { validateBankId } from "@/lib/route-validation";
 
 export async function GET(
   request: NextRequest,
@@ -8,6 +9,8 @@ export async function GET(
 ) {
   try {
     const { bankId } = await params;
+    const bankIdError = validateBankId(request, bankId);
+    if (bankIdError) return bankIdError;
 
     const url = dataplaneBankUrl(bankId, "/export");
     const response = await fetch(url, {

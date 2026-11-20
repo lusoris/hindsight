@@ -2064,6 +2064,7 @@
         "missingBankId": "缺少 bank_id",
         "fileRequired": "需要檔案",
         "targetBankIdRequired": "必須提供 target_bank_id",
+        "targetBankIdDotSegment": "target_bank_id 唔可以係 \".\" 或 \"..\"",
         "attachmentIdRequired": "必須提供有效嘅附件 ID"
       },
       "generic": {

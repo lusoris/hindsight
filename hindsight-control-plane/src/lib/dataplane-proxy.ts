@@ -44,8 +44,9 @@ export type DataplaneCall = Omit<
 >;
 
 /**
- * Proxies one bank-scoped dataplane call: 400 with `missing` when an id is absent, the upstream
- * JSON (or `successBody`) at 200, `failure` at the upstream status or at 500 when anything throws.
+ * Proxies one bank-scoped dataplane call: 400 with `missing` when an id is absent,
+ * `validateBankId`'s 400 when the bank id is "." or "..", the upstream JSON (or `successBody`)
+ * at 200, `failure` at the upstream status or at 500 when anything throws.
  */
 export async function proxyDataplane(
   request: Request,
@@ -60,6 +61,8 @@ export async function proxyDataplane(
         });
       }
     }
+    const bankIdError = validateBankId(request, options.bankId);
+    if (bankIdError) return bankIdError;
 
     const hasJsonBody = Boolean(options.forwardJsonBody) || options.jsonBody !== undefined;
     const init: RequestInit = {
@@ -212,7 +215,8 @@ type BankPostRelayOptions = {
 };
 
 /**
- * Relays one bank-scoped dataplane POST whose answer the UI reads as is: `prepare` reads the
+ * Relays one bank-scoped dataplane POST whose answer the UI reads as is: `validateBankId` answers
+ * an empty, "." or ".." bank id with its 400 before anything runs, `prepare` reads the
  * request and names the call (or answers early, e.g. 400), the upstream JSON comes back at
  * `successStatus`, and an upstream error body (or `{ detail: statusText }` when it is not JSON)
  * at the upstream status. Anything that throws, `prepare` included, answers `failure` at 500.
@@ -231,6 +235,8 @@ export async function relayBankPost(
 ): Promise<NextResponse> {
   try {
     const { bankId } = await context.params;
+    const bankIdError = validateBankId(request, bankId);
+    if (bankIdError) return bankIdError;
     const call = await prepare(bankId);
     if (call instanceof NextResponse) return call;
 

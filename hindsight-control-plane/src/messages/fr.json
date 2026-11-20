@@ -2064,6 +2064,7 @@
         "missingBankId": "bank_id manquant",
         "fileRequired": "Un fichier est requis",
         "targetBankIdRequired": "target_bank_id est obligatoire",
+        "targetBankIdDotSegment": "target_bank_id ne peut pas être \".\" ou \"..\"",
         "attachmentIdRequired": "Un identifiant de pièce jointe valide est requis"
       },
       "generic": {

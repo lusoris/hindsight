@@ -4,8 +4,10 @@ import {
   dataplaneBankUrl,
   getDataplaneHeaders,
   lowLevelClient,
+  sdk,
 } from "@/lib/hindsight-client";
 import { version } from "../../package.json";
+import { useFetchSpies } from "./fetch-spies";
 
 describe("dataplane User-Agent", () => {
   it("identifies the control plane and its version", () => {
@@ -36,4 +38,27 @@ describe("dataplaneBankUrl", () => {
       expect(url.pathname).toBe(`/v1/default/banks/${encodeURIComponent(bankId)}/stats`);
     }
   );
+});
+
+describe("lowLevelClient dot-segment barrier", () => {
+  const { fetchSpy } = useFetchSpies();
+
+  // Without the interceptor the generated serializer sends `/v1/default/banks/../stats`, which
+  // `new Request` resolves to `/v1/default/stats`.
+  it.each([".", ".."])("sends nothing for the bank id %j and returns a RangeError", async (bankId) => {
+    const result = await sdk.getAgentStats({ client: lowLevelClient, path: { bank_id: bankId } });
+
+    expect(result.error).toBeInstanceOf(RangeError);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("sends an ordinary bank id under its bank path", async () => {
+    fetchSpy.mockResolvedValueOnce(new Response("{}", { status: 200 }));
+
+    await sdk.getAgentStats({ client: lowLevelClient, path: { bank_id: "a.b" } });
+
+    expect(fetchSpy).toHaveBeenCalledOnce();
+    const sent = fetchSpy.mock.calls[0][0] as Request;
+    expect(new URL(sent.url).pathname).toBe("/v1/default/banks/a.b/stats");
+  });
 });

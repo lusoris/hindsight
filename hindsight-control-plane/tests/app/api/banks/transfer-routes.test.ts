@@ -51,6 +51,20 @@ describe("bank clone and import routes", () => {
       expect(fetchSpy).not.toHaveBeenCalled();
     });
 
+    // Such a bank could never be read again: every bank route answers "." and ".." with a 400.
+    it.each([".", ".."])("answers 400 for the target %j without calling the dataplane", async (target) => {
+      const response = await cloneRoute(
+        post("/clone", JSON.stringify({ target_bank_id: target })),
+        CONTEXT
+      );
+
+      expect(response.status).toBe(HTTP_BAD_REQUEST);
+      expect(await response.json()).toEqual({
+        error: translateApiError("api.errors.validation.targetBankIdDotSegment"),
+      });
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
     it("forwards the target and only the boolean scope flags, and answers 202", async () => {
       const operation = { operation_id: "op-1", status: "pending" };
       upstreamReturns(operation, HTTP_ACCEPTED);

@@ -65,6 +65,25 @@ export const lowLevelClient = createClient(
 );
 
 /**
+ * The SDK's second barrier, as `dataplaneBankUrl`'s throw is for direct fetches: the generated
+ * path serializer leaves "." and ".." unencoded and `new Request` resolves them out of the bank
+ * path, so a route that skipped `validateBankId` would reach `/v1/default/<suffix>`. The client
+ * catches the throw before anything is sent and returns it as `{ error }`.
+ */
+function refuseDotSegmentBankPath(
+  request: Request,
+  options: { path?: Record<string, unknown> }
+): Request {
+  const bankId = options.path?.bank_id;
+  if (typeof bankId === "string" && isDotSegmentBankId(bankId)) {
+    throw new RangeError(`bank id ${JSON.stringify(bankId)} is a URL dot segment`);
+  }
+  return request;
+}
+
+lowLevelClient.interceptors.request.use(refuseDotSegmentBankPath);
+
+/**
  * Export SDK functions for direct API access
  */
 export { sdk };

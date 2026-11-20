@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { relayUpstreamJson } from "@/lib/dataplane-proxy";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
-import { DATAPLANE_URL, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { validateBankId } from "@/lib/route-validation";
 
 /** Proxies POST /v1/default/banks/{bank_id}/consolidation-strategies/preview — the
@@ -13,14 +13,13 @@ export async function POST(request: Request, { params }: { params: Promise<{ ban
     if (bankIdError) return bankIdError;
 
     const body = await request.text();
-    const response = await fetch(
-      `${DATAPLANE_URL}/v1/default/banks/${bankId}/consolidation-strategies/preview`,
-      {
-        method: "POST",
-        headers: getDataplaneHeaders({ "Content-Type": "application/json" }),
-        body,
-      }
-    );
+    // dataplaneBankUrl encodes the id as one segment: the raw `${bankId}` this replaced let a
+    // decoded `a/../b` route param reach bank `b`.
+    const response = await fetch(dataplaneBankUrl(bankId, "/consolidation-strategies/preview"), {
+      method: "POST",
+      headers: getDataplaneHeaders({ "Content-Type": "application/json" }),
+      body,
+    });
 
     return await relayUpstreamJson(response, 200);
   } catch (error) {
