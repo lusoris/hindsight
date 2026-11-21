@@ -18,7 +18,11 @@ and the path check needs no import. The second version read one file-wide import
 positional targets of ``setattr``/``patch``/``patch.object`` called by those names: a keyword
 ``target=``, an aliased ``patch`` import and ``patch.multiple`` slipped through, and a test-local
 ``time = SimpleNamespace(...)`` was flagged as the ``time`` module. Bindings are now resolved per
-scope, the way Python resolves the name at that call.
+scope, the way Python resolves the name at that call. The third version walked a scope's nodes
+in reverse source order and kept the last binding it met, so ``asyncio = object(); import
+asyncio`` hid the import. When one scope binds a name more than once, the scan now fails closed:
+an import beats any other binding and a standard-library import beats any other import, wherever
+each sits, so ``import asyncio; asyncio = object()`` is flagged as well.
 """
 
 import ast
@@ -82,19 +86,22 @@ def _outer_parts(scope: ast.AST) -> list[ast.AST]:
 
 
 def _own_nodes(scope: ast.AST) -> Iterator[ast.AST]:
-    """Every node a scope evaluates itself; a nested scope is yielded but not entered."""
-    stack = _inner_parts(scope)
+    """Every node a scope evaluates itself, in source order; a nested scope is yielded but not entered."""
+    stack = _inner_parts(scope)[::-1]
     while stack:
         node = stack.pop()
         yield node
-        stack.extend(_outer_parts(node) if isinstance(node, _SCOPE) else ast.iter_child_nodes(node))
+        children = _outer_parts(node) if isinstance(node, _SCOPE) else list(ast.iter_child_nodes(node))
+        stack.extend(reversed(children))
 
 
 def _bound_by(node: ast.AST) -> Bindings:
     """Names one statement or expression binds in the scope that evaluates it."""
     if isinstance(node, ast.Import):
         return {
-            alias.asname or alias.name.split(".")[0]: alias.name.split(".") if alias.asname else [alias.name.split(".")[0]]
+            alias.asname or alias.name.split(".")[0]: alias.name.split(".")
+            if alias.asname
+            else [alias.name.split(".")[0]]
             for alias in node.names
         }
     if isinstance(node, ast.ImportFrom):
@@ -115,20 +122,41 @@ def _bound_by(node: ast.AST) -> Bindings:
     return {}
 
 
+def _names_stdlib(path: list[str]) -> bool:
+    return any(segment in sys.stdlib_module_names for segment in path)
+
+
+def _stronger(current: list[str] | None, new: list[str] | None) -> list[str] | None:
+    """The binding to keep when one scope binds a name twice.
+
+    Which one holds at the patch call depends on control flow the scan does not follow
+    (`if`/`else`, `try`, loops), so it fails closed: an import beats any other binding and a
+    standard-library import beats any other import, wherever each sits in the scope.
+    """
+    if new is None:
+        return current
+    if current is None or not _names_stdlib(current):
+        return new
+    return current
+
+
 def _scope_bindings(scope: ast.AST, outer: Bindings, module: Bindings | None) -> Bindings:
-    names = dict(outer)
     nodes = list(_own_nodes(scope))
     globals_ = {name for node in nodes if isinstance(node, ast.Global) for name in node.names}
     nonlocals = {name for node in nodes if isinstance(node, ast.Nonlocal) for name in node.names}
+    # Any binding in a scope makes the name local for the whole scope, so the scope's own
+    # bindings replace the outer ones; among themselves they merge through _stronger.
+    local: Bindings = {}
     if isinstance(scope, _FUNCTION):
         args = scope.args
         for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]:
             if arg is not None:
-                names[arg.arg] = None
+                local[arg.arg] = None
     for node in nodes:
         for name, binding in _bound_by(node).items():
             if name not in globals_ and name not in nonlocals:
-                names[name] = binding
+                local[name] = _stronger(local[name], binding) if name in local else binding
+    names = {**outer, **local}
     if module is not None:
         for name in globals_:
             names[name] = module.get(name)
@@ -199,7 +227,7 @@ def _scan(scope: ast.AST, outer: Bindings, module: Bindings | None, path: Path) 
     for node in _own_nodes(scope):
         if isinstance(node, ast.Call):
             dotted = _patched_path(node, names)
-            if dotted and any(segment in sys.stdlib_module_names for segment in dotted):
+            if dotted and _names_stdlib(dotted):
                 found.append(StdlibPatch(path=path, line=node.lineno, target=".".join(dotted)))
         if isinstance(node, _SCOPE):
             found.extend(_scan(node, inner_outer, module, path))
@@ -251,10 +279,15 @@ def _plant(tmp_path: Path, line: str) -> Path:
         'patch(target="asyncio.sleep", new=sleep)',
         'mock_patch("asyncio.sleep", sleep)',
         'mock.patch.object(waiting.time, "monotonic")',
-        'mock.patch.multiple(asyncio, sleep=sleep)',
+        "mock.patch.multiple(asyncio, sleep=sleep)",
         'patch.multiple("asyncio", sleep=sleep)',
         'import socket; monkeypatch.setattr(socket, "socket", sleep)',  # function-local import
         'global time; monkeypatch.setattr(time, "monotonic", clock)',
+        # One scope binding a name twice: the import wins wherever it sits (fail closed).
+        'asyncio = object(); import asyncio; monkeypatch.setattr(asyncio, "sleep", sleep)',
+        'import asyncio; asyncio = object(); monkeypatch.setattr(asyncio, "sleep", sleep)',
+        'import pytest as aio; import asyncio as aio; monkeypatch.setattr(aio, "sleep", sleep)',
+        'import asyncio as aio; import pytest as aio; monkeypatch.setattr(aio, "sleep", sleep)',
     ],
 )
 def test_planted_stdlib_patch_is_found(tmp_path: Path, line: str) -> None:
@@ -276,7 +309,7 @@ def test_planted_decorator_patch_is_found(tmp_path: Path) -> None:
         'monkeypatch.setattr("hindsight_system_tests.waiting.asyncio", SimpleNamespace(sleep=sleep))',
         'monkeypatch.setattr(client.operations, "list_operations", sleep)',
         'patch.object(waiting, "wait_until_settled")',
-        'patch.multiple(waiting, wait_until_settled=sleep)',
+        "patch.multiple(waiting, wait_until_settled=sleep)",
         # A test-local object named like a stdlib module is not that module.
         'time = SimpleNamespace(monotonic=clock); monkeypatch.setattr(time, "monotonic", clock)',
         'client.patch("/v1/default/banks/b", json={})',
