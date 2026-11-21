@@ -38,11 +38,10 @@ from hindsight_system_evals.corpus import HardQuestion
 from hindsight_system_evals.pages import (
     PageOutcome,
     SettleFn,
-    WaveSnapshot,
+    build_page_waves,
     create_page,
     facts,
     prepare_bank,
-    read_page,
     split_into_waves,
 )
 
@@ -207,13 +206,7 @@ async def build(client: Hindsight, bank_id: str, case: DeltaUpdate, settle: Sett
     outcome.page_id, outcome.mental_model_id = created.page_id, created.mental_model_id
     await settle(bank_id)
 
-    for index, wave in enumerate(_waves(), start=1):
-        await client.aretain_batch(bank_id=bank_id, items=wave)
-        await settle(bank_id)
-        await client.arefresh_mental_model(bank_id=bank_id, mental_model_id=outcome.mental_model_id)
-        await settle(bank_id)
-        content = await read_page(client, bank_id, outcome.mental_model_id)
-        outcome.waves.append(WaveSnapshot(wave=index, facts_ingested=len(wave), content=content))
+    await build_page_waves(client, outcome, _waves(), settle)
 
     outcome.final_content = outcome.waves[-1].content
     return outcome

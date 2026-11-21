@@ -22,6 +22,7 @@ from hindsight_system_evals.beir import BeirDocument, BeirQuery, BeirSlice, cut_
 from hindsight_system_evals.retrieval_metrics import (
     CUTOFFS,
     aggregate,
+    as_record,
     average_precision_at_k,
     dedupe_preserving_order,
     hit_at_k,
@@ -294,3 +295,44 @@ def test_numeric_query_ids_sort_numerically(tmp_path, monkeypatch):
 
     monkeypatch.setenv("HINDSIGHT_EVAL_BEIR_DIR", str(tmp_path))
     assert [q.id for q in load_beir_slice().queries] == ["2", "10"]
+
+
+def test_as_record_matches_the_fixed_baseline():
+    run = aggregate([score_query("a", ["gold"], {"gold": 1}), score_query("b", ["nope"], {"gold": 1})])
+    assert as_record(run, "fixed", {"source": "unit"}) == {
+        "label": "fixed",
+        "notes": {"source": "unit"},
+        "queries": 2,
+        "mean_retrieved": 1.0,
+        "mrr_untruncated": 0.5,
+        "r_precision": 0.5,
+        "cutoffs": [1, 3, 5, 10, 20, 100],
+        "ndcg": {"1": 0.5, "3": 0.5, "5": 0.5, "10": 0.5, "20": 0.5, "100": 0.5},
+        "map": {"1": 0.5, "3": 0.5, "5": 0.5, "10": 0.5, "20": 0.5, "100": 0.5},
+        "recall": {"1": 0.5, "3": 0.5, "5": 0.5, "10": 0.5, "20": 0.5, "100": 0.5},
+        "precision": {"1": 0.5, "3": 0.16666666666666666, "5": 0.1, "10": 0.05, "20": 0.025, "100": 0.005},
+        "mrr_at": {"1": 0.5, "3": 0.5, "5": 0.5, "10": 0.5, "20": 0.5, "100": 0.5},
+        "hit": {"1": 0.5, "3": 0.5, "5": 0.5, "10": 0.5, "20": 0.5, "100": 0.5},
+        "per_query": [
+            {
+                "query_id": "a",
+                "ndcg_10": 1.0,
+                "mrr": 1.0,
+                "gold_found": 1,
+                "gold_total": 1,
+                "retrieved": 1,
+                "first_hit_rank": 1,
+                "blame": "ranking (every gold document returned; first at rank 1)",
+            },
+            {
+                "query_id": "b",
+                "ndcg_10": 0.0,
+                "mrr": 0.0,
+                "gold_found": 0,
+                "gold_total": 1,
+                "retrieved": 1,
+                "first_hit_rank": None,
+                "blame": "retrieval (0/1 gold documents reached the response)",
+            },
+        ],
+    }

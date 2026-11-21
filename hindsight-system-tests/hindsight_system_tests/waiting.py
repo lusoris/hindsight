@@ -36,15 +36,16 @@ async def wait_until_settled(
     *,
     timeout: float = SETTLE_TIMEOUT_SECONDS,
     allow_failed: bool = False,
+    poll_interval: float = POLL_INTERVAL_SECONDS,
 ) -> None:
     """Block until the bank's background work has finished.
 
     Raises on a failed operation, and on timeout reports what was still in flight
     — a bare "timed out" would send the reader to the server log for something the
-    API could have told them. ``allow_failed`` is for a story whose subject *is*
-    a failure: it waits the work out and asserts the failed operations itself,
-    both the ones already marked failed and one still carrying an error between
-    retries.
+    API could have told them. ``allow_failed`` waits failures and retries out
+    for a story whose subject is a failure, or a real-model caller whose own
+    check is the gate. The caller checks the result, including operations already
+    marked failed and ones still carrying an error between retries.
     """
     deadline = time.monotonic() + timeout
     quiet_polls = 0
@@ -82,6 +83,6 @@ async def wait_until_settled(
             if quiet_polls >= _CONSECUTIVE_QUIET_POLLS:
                 return
 
-        await asyncio.sleep(POLL_INTERVAL_SECONDS)
+        await asyncio.sleep(poll_interval)
 
     raise AssertionError(f"bank {bank_id} did not settle within {timeout}s; still in flight: {in_flight or 'nothing'}")

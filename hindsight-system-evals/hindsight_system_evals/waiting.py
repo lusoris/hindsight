@@ -15,9 +15,10 @@ from __future__ import annotations
 
 import asyncio
 import os
-import time
 
 from hindsight_client import Hindsight
+
+from hindsight_system_tests.waiting import wait_until_settled as _wait_until_settled
 
 # Far longer than the system tests use, and for a concrete reason: there a stub
 # answers instantly, so 90s is generous. Here a settle waits on real fact
@@ -29,14 +30,6 @@ SETTLE_TIMEOUT_SECONDS = float(os.getenv("HINDSIGHT_EVAL_SETTLE_TIMEOUT", "900")
 # of pointless requests; a settle here takes minutes, not milliseconds.
 POLL_INTERVAL_SECONDS = 1.0
 
-# The bank must look idle for two consecutive polls before we believe it. One
-# quiet poll proves nothing: a worker that has just claimed the next task, or an
-# operation enqueued a moment after the previous one completed, both read as
-# "nothing in flight" for an instant.
-_CONSECUTIVE_QUIET_POLLS = 2
-
-_BUSY_STATUSES = ("pending", "processing")
-
 
 async def wait_until_settled(
     client: Hindsight,
@@ -45,50 +38,32 @@ async def wait_until_settled(
     timeout: float = SETTLE_TIMEOUT_SECONDS,
     allow_failed: bool = False,
 ) -> None:
-    """Block until the bank's background work has finished.
+    """Wait using the shared system-tests helper with real-model eval defaults."""
+    await _wait_until_settled(
+        client, bank_id, timeout=timeout, allow_failed=allow_failed, poll_interval=POLL_INTERVAL_SECONDS
+    )
 
-    Raises on a failed operation, and on timeout reports what was still in flight
-    — a bare "timed out" would send the reader to the server log for something the
-    API could have told them. ``allow_failed`` waits failures and retries out
-    instead, for a caller with a real model whose own check is the gate (a page
-    refresh that fails once and is retried by the worker).
+
+async def drain_then_fail_on_failed(client: Hindsight, bank_id: str, *, timeout: float) -> None:
+    """Wait until nothing is queued, then fail on anything that ended failed.
+
+    Not ``wait_until_settled``: that gives up on the first attempt that errors,
+    while a build runs ~a thousand model calls and a transient provider error is
+    what the worker's retries are for. Only an operation that exhausted them is
+    a broken build.
     """
-    deadline = time.monotonic() + timeout
-    quiet_polls = 0
-    in_flight: list[str] = []
-
-    while time.monotonic() < deadline:
-        failed = await client.operations.list_operations(bank_id, status="failed", limit=100)
-        if failed.operations and not allow_failed:
-            summary = ", ".join(
-                f"{op.task_type}: {op.error_message or 'no error recorded'}" for op in failed.operations
-            )
-            raise AssertionError(f"bank {bank_id} has failed background operations — {summary}")
-
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
         busy = [
             op
-            for status in _BUSY_STATUSES
+            for status in ("pending", "processing")
             for op in (await client.operations.list_operations(bank_id, status=status, limit=100)).operations
         ]
-
-        # An operation carrying an error is already lost, even while its status
-        # still reads `pending`: that is the worker holding it for a retry. With a
-        # deterministic stub the retry gets the same answer, so waiting out the
-        # backoff only delays the same failure — report it now, with the message.
-        errored = [op for op in busy if op.error_message]
-        if errored and not allow_failed:
-            summary = ", ".join(f"{op.task_type}: {op.error_message}" for op in errored)
-            raise AssertionError(f"bank {bank_id} has a background operation that failed — {summary}")
-
-        in_flight = [f"{op.task_type}({op.status})" for op in busy]
-
-        if in_flight:
-            quiet_polls = 0
-        else:
-            quiet_polls += 1
-            if quiet_polls >= _CONSECUTIVE_QUIET_POLLS:
-                return
-
-        await asyncio.sleep(POLL_INTERVAL_SECONDS)
-
-    raise AssertionError(f"bank {bank_id} did not settle within {timeout}s; still in flight: {in_flight or 'nothing'}")
+        if not busy:
+            break
+        await asyncio.sleep(5)
+    else:
+        raise TimeoutError(f"bank {bank_id} still busy after {timeout}s")
+    failed = (await client.operations.list_operations(bank_id, status="failed", limit=100)).operations
+    if failed:
+        raise RuntimeError(f"bank {bank_id}: {', '.join(f'{op.task_type}: {op.error_message}' for op in failed)}")

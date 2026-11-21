@@ -51,6 +51,7 @@ from hindsight_client import Hindsight
 
 from hindsight_system_evals.beir import BeirQuery, BeirSlice, load_beir_slice
 from hindsight_system_evals.retrieval_metrics import QueryScore, RunScore, aggregate, score_query
+from hindsight_system_evals.waiting import drain_then_fail_on_failed
 
 #: Waits until a bank has no pending work — the suite's `settled` fixture.
 SettleFn = Callable[[str], Awaitable[None]]
@@ -173,32 +174,6 @@ def _write_manifest(sliced: BeirSlice, facts: int) -> None:
     )
     BANK_MANIFEST.parent.mkdir(parents=True, exist_ok=True)
     BANK_MANIFEST.write_text(json.dumps(manifest.__dict__, indent=1) + "\n", encoding="utf-8")
-
-
-async def _drain(client: Hindsight, bank_id: str, timeout: float = 7200) -> None:
-    """Wait until nothing is queued, then fail on anything that ended failed.
-
-    Not `wait_until_settled`: that gives up on the first operation carrying an
-    error, while a build runs hundreds of model calls and a transient provider
-    error is what the worker's retries are for. Only an operation that exhausted
-    them is a broken build. Same reasoning as `refresh_cost._drain`.
-    """
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    while loop.time() < deadline:
-        busy = [
-            op
-            for status in ("pending", "processing")
-            for op in (await client.operations.list_operations(bank_id, status=status, limit=100)).operations
-        ]
-        if not busy:
-            break
-        await asyncio.sleep(5)
-    else:
-        raise TimeoutError(f"bank {bank_id} still busy after {timeout}s")
-    failed = (await client.operations.list_operations(bank_id, status="failed", limit=100)).operations
-    if failed:
-        raise RuntimeError(f"bank {bank_id}: {', '.join(f'{op.task_type}: {op.error_message}' for op in failed)}")
 
 
 # --------------------------------------------------------------------------- #
@@ -413,7 +388,7 @@ async def _build(out: Path, api_url: str, api_key: str | None) -> None:
     print(f"building from {sliced.describe()} against {api_url}, extraction={BUILD_EXTRACTION_MODE}")
     client = Hindsight(base_url=api_url, api_key=api_key, timeout=1800)
     try:
-        archive = await build_bank(client, sliced, lambda bank: _drain(client, bank))
+        archive = await build_bank(client, sliced, lambda bank: drain_then_fail_on_failed(client, bank, timeout=7200))
     finally:
         await client.aclose()
     out.parent.mkdir(parents=True, exist_ok=True)

@@ -188,19 +188,30 @@ async def build_page(
     outcome.mental_model_id = created.mental_model_id
     await settle(bank_id)
 
-    for index, wave in enumerate(waves, start=1):
-        await client.aretain_batch(bank_id=bank_id, items=[{"content": fact.text} for fact in wave])
-        await settle(bank_id)
-        # The refresh is the thing under test, so it goes through the same public
-        # endpoint and the same worker as any caller's — only the trigger is
-        # explicit rather than consolidation-driven.
-        await client.arefresh_mental_model(bank_id=bank_id, mental_model_id=outcome.mental_model_id)
-        await settle(bank_id)
-        content = await read_page(client, bank_id, outcome.mental_model_id)
-        outcome.waves.append(WaveSnapshot(wave=index, facts_ingested=len(wave), content=content))
+    items = [[{"content": fact.text} for fact in wave] for wave in waves]
+    await build_page_waves(client, outcome, items, settle)
 
     outcome.final_content = outcome.waves[-1].content if outcome.waves else ""
     return outcome
+
+
+async def build_page_waves(
+    client: Hindsight,
+    outcome: PageOutcome,
+    waves: list[list[dict[str, str]]],
+    settle: SettleFn,
+) -> None:
+    """Retain prepared item batches, refresh the page, and append each snapshot."""
+    for index, wave in enumerate(waves, start=1):
+        await client.aretain_batch(bank_id=outcome.bank_id, items=wave)
+        await settle(outcome.bank_id)
+        # The refresh is the thing under test, so it goes through the same public
+        # endpoint and the same worker as any caller's — only the trigger is
+        # explicit rather than consolidation-driven.
+        await client.arefresh_mental_model(bank_id=outcome.bank_id, mental_model_id=outcome.mental_model_id)
+        await settle(outcome.bank_id)
+        content = await read_page(client, outcome.bank_id, outcome.mental_model_id)
+        outcome.waves.append(WaveSnapshot(wave=index, facts_ingested=len(wave), content=content))
 
 
 async def read_page(client: Hindsight, bank_id: str, mental_model_id: str) -> str:
