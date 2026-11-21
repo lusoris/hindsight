@@ -22,11 +22,17 @@ scope, the way Python resolves the name at that call. The third version walked a
 in reverse source order and kept the last binding it met, so ``asyncio = object(); import
 asyncio`` hid the import. When one scope binds a name more than once, the scan now fails closed:
 an import beats any other binding and a standard-library import beats any other import, wherever
-each sits, so ``import asyncio; asyncio = object()`` is flagged as well.
+each sits, so ``import asyncio; asyncio = object()`` is flagged as well. The fourth version
+dropped an import made under ``global`` or ``nonlocal``, which binds the module's or an enclosing
+function's name, and resolved a class body like a function body, where one binding makes a name
+local throughout. A class body reads a name it has not bound yet from the module, so
+``@patch.object(time, "monotonic")`` above a later ``time = object()`` slipped through. Both
+declared imports and class bodies now resolve the way Python resolves them.
 """
 
 import ast
 import sys
+import textwrap
 from collections.abc import Iterator
 from dataclasses import dataclass
 from enum import Enum
@@ -85,14 +91,19 @@ def _outer_parts(scope: ast.AST) -> list[ast.AST]:
     raise TypeError(f"not a nested scope: {type(scope).__name__}")
 
 
-def _own_nodes(scope: ast.AST) -> Iterator[ast.AST]:
-    """Every node a scope evaluates itself, in source order; a nested scope is yielded but not entered."""
-    stack = _inner_parts(scope)[::-1]
+def _evaluated(roots: list[ast.AST]) -> Iterator[ast.AST]:
+    """Every node under `roots` their scope evaluates, in source order; a nested scope is yielded but not entered."""
+    stack = roots[::-1]
     while stack:
         node = stack.pop()
         yield node
         children = _outer_parts(node) if isinstance(node, _SCOPE) else list(ast.iter_child_nodes(node))
         stack.extend(reversed(children))
+
+
+def _own_nodes(scope: ast.AST) -> Iterator[ast.AST]:
+    """Every node a scope evaluates itself, in source order; a nested scope is yielded but not entered."""
+    return _evaluated(_inner_parts(scope))
 
 
 def _bound_by(node: ast.AST) -> Bindings:
@@ -140,13 +151,31 @@ def _stronger(current: list[str] | None, new: list[str] | None) -> list[str] | N
     return current
 
 
-def _scope_bindings(scope: ast.AST, outer: Bindings, module: Bindings | None) -> Bindings:
+def _merge(names: Bindings, name: str, binding: list[str] | None) -> None:
+    names[name] = _stronger(names[name], binding) if name in names else binding
+
+
+@dataclass(frozen=True)
+class _ScopeFacts:
+    """What one scope binds itself, before the scopes around or inside it are looked at."""
+
+    local: Bindings  # names bound in the scope's own namespace
+    global_names: set[str]  # names it declares `global`
+    nonlocal_names: set[str]  # names it declares `nonlocal`
+    declared: Bindings  # its bindings of those declared names, which land in another scope's namespace
+
+
+def _facts(scope: ast.AST) -> _ScopeFacts:
     nodes = list(_own_nodes(scope))
-    globals_ = {name for node in nodes if isinstance(node, ast.Global) for name in node.names}
-    nonlocals = {name for node in nodes if isinstance(node, ast.Nonlocal) for name in node.names}
-    # Any binding in a scope makes the name local for the whole scope, so the scope's own
-    # bindings replace the outer ones; among themselves they merge through _stronger.
+    # `global` at module level changes nothing: the module binds those names itself.
+    global_names: set[str] = (
+        set()
+        if isinstance(scope, ast.Module)
+        else {name for node in nodes if isinstance(node, ast.Global) for name in node.names}
+    )
+    nonlocal_names = {name for node in nodes if isinstance(node, ast.Nonlocal) for name in node.names}
     local: Bindings = {}
+    declared: Bindings = {}
     if isinstance(scope, _FUNCTION):
         args = scope.args
         for arg in [*args.posonlyargs, *args.args, *args.kwonlyargs, args.vararg, args.kwarg]:
@@ -154,13 +183,81 @@ def _scope_bindings(scope: ast.AST, outer: Bindings, module: Bindings | None) ->
                 local[arg.arg] = None
     for node in nodes:
         for name, binding in _bound_by(node).items():
-            if name not in globals_ and name not in nonlocals:
-                local[name] = _stronger(local[name], binding) if name in local else binding
+            _merge(declared if name in global_names or name in nonlocal_names else local, name, binding)
+    return _ScopeFacts(local=local, global_names=global_names, nonlocal_names=nonlocal_names, declared=declared)
+
+
+def _raised(scope: ast.AST) -> Bindings:
+    """Bindings scopes below `scope` make to names they declare `nonlocal`, not yet taken below it."""
+    raised: Bindings = {}
+    for node in _own_nodes(scope):
+        if not isinstance(node, _SCOPE):
+            continue
+        facts = _facts(node)
+        for name, binding in facts.declared.items():
+            if name in facts.nonlocal_names:
+                _merge(raised, name, binding)
+        # A `nonlocal` name lives in the nearest enclosing function that binds it. Class bodies
+        # are skipped, so a class passes every declaration below it on.
+        taken = facts.local if isinstance(node, _FUNCTION) else {}
+        for name, binding in _raised(node).items():
+            if name not in taken:
+                _merge(raised, name, binding)
+    return raised
+
+
+def _scope_bindings(scope: ast.AST, outer: Bindings, module: Bindings | None) -> Bindings:
+    facts = _facts(scope)
+    # Any binding in a scope makes the name local for the whole scope, so the scope's own
+    # bindings replace the outer ones; among themselves they merge through _stronger.
+    local = dict(facts.local)
+    if isinstance(scope, _FUNCTION):
+        # `nonlocal aio; import asyncio as aio` in a nested function binds this scope's `aio`.
+        for name, binding in _raised(scope).items():
+            if name in local:
+                _merge(local, name, binding)
+    if module is None:
+        # `global aio; import asyncio as aio` in any function or class binds the module's `aio`.
+        for node in ast.walk(scope):
+            if isinstance(node, _SCOPE):
+                nested = _facts(node)
+                for name, binding in nested.declared.items():
+                    if name in nested.global_names:
+                        _merge(local, name, binding)
+        return local
     names = {**outer, **local}
-    if module is not None:
-        for name in globals_:
-            names[name] = module.get(name)
+    for name in facts.global_names:
+        names[name] = module.get(name)
     return names
+
+
+# Statements whose body may not run, or may stop part-way, before the next statement runs.
+_BRANCHING = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.Try, ast.TryStar, ast.With, ast.AsyncWith, ast.Match)
+
+
+def _class_views(scope: ast.ClassDef, names: Bindings, module: Bindings) -> list[Bindings]:
+    """The bindings each statement of a class body reads, one per statement.
+
+    A class body reads a name it binds but has not bound yet from the module, skipping any
+    enclosing function (Python's execution model), so `@patch.object(time, "monotonic")` above
+    a later `time = object()` patches the module's `time`. Until a statement directly in the
+    body has bound the name, a read may get either, so the stronger one is kept (fail closed);
+    after it, the class's own binding holds and a patch of a class-local object passes. A
+    binding inside `if`/`for`/`while`/`try`/`with`/`match` may not have run, an annotation
+    without a value binds nothing, and a `del` anywhere in the body may have unbound the name,
+    so none of them count as bound.
+    """
+    own = _facts(scope).local
+    deleted = {node.id for node in _own_nodes(scope) if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Del)}
+    bound: set[str] = set()
+    views: list[Bindings] = []
+    for statement in scope.body:
+        unbound = {name: _stronger(module.get(name), binding) for name, binding in own.items() if name not in bound}
+        views.append({**names, **unbound})
+        annotation_only = isinstance(statement, ast.AnnAssign) and statement.value is None
+        if not isinstance(statement, _BRANCHING) and not annotation_only:
+            bound |= {name for node in _evaluated([statement]) for name in _bound_by(node)} - deleted
+    return views
 
 
 def _chain(expr: ast.expr) -> list[str] | None:
@@ -221,16 +318,19 @@ def _patched_path(call: ast.Call, names: Bindings) -> list[str] | None:
 def _scan(scope: ast.AST, outer: Bindings, module: Bindings | None, path: Path) -> list[StdlibPatch]:
     names = _scope_bindings(scope, outer, module)
     module = names if module is None else module
+    parts = _inner_parts(scope)
+    views = _class_views(scope, names, module) if isinstance(scope, ast.ClassDef) else [names] * len(parts)
     # A class body's names are invisible to the functions and comprehensions inside it.
     inner_outer = outer if isinstance(scope, ast.ClassDef) else names
     found: list[StdlibPatch] = []
-    for node in _own_nodes(scope):
-        if isinstance(node, ast.Call):
-            dotted = _patched_path(node, names)
-            if dotted and _names_stdlib(dotted):
-                found.append(StdlibPatch(path=path, line=node.lineno, target=".".join(dotted)))
-        if isinstance(node, _SCOPE):
-            found.extend(_scan(node, inner_outer, module, path))
+    for part, view in zip(parts, views, strict=True):
+        for node in _evaluated([part]):
+            if isinstance(node, ast.Call):
+                dotted = _patched_path(node, view)
+                if dotted and _names_stdlib(dotted):
+                    found.append(StdlibPatch(path=path, line=node.lineno, target=".".join(dotted)))
+            if isinstance(node, _SCOPE):
+                found.extend(_scan(node, inner_outer, module, path))
     return found
 
 
@@ -283,6 +383,7 @@ def _plant(tmp_path: Path, line: str) -> Path:
         'patch.multiple("asyncio", sleep=sleep)',
         'import socket; monkeypatch.setattr(socket, "socket", sleep)',  # function-local import
         'global time; monkeypatch.setattr(time, "monotonic", clock)',
+        'global aio; import asyncio as aio; monkeypatch.setattr(aio, "sleep", sleep)',  # binds the module's aio
         # One scope binding a name twice: the import wins wherever it sits (fail closed).
         'asyncio = object(); import asyncio; monkeypatch.setattr(asyncio, "sleep", sleep)',
         'import asyncio; asyncio = object(); monkeypatch.setattr(asyncio, "sleep", sleep)',
@@ -299,6 +400,162 @@ def test_planted_decorator_patch_is_found(tmp_path: Path) -> None:
     source.write_text(f'{_HEADER}\n\n@patch.object(asyncio, "sleep")\ndef test_x(asyncio):\n    pass\n')
     # The decorator runs in the module scope, where `asyncio` is still the import.
     assert [patch.line for patch in find_stdlib_patches(source)] == [_HEADER.count("\n") + 3]
+
+
+def _plant_source(tmp_path: Path, body: str) -> Path:
+    source = tmp_path / "test_planted.py"
+    source.write_text(f"{_HEADER}\n\n{textwrap.dedent(body)}")
+    return source
+
+
+def _planted_lines(source: Path) -> list[int]:
+    return [number for number, text in enumerate(source.read_text().splitlines(), 1) if text.endswith("# planted")]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # An import under `global` in another function binds the module's name.
+        pytest.param(
+            """
+            def setup():
+                global aio
+                import asyncio as aio
+
+            def test_x(monkeypatch, sleep):
+                monkeypatch.setattr(aio, "sleep", sleep)  # planted
+            """,
+            id="global-in-another-function",
+        ),
+        # `global` at module level changes nothing.
+        pytest.param(
+            """
+            global aio
+            import asyncio as aio
+
+            def test_x(monkeypatch, sleep):
+                monkeypatch.setattr(aio, "sleep", sleep)  # planted
+            """,
+            id="global-at-module-level",
+        ),
+        # An import under `nonlocal` binds the enclosing function's name.
+        pytest.param(
+            """
+            def test_x(monkeypatch, sleep):
+                aio = None
+
+                def bind():
+                    nonlocal aio
+                    import asyncio as aio
+
+                bind()
+                monkeypatch.setattr(aio, "sleep", sleep)  # planted
+            """,
+            id="nonlocal-in-nested-function",
+        ),
+        # ... skipping a class body between them, even one binding the name itself.
+        pytest.param(
+            """
+            def test_x(monkeypatch, sleep):
+                aio = None
+
+                class Binder:
+                    aio = None
+
+                    def bind(self):
+                        nonlocal aio
+                        import asyncio as aio
+
+                monkeypatch.setattr(aio, "sleep", sleep)  # planted
+            """,
+            id="nonlocal-past-a-class-body",
+        ),
+        # A class body reads a name it has not bound yet from the module.
+        pytest.param(
+            """
+            class TestX:
+                @patch.object(time, "monotonic")  # planted
+                def test_x(self):
+                    pass
+
+                time = object()
+            """,
+            id="class-decorator-before-assignment",
+        ),
+        pytest.param(
+            """
+            class TestX:
+                time = patch.object(time, "monotonic")  # planted
+            """,
+            id="class-read-in-its-own-assignment",
+        ),
+        pytest.param(
+            """
+            class TestX:
+                if FLAG:
+                    time = object()
+                patcher = patch.object(time, "monotonic")  # planted
+            """,
+            id="class-binding-under-if",
+        ),
+        pytest.param(
+            """
+            class TestX:
+                time = object()
+                del time
+                patcher = patch.object(time, "monotonic")  # planted
+            """,
+            id="class-binding-deleted",
+        ),
+        pytest.param(
+            """
+            class TestX:
+                time: object
+                patcher = patch.object(time, "monotonic")  # planted
+            """,
+            id="class-annotation-without-value",
+        ),
+    ],
+)
+def test_planted_patch_bound_through_another_scope_is_found(tmp_path: Path, body: str) -> None:
+    source = _plant_source(tmp_path, body)
+    assert [patch.line for patch in find_stdlib_patches(source)] == _planted_lines(source)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # A class body that has bound the name reads its own binding.
+        pytest.param(
+            """
+            class TestX:
+                time = SimpleNamespace(monotonic=None)
+
+                @patch.object(time, "monotonic")
+                def test_x(self):
+                    pass
+            """,
+            id="class-binding-before-decorator",
+        ),
+        # `nonlocal` rebinding to a local object keeps the enclosing name local.
+        pytest.param(
+            """
+            def test_x(monkeypatch, clock):
+                time = None
+
+                def bind():
+                    nonlocal time
+                    time = SimpleNamespace(monotonic=clock)
+
+                bind()
+                monkeypatch.setattr(time, "monotonic", clock)
+            """,
+            id="nonlocal-rebound-to-local-object",
+        ),
+    ],
+)
+def test_patching_a_scope_local_object_passes(tmp_path: Path, body: str) -> None:
+    assert find_stdlib_patches(_plant_source(tmp_path, body)) == []
 
 
 @pytest.mark.parametrize(
