@@ -38,7 +38,10 @@ import * as routeValidation from "@/lib/route-validation";
  * is checked now. It also let a success answer run before the validator (see `isErrorAnswer`),
  * accepted an `instanceof` guard on an async validator's unawaited promise (see `VALIDATORS`),
  * credited a local function named like a validator (see `misboundValidators`), and matched a guard
- * on its source text, so a braced one failed (see `isGuard`).
+ * on its source text, so a braced one failed (see `isGuard`). The ninth skipped a function's
+ * parameters, so a default that fetched before the body ran passed, and followed a helper call to
+ * the top-level function of its name, so a local function of that name answering 200 passed (see
+ * `misboundHelpers`).
  *
  * The walk guards against a handler that forgets or misplaces its validator. It does not check
  * which value a validator is given, or code that reassigns a bank id after its guard.
@@ -266,7 +269,8 @@ function isGuard(next: ts.Statement | undefined, declared: string, form: GuardFo
  *   real route uses. A `finally` can replace the 400 with its own return, and a `catch` that falls
  *   through runs the code after the `try` with the validator skipped (an earlier read threw).
  * - Everything else that can run before its 400 reaches the client may only make `BEFORE_ANSWER`
- *   calls, so a fetch that runs first fails: its own arguments, the statements before it in each
+ *   calls, so a fetch that runs first fails: its own arguments, the parameters of `fn` (a default
+ *   runs before the body when the caller omits its argument), the statements before it in each
  *   enclosing block, and every other child of the nodes in between (another declaration in the same
  *   `const`, before or after it; the `catch` of a `try` around it, which runs when an earlier read
  *   throws), the callbacks these define included. The one exception is a function the validator is
@@ -282,7 +286,7 @@ function isGuard(next: ts.Statement | undefined, declared: string, form: GuardFo
  *   declaration beside it included. A same-file helper has no guard form, so its result is returned.
  */
 function answersFirst(call: IdentifierCall, fn: RouteFunction): boolean {
-  const beforeAnswer: ts.Node[] = [];
+  const beforeAnswer: ts.Node[] = [...fn.parameters];
   let statement: ts.VariableStatement | undefined;
   let declared: string | undefined;
   let returned = false;
@@ -336,7 +340,11 @@ function answersFirst(call: IdentifierCall, fn: RouteFunction): boolean {
   return isGuard(siblings[siblings.indexOf(statement) + 1], declared, form);
 }
 
-/** `start` and the same-file helpers it reaches through the calls `follow` accepts. */
+/**
+ * `start` and the same-file helpers it reaches through the calls `follow` accepts. A call is
+ * followed by its name to the top-level function of that name, which is its binding only while
+ * nothing else binds the name: `misboundHelpers` fails a file where something does.
+ */
 function reachable(
   start: RouteFunction,
   local: Map<string, RouteFunction>,
@@ -390,19 +398,52 @@ function misboundValidators(file: ts.SourceFile): string[] {
 }
 
 /**
+ * An entry for each place the name of a top-level function in `declared` (name to its declaring
+ * identifier) is bound again (a local function or variable, a parameter, an earlier top-level
+ * declaration, an assignment, a property name) or used other than as a callee. `reachable`
+ * credits a call with the top-level function its name names, so a local `proxyThing` answering
+ * 200 would otherwise pass on the validator of the top-level one. Like `misboundValidators`, this
+ * lists the uses that are safe, not the ones that are not.
+ */
+function misboundHelpers(
+  file: ts.SourceFile,
+  declared: ReadonlyMap<string, ts.Identifier>
+): string[] {
+  const failing: string[] = [];
+  const visit = (node: ts.Node) => {
+    const own = ts.isIdentifier(node) ? declared.get(node.text) : undefined;
+    if (own && own !== node) {
+      const parent = node.parent;
+      const called = ts.isCallExpression(parent) && parent.expression === node;
+      // `export { proxyThing as GET }` already fails as an unsupported export.
+      const reexported = ts.isExportSpecifier(parent);
+      if (!called && !reexported) {
+        failing.push(`helper ${own.text} bound outside its declaration`);
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  return failing;
+}
+
+/**
  * The exported handlers of one route file that do not validate a bank id first and are not in
  * `NO_BANK_ID`, the listed ones that name a bank id anyway, an entry for each misbound validator
- * name (see `misboundValidators`), and an `unsupported export` entry for each export the walk cannot
- * see into. `routePath` is the file's path under `src/app/api`, which carries the dynamic segments;
- * each handler's `NO_BANK_ID` key is added to `seen`.
+ * name (see `misboundValidators`) and misbound helper name (see `misboundHelpers`), and an
+ * `unsupported export` entry for each export the walk cannot see into. `routePath` is the file's
+ * path under `src/app/api`, which carries the dynamic segments, with either separator (`relative()`
+ * gives `\` on Windows); each handler's `NO_BANK_ID` key, written with `/`, is added to `seen`.
  */
 export function unvalidatedHandlers(
   source: string,
   routePath: string,
   seen?: Set<string>
 ): string[] {
-  const file = ts.createSourceFile(routePath, source, ts.ScriptTarget.Latest, true);
+  const route = routePath.replaceAll("\\", "/");
+  const file = ts.createSourceFile(route, source, ts.ScriptTarget.Latest, true);
   const local = new Map<string, RouteFunction>();
+  const declared = new Map<string, ts.Identifier>();
   const handlers: string[] = [];
   const failing = misboundValidators(file);
   for (const statement of file.statements) {
@@ -411,6 +452,7 @@ export function unvalidatedHandlers(
       (ts.getModifiers(statement) ?? []).some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
     if (ts.isFunctionDeclaration(statement) && statement.name) {
       local.set(statement.name.text, statement);
+      declared.set(statement.name.text, statement.name);
       if (exported) handlers.push(statement.name.text);
     } else if (ts.isVariableStatement(statement)) {
       for (const declaration of statement.declarationList.declarations) {
@@ -428,6 +470,7 @@ export function unvalidatedHandlers(
           (ts.isArrowFunction(init) || ts.isFunctionExpression(init))
         ) {
           local.set(declaration.name.text, init);
+          declared.set(declaration.name.text, declaration.name);
           if (exported) handlers.push(declaration.name.text);
         } else if (exported && !literal) {
           failing.push(`unsupported export ${declaration.name.getText(file)}`);
@@ -445,10 +488,11 @@ export function unvalidatedHandlers(
       failing.push(`unsupported export ${statement.getText(file).slice(0, 40)}`);
     }
   }
-  const pathScoped = BANK_SEGMENT.test(routePath);
+  failing.push(...misboundHelpers(file, declared));
+  const pathScoped = BANK_SEGMENT.test(route);
   for (const name of handlers) {
     const handler = local.get(name)!;
-    const key = `${routePath} ${name}`;
+    const key = `${route} ${name}`;
     seen?.add(key);
     if (NO_BANK_ID.has(key)) {
       // Any same-file helper the handler calls (proxyAlias, proxyDirective, ...) can name a bank id.

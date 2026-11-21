@@ -18,17 +18,15 @@ describe("bank id validation in every route handler", () => {
   it("finds no route handler that skips bank id validation", () => {
     const failing: string[] = [];
     const seen = new Set<string>();
-    let handlers = 0;
     for (const path of routeFiles(API_DIR)) {
       const routePath = relative(API_DIR, path);
-      const source = readFileSync(path, "utf8");
-      handlers += (source.match(/^export async function /gm) ?? []).length;
-      for (const name of unvalidatedHandlers(source, routePath, seen)) {
+      for (const name of unvalidatedHandlers(readFileSync(path, "utf8"), routePath, seen)) {
         failing.push(`${routePath} ${name}`);
       }
     }
-    // Guards against a walk that silently finds nothing (moved directory, changed export form).
-    expect(handlers).toBeGreaterThan(50);
+    // Guards against a walk that silently finds nothing (moved directory, a route file it skips).
+    // `seen` holds a key for each handler the walk checked, whatever form its export takes.
+    expect(seen.size).toBeGreaterThan(50);
     expect(failing).toEqual([]);
     // An entry for a handler that no longer exists would let a new one of that name skip the check.
     expect([...NO_BANK_ID.keys()].filter((key) => !seen.has(key))).toEqual([]);
@@ -331,6 +329,62 @@ describe("bank id validation in every route handler", () => {
           return proxyDataplane(request, { bankId, required: [bankId, id] });
         }
         export async function PATCH(request, context) {
+          return proxyThing(request, context);
+        }`,
+      },
+      {
+        label: "a helper whose parameter default fetches before it validates",
+        path: "banks/[bankId]/thing/[id]/route.ts",
+        source: `async function proxyThing(request, { params }, warm = fetch(dataplaneBankUrl("default", "/warm"))) {
+          const { bankId, id } = await params;
+          return proxyDataplane(request, { bankId, required: [bankId, id] });
+        }
+        export async function PATCH(request, context) {
+          return proxyThing(request, context);
+        }`,
+      },
+      {
+        label: "a handler whose parameter default fetches before it validates",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function GET(request, { params }, warm = fetch(dataplaneBankUrl("default", "/warm"))) {
+          const { bankId } = await params;
+          const bankIdError = validateBankId(request, bankId);
+          if (bankIdError) return bankIdError;
+          return fetch(dataplaneBankUrl(bankId, "/thing"));
+        }`,
+      },
+      {
+        label: "a local function shadowing a validating helper",
+        path: "banks/[bankId]/thing/[id]/route.ts",
+        source: `async function proxyThing(request, { params }) {
+          const { bankId, id } = await params;
+          return proxyDataplane(request, { bankId, required: [bankId, id] });
+        }
+        export async function PATCH(request, context) {
+          const proxyThing = async () => NextResponse.json({ ok: true });
+          return proxyThing(request, context);
+        }`,
+      },
+      {
+        label: "a parameter shadowing a validating helper",
+        path: "banks/[bankId]/thing/[id]/route.ts",
+        source: `async function proxyThing(request, { params }) {
+          const { bankId, id } = await params;
+          return proxyDataplane(request, { bankId, required: [bankId, id] });
+        }
+        export async function PATCH(request, context, proxyThing = async () => NextResponse.json({ ok: true })) {
+          return proxyThing(request, context);
+        }`,
+      },
+      {
+        label: "a validating helper reassigned before the handler calls it",
+        path: "banks/[bankId]/thing/[id]/route.ts",
+        source: `let proxyThing = async (request, { params }) => {
+          const { bankId, id } = await params;
+          return proxyDataplane(request, { bankId, required: [bankId, id] });
+        };
+        export async function PATCH(request, context) {
+          proxyThing = async () => NextResponse.json({ ok: true });
           return proxyThing(request, context);
         }`,
       },
@@ -700,6 +754,23 @@ describe("bank id validation in every route handler", () => {
           const bankIdError = validateBankId(request, bankId);
           if (bankIdError) return bankIdError;
           return fetch(dataplaneBankUrl(bankId, "/thing"));
+        }`,
+      },
+      {
+        label: "a parameter default that only reads the request",
+        path: "banks/[bankId]/thing/route.ts",
+        source: `export async function GET(request, { params }, limit = request.nextUrl.searchParams.get("limit")) {
+          const { bankId } = await params;
+          const bankIdError = validateBankId(request, bankId);
+          if (bankIdError) return bankIdError;
+          return fetch(dataplaneBankUrl(bankId, "/thing?limit=" + limit));
+        }`,
+      },
+      {
+        label: "a listed handler under a Windows route path",
+        path: "list\\route.ts",
+        source: `export async function DELETE() {
+          return NextResponse.json({ error: "Not implemented" }, { status: 501 });
         }`,
       },
       {
