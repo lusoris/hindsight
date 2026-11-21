@@ -10,6 +10,7 @@ import {
   type DataplaneProxyOptions,
 } from "@/lib/dataplane-proxy";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { translateApiError } from "@/lib/i18n/api-errors";
 import { useFetchSpies } from "./fetch-spies";
 
 const HTTP_OK = 200;
@@ -94,6 +95,17 @@ describe("proxyDataplane", () => {
     expect(await response.json()).toEqual({ error: MISSING.error });
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([".", ".."])("returns 400 for the bank id %j without calling upstream", async (bankId) => {
+    const response = await proxyDataplane(
+      new Request(URL),
+      options({ bankId, required: [bankId, "dir-1"] })
+    );
+
+    expect(response.status).toBe(HTTP_BAD_REQUEST);
+    expect(await response.json()).toEqual({ error: translateApiError("api.errors.validation.bankIdDotSegment") });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("GET returns the upstream JSON at 200", async () => {
@@ -396,6 +408,22 @@ describe("relayBankPost", () => {
     expect(consoleErrorSpy).not.toHaveBeenCalled();
   });
 
+  it.each([".", ".."])("returns 400 for the bank id %j before prepare runs", async (bankId) => {
+    const prepare = vi.fn(async () => ({ suffix: RELAY_SUFFIX }));
+
+    const response = await relayBankPost(
+      new Request(URL, { method: "POST" }),
+      { params: Promise.resolve({ bankId }) },
+      RELAY_OPTIONS,
+      prepare
+    );
+
+    expect(response.status).toBe(HTTP_BAD_REQUEST);
+    expect(await response.json()).toEqual({ error: translateApiError("api.errors.validation.bankIdDotSegment") });
+    expect(prepare).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
   it("returns an early response from prepare unchanged without calling the dataplane", async () => {
     const early = NextResponse.json({ error: "target_bank_id is required" }, { status: 400 });
 
@@ -517,6 +545,23 @@ describe("relayBankGet", () => {
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(consoleErrorSpy).not.toHaveBeenCalled();
   });
+
+  it.each([".", ".."])(
+    "refuses the dot-segment bank id %j before building a suffix or fetching",
+    async (dotBankId) => {
+      const suffix = vi.fn(() => "/unused");
+      const response = await relayBankGet(
+        new Request(URL),
+        { params: Promise.resolve({ bankId: dotBankId }) },
+        { ...getOptions("relay"), suffix }
+      );
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'bank_id cannot be "." or ".."' });
+      expect(suffix).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    }
+  );
 
   it.each(["dataplane detail", "", undefined])(
     "detail uses %s or the untranslated fallback",

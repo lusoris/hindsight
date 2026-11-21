@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { relayUpstreamError } from "@/lib/dataplane-proxy";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
-import { DATAPLANE_URL, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { requireQueryBankId } from "@/lib/route-validation";
 
 /** Streams the bank's memory graph from the dataplane, gzipped when the browser accepts it. */
@@ -39,7 +39,9 @@ export async function GET(request: NextRequest) {
 
     // Forward the browser's abort: when the user leaves a tab, its graph read
     // stops here and at the dataplane instead of finishing for nobody.
-    const response = await fetch(`${DATAPLANE_URL}/v1/default/banks/${bankId}/graph?${params}`, {
+    // dataplaneBankUrl encodes the id as one segment: the raw `${bankId}` this replaced let
+    // `?bank_id=a/../b` reach bank `b`.
+    const response = await fetch(dataplaneBankUrl(bankId, `/graph?${params}`), {
       headers: getDataplaneHeaders(),
       signal: request.signal,
     });

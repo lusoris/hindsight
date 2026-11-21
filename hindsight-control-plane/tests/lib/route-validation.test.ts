@@ -1,8 +1,41 @@
 import { describe, expect, it } from "vitest";
 import { NextRequest, NextResponse } from "next/server";
-import { requireQueryBankId } from "@/lib/route-validation";
+import { requireQueryBankId, validateBankId } from "@/lib/route-validation";
+
+const DOT_SEGMENT_PAYLOAD = { error: 'bank_id cannot be "." or ".."' };
+
+describe("validateBankId", () => {
+  const request = new Request("http://localhost/api/banks/x");
+
+  it.each(["b1", "...", ".a", "a.."])("accepts %j", (bankId) => {
+    expect(validateBankId(request, bankId)).toBeNull();
+  });
+
+  it.each([".", ".."])("returns the 400 dot-segment payload for %j", async (bankId) => {
+    const response = validateBankId(request, bankId);
+    expect(response).toBeInstanceOf(NextResponse);
+    expect(response!.status).toBe(400);
+    expect(await response!.json()).toEqual(DOT_SEGMENT_PAYLOAD);
+  });
+});
 
 describe("requireQueryBankId", () => {
+  it.each([
+    ["..", "?bank_id=.."],
+    ["percent-encoded ..", "?bank_id=%2e%2e"],
+    [".", "?bank_id=."],
+    [". in agent_id", "?agent_id=."],
+  ])("returns the 400 dot-segment payload for %s", async (_case, query) => {
+    const result = requireQueryBankId(new NextRequest(`http://localhost/api/x${query}`), [
+      "bank_id",
+      "agent_id",
+    ]);
+    expect(result).toBeInstanceOf(NextResponse);
+    const response = result as NextResponse;
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual(DOT_SEGMENT_PAYLOAD);
+  });
+
   it("returns the bank id when present", () => {
     const req = new NextRequest("http://localhost/api/x?bank_id=b1");
     expect(requireQueryBankId(req)).toBe("b1");

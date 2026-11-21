@@ -52,6 +52,22 @@ describe("respondWithBankSdk", () => {
     expect(consoleErrorSpy).not.toHaveBeenCalled();
   });
 
+  // The generated serializer leaves "." and ".." unencoded, so the SDK call would leave the bank path.
+  it.each([".", ".."])("answers 400 for the bank id %j without calling the SDK", async (bankId) => {
+    const callSpy = vi.fn(async () => ok({}));
+    const context: BankRouteContext = { params: Promise.resolve({ bankId }) };
+
+    const response = await respondWithBankSdk(
+      new Request("http://localhost/api/test"),
+      context,
+      "Failed to process bank operation",
+      callSpy
+    );
+
+    expect(response.status).toBe(400);
+    expect(callSpy).not.toHaveBeenCalled();
+  });
+
   it("returns 404 with failure label when upstream fails with 404", async () => {
     const upstreamError = { detail: "nope" };
     const callSpy = vi.fn(async () => fail(upstreamError, HTTP_NOT_FOUND));

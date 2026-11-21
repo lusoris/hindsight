@@ -2055,6 +2055,7 @@
       },
       "validation": {
         "bankIdRequired": "bank_id est obligatoire",
+        "bankIdDotSegment": "bank_id ne peut pas être \".\" ou \"..\"",
         "bankAndDirectiveIdRequired": "bank_id et directive_id sont obligatoires",
         "bankAndMentalModelIdRequired": "bank_id et mental_model_id sont obligatoires",
         "bankAndModelIdRequired": "bank_id et model_id sont obligatoires",
@@ -2063,6 +2064,7 @@
         "missingBankId": "bank_id manquant",
         "fileRequired": "Un fichier est requis",
         "targetBankIdRequired": "target_bank_id est obligatoire",
+        "targetBankIdDotSegment": "target_bank_id ne peut pas être \".\" ou \"..\"",
         "attachmentIdRequired": "Un identifiant de pièce jointe valide est requis"
       },
       "generic": {

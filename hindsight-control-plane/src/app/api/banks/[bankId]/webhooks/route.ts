@@ -1,9 +1,12 @@
 import { NextResponse } from "next/server";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
+import { validateBankId } from "@/lib/route-validation";
 
 export async function GET(request: Request, { params }: { params: Promise<{ bankId: string }> }) {
   const { bankId } = await params;
+  const bankIdError = validateBankId(request, bankId);
+  if (bankIdError) return bankIdError;
   const { searchParams } = new URL(request.url);
   const queryParams = new URLSearchParams();
   for (const key of ["limit", "offset"]) {
@@ -28,6 +31,8 @@ export async function GET(request: Request, { params }: { params: Promise<{ bank
 
 export async function POST(request: Request, { params }: { params: Promise<{ bankId: string }> }) {
   const { bankId } = await params;
+  const bankIdError = validateBankId(request, bankId);
+  if (bankIdError) return bankIdError;
   const body = await request.json();
   const res = await fetch(dataplaneBankUrl(bankId, "/webhooks"), {
     method: "POST",

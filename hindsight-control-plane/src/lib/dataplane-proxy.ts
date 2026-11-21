@@ -44,8 +44,9 @@ export type DataplaneCall = Omit<
 >;
 
 /**
- * Proxies one bank-scoped dataplane call: 400 with `missing` when an id is absent, the upstream
- * JSON (or `successBody`) at 200, `failure` at the upstream status or at 500 when anything throws.
+ * Proxies one bank-scoped dataplane call: 400 with `missing` when an id is absent,
+ * `validateBankId`'s 400 when the bank id is "." or "..", the upstream JSON (or `successBody`)
+ * at 200, `failure` at the upstream status or at 500 when anything throws.
  */
 export async function proxyDataplane(
   request: Request,
@@ -60,6 +61,8 @@ export async function proxyDataplane(
         });
       }
     }
+    const bankIdError = validateBankId(request, options.bankId);
+    if (bankIdError) return bankIdError;
 
     const hasJsonBody = Boolean(options.forwardJsonBody) || options.jsonBody !== undefined;
     const init: RequestInit = {
@@ -159,7 +162,7 @@ export async function relayBankGet(
     if (bankIdError) return bankIdError;
 
     const suffix = options.suffix(new URL(request.url).searchParams);
-    // nosemgrep: rules_lgpl_javascript_ssrf_rule-node-ssrf -- host is the server-set DATAPLANE_URL and the request adds only the encoded bank id and allow-listed query values, the flow main ran in the four routes this replaces (bank ids "." and ".." still resolve as dot segments, a pre-existing gap this marker does not cover); category C, expires 2026-11-27
+    // nosemgrep: rules_lgpl_javascript_ssrf_rule-node-ssrf -- host is the server-set DATAPLANE_URL and the request adds only the encoded bank id and allow-listed query values, the flow main ran in the four routes this replaces; "." and "..", which a URL parser resolves out of the bank path, get a 400 from validateBankId and a RangeError from dataplaneBankUrl (tests/lib/dataplane-proxy.test.ts, tests/lib/hindsight-client.test.ts); category D, expires 2027-03-20, ends when this fetch moves to the generated SDK client
     const response = await fetch(dataplaneBankUrl(bankId, suffix), {
       method: "GET",
       headers: getDataplaneHeaders(),
@@ -212,7 +215,8 @@ type BankPostRelayOptions = {
 };
 
 /**
- * Relays one bank-scoped dataplane POST whose answer the UI reads as is: `prepare` reads the
+ * Relays one bank-scoped dataplane POST whose answer the UI reads as is: `validateBankId` answers
+ * an empty, "." or ".." bank id with its 400 before anything runs, `prepare` reads the
  * request and names the call (or answers early, e.g. 400), the upstream JSON comes back at
  * `successStatus`, and an upstream error body (or `{ detail: statusText }` when it is not JSON)
  * at the upstream status. Anything that throws, `prepare` included, answers `failure` at 500.
@@ -231,6 +235,8 @@ export async function relayBankPost(
 ): Promise<NextResponse> {
   try {
     const { bankId } = await context.params;
+    const bankIdError = validateBankId(request, bankId);
+    if (bankIdError) return bankIdError;
     const call = await prepare(bankId);
     if (call instanceof NextResponse) return call;
 

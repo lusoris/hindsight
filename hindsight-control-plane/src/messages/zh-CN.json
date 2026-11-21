@@ -2055,6 +2055,7 @@
       },
       "validation": {
         "bankIdRequired": "bank_id 为必填项",
+        "bankIdDotSegment": "bank_id 不能为 \".\" 或 \"..\"",
         "bankAndDirectiveIdRequired": "bank_id 和 directive_id 为必填项",
         "bankAndMentalModelIdRequired": "bank_id 和 mental_model_id 为必填项",
         "bankAndModelIdRequired": "bank_id 和 model_id 为必填项",
@@ -2063,6 +2064,7 @@
         "missingBankId": "缺少 bank_id",
         "fileRequired": "需要文件",
         "targetBankIdRequired": "必须提供 target_bank_id",
+        "targetBankIdDotSegment": "target_bank_id 不能为 \".\" 或 \"..\"",
         "attachmentIdRequired": "需要有效的附件 ID"
       },
       "generic": {

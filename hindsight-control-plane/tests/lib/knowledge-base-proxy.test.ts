@@ -128,6 +128,23 @@ describe("createKnowledgeBaseNode", () => {
     expect(consoleErrorSpy).not.toHaveBeenCalled();
   });
 
+  it.each(["..", "%2e%2e", "."])(
+    "bank_id %s (a URL dot segment) -> 400, fetch not called",
+    async (rawBankId) => {
+      const request = postRequest(
+        undefined,
+        `http://localhost/api/knowledge-base/folders?bank_id=${rawBankId}`
+      );
+
+      const response = await createKnowledgeBaseNode(request, "folders", FAILURE);
+
+      expect(response.status).toBe(HTTP_BAD_REQUEST);
+      expect(await response.json()).toEqual({ error: 'bank_id cannot be "." or ".."' });
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    }
+  );
+
   it("missing bank_id -> 400, fetch not called", async () => {
     const request = postRequest(undefined, "http://localhost/api/knowledge-base/folders");
 

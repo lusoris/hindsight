@@ -2,12 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { sdk, lowLevelClient } from "@/lib/hindsight-client";
 import { respondWithSdk } from "@/lib/sdk-response";
+import { validateBankId } from "@/lib/route-validation";
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ agentId: string }> }
 ) {
   const { agentId } = await params;
+  const bankIdError = validateBankId(request, agentId);
+  if (bankIdError) return bankIdError;
   const searchParams = request.nextUrl.searchParams;
   const status = searchParams.get("status") || undefined;
   const type = searchParams.get("type") || undefined;
@@ -28,6 +31,8 @@ export async function DELETE(
   { params }: { params: Promise<{ agentId: string }> }
 ) {
   const { agentId } = await params;
+  const bankIdError = validateBankId(request, agentId);
+  if (bankIdError) return bankIdError;
   const searchParams = request.nextUrl.searchParams;
   const operationId = searchParams.get("operation_id");
 

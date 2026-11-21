@@ -351,6 +351,11 @@ def validate_new_bank_id(bank_id: str) -> None:
         )
     if any(unicodedata.category(ch) == "Cc" for ch in bank_id):
         raise OperationValidationError("Bank id must not contain control characters", status_code=400)
+    # A URL parser resolves "." and ".." out of `/v1/default/banks/<id>/...` (WHATWG URL: also when
+    # sent as `%2e`), so a bank under either name, created through the engine, MCP or a clone target,
+    # could never be read back over HTTP; the control plane refuses both ids on every route.
+    if bank_id in (".", ".."):
+        raise OperationValidationError("Bank id must not be '.' or '..': URLs cannot address it", status_code=400)
     # Reserved so a store-owned backend can keep its own bookkeeping objects (`_index`, `_meta`, ...)
     # next to a bank's objects without escaping bank names. Existing banks are not re-checked.
     if bank_id.startswith("_"):

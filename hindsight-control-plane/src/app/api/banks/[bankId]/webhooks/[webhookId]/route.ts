@@ -1,12 +1,15 @@
 import { NextResponse } from "next/server";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
+import { validateBankId } from "@/lib/route-validation";
 
 export async function PATCH(
   request: Request,
   { params }: { params: Promise<{ bankId: string; webhookId: string }> }
 ) {
   const { bankId, webhookId } = await params;
+  const bankIdError = validateBankId(request, bankId);
+  if (bankIdError) return bankIdError;
   const body = await request.json();
   const res = await fetch(dataplaneBankUrl(bankId, `/webhooks/${encodeURIComponent(webhookId)}`), {
     method: "PATCH",
@@ -30,6 +33,8 @@ export async function DELETE(
   { params }: { params: Promise<{ bankId: string; webhookId: string }> }
 ) {
   const { bankId, webhookId } = await params;
+  const bankIdError = validateBankId(request, bankId);
+  if (bankIdError) return bankIdError;
   const res = await fetch(dataplaneBankUrl(bankId, `/webhooks/${encodeURIComponent(webhookId)}`), {
     method: "DELETE",
     headers: getDataplaneHeaders({ "Content-Type": "application/json" }),
