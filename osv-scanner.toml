@@ -27,12 +27,6 @@ ignoreUntil = 2027-03-02
 reason = "category D, entered 2026-11-02: no patched diskcache release exists (last release 5.6.3, 2023); hindsight starts llama_cpp.server with --cache_type ram as the last argument, so HINDSIGHT_API_LLAMACPP_EXTRA_ARGS cannot override it (argparse keeps the last value), refuses a --config_file in those args and drops an inherited CONFIG_FILE (engine/providers/llamacpp_llm.py, tests/test_llamacpp_cache_type.py); the disk backend that unpickles entries cannot be selected through hindsight. Trigger: a patched diskcache release, or llama-cpp-python dropping it."
 
 [[IgnoredVulns]]
-# deepmerge mergeObject prototype poisoning; Dependabot #387, root package-lock.json, dev tooling only (jest-config, @svgr/plugin-svgo).
-id = "GHSA-gcqx-w48m-w2h4"
-ignoreUntil = 2027-03-02
-reason = "category D, entered 2026-11-02: no patched deepmerge release exists for >=4.2.0 <=4.3.1; reached only through jest and the docs build, which merge trusted local configuration. Trigger: a patched deepmerge release."
-
-[[IgnoredVulns]]
 # minimatch globparts amplification denial of service; Dependabot #404, #406, #421, #427 (coding-agents, eliza, zapier and root package-lock.json).
 id = "GHSA-g3hv-75wg-m249"
 ignoreUntil = 2027-03-02

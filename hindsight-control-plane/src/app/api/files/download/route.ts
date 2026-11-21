@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { relayUpstreamError } from "@/lib/dataplane-proxy";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { DATAPLANE_URL, getDataplaneHeaders } from "@/lib/hindsight-client";
 
@@ -23,10 +24,7 @@ export async function GET(request: NextRequest) {
     }
 
     const response = await fetch(`${DATAPLANE_URL}${path}`, { headers: getDataplaneHeaders() });
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ detail: response.statusText }));
-      return NextResponse.json(error, { status: response.status });
-    }
+    if (!response.ok) return await relayUpstreamError(response);
 
     const body = await response.arrayBuffer();
     const fallbackName = path.split("/").pop() || "download.zip";

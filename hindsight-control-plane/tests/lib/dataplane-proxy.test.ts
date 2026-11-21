@@ -3,10 +3,14 @@ import { NextResponse } from "next/server";
 import {
   proxyDataplane,
   relayBankPost,
+  relayUpstreamError,
+  relayBankGet,
+  type BankGetRelayOptions,
   type BankPostCall,
   type DataplaneProxyOptions,
 } from "@/lib/dataplane-proxy";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { translateApiError } from "@/lib/i18n/api-errors";
 import { useFetchSpies } from "./fetch-spies";
 
 const HTTP_OK = 200;
@@ -91,6 +95,17 @@ describe("proxyDataplane", () => {
     expect(await response.json()).toEqual({ error: MISSING.error });
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([".", ".."])("returns 400 for the bank id %j without calling upstream", async (bankId) => {
+    const response = await proxyDataplane(
+      new Request(URL),
+      options({ bankId, required: [bankId, "dir-1"] })
+    );
+
+    expect(response.status).toBe(HTTP_BAD_REQUEST);
+    expect(await response.json()).toEqual({ error: translateApiError("api.errors.validation.bankIdDotSegment") });
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("GET returns the upstream JSON at 200", async () => {
@@ -313,6 +328,30 @@ describe("proxyDataplane", () => {
   });
 });
 
+describe("relayUpstreamError", () => {
+  it("relays the JSON error body at the upstream status", async () => {
+    const body = { detail: "Bank exists", context: { bank_id: "bank-1" } };
+    const upstream = new Response(JSON.stringify(body), { status: HTTP_CONFLICT });
+
+    const response = await relayUpstreamError(upstream);
+
+    expect(response.status).toBe(HTTP_CONFLICT);
+    expect(await response.json()).toEqual(body);
+  });
+
+  it("uses the status text at the upstream status when the error body is not JSON", async () => {
+    const upstream = new Response("<html>gateway error</html>", {
+      status: HTTP_BAD_GATEWAY,
+      statusText: "Bad Gateway",
+    });
+
+    const response = await relayUpstreamError(upstream);
+
+    expect(response.status).toBe(HTTP_BAD_GATEWAY);
+    expect(await response.json()).toEqual({ detail: "Bad Gateway" });
+  });
+});
+
 describe("relayBankPost", () => {
   const { fetchSpy, consoleErrorSpy } = useFetchSpies();
 
@@ -367,6 +406,22 @@ describe("relayBankPost", () => {
     expect(calledUrl).toBe(dataplaneBankUrl(BANK_ID, RELAY_SUFFIX));
     expect(calledInit).toStrictEqual(expectedInit);
     expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([".", ".."])("returns 400 for the bank id %j before prepare runs", async (bankId) => {
+    const prepare = vi.fn(async () => ({ suffix: RELAY_SUFFIX }));
+
+    const response = await relayBankPost(
+      new Request(URL, { method: "POST" }),
+      { params: Promise.resolve({ bankId }) },
+      RELAY_OPTIONS,
+      prepare
+    );
+
+    expect(response.status).toBe(HTTP_BAD_REQUEST);
+    expect(await response.json()).toEqual({ error: translateApiError("api.errors.validation.bankIdDotSegment") });
+    expect(prepare).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("returns an early response from prepare unchanged without calling the dataplane", async () => {
@@ -432,5 +487,188 @@ describe("relayBankPost", () => {
     expect(await response.json()).toEqual({ error: UNTRANSLATED_FAILURE.error });
     expect(fetchSpy).toHaveBeenCalledTimes(testCase.fetched ? 1 : 0);
     expect(consoleErrorSpy).toHaveBeenCalledWith("Error %s:", "cloning bank", expect.any(Error));
+  });
+});
+
+describe("relayBankGet", () => {
+  const { fetchSpy, consoleErrorSpy } = useFetchSpies();
+  const bankId = "team/bank 1";
+  const context = () => ({ params: Promise.resolve({ bankId }) });
+  const failure = { error: "Failed to list items", errorKey: "test.bankGet.list" };
+  const modes = ["detail", "log", "relay"] as const;
+  const getOptions = (
+    onUpstreamError: BankGetRelayOptions["onUpstreamError"]
+  ): BankGetRelayOptions => ({
+    suffix: (q) => `/items${q.size ? `?${q}` : ""}`,
+    failure,
+    action: "listing items %s",
+    onUpstreamError,
+  });
+
+  it.each(modes)(
+    "%s sends encoded bank id, query and GET headers and returns success JSON at 200",
+    async (mode) => {
+      fetchSpy.mockResolvedValueOnce(Response.json({ items: [] }, { status: 201 }));
+      const suffix = vi.fn(getOptions(mode).suffix);
+      const response = await relayBankGet(new Request(`${URL}?tags=a&tags=b&empty=`), context(), {
+        ...getOptions(mode),
+        suffix,
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ items: [] });
+      expect(suffix).toHaveBeenCalledOnce();
+      expect(suffix.mock.calls[0][0].toString()).toBe("tags=a&tags=b&empty=");
+      expect(fetchSpy).toHaveBeenCalledExactlyOnceWith(
+        dataplaneBankUrl(bankId, "/items?tags=a&tags=b&empty="),
+        {
+          method: "GET",
+          headers: getDataplaneHeaders(),
+        }
+      );
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(modes)("%s validates before building a suffix or fetching", async (mode) => {
+    const suffix = vi.fn(() => "/unused");
+    const response = await relayBankGet(
+      new Request(URL),
+      { params: Promise.resolve({ bankId: "" }) },
+      {
+        ...getOptions(mode),
+        suffix,
+      }
+    );
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "bank_id is required" });
+    expect(suffix).not.toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it.each([".", ".."])(
+    "refuses the dot-segment bank id %j before building a suffix or fetching",
+    async (dotBankId) => {
+      const suffix = vi.fn(() => "/unused");
+      const response = await relayBankGet(
+        new Request(URL),
+        { params: Promise.resolve({ bankId: dotBankId }) },
+        { ...getOptions("relay"), suffix }
+      );
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: 'bank_id cannot be "." or ".."' });
+      expect(suffix).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each(["dataplane detail", "", undefined])(
+    "detail uses %s or the untranslated fallback",
+    async (detail) => {
+      fetchSpy.mockResolvedValueOnce(Response.json({ detail }, { status: 422 }));
+      const response = await relayBankGet(new Request(URL), context(), getOptions("detail"));
+      expect(response.status).toBe(422);
+      expect(await response.json()).toEqual({ error: detail || failure.error });
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
+    }
+  );
+
+  it.each([200, 502])("detail parses JSON before checking OK for status %s", async (status) => {
+    fetchSpy.mockResolvedValueOnce(new Response("not JSON", { status }));
+    const response = await relayBankGet(new Request(URL), context(), getOptions("detail"));
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: failure.error });
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      "Error %s:",
+      "listing items %s",
+      expect.any(Error)
+    );
+  });
+
+  it("log reads text, logs with a constant format string and answers the failure at upstream status", async () => {
+    const upstream = new Response("upstream says %s", { status: 503 });
+    const json = vi.spyOn(upstream, "json");
+    fetchSpy.mockResolvedValueOnce(upstream);
+    const response = await relayBankGet(new Request(URL), context(), getOptions("log"));
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: failure.error });
+    expect(json).not.toHaveBeenCalled();
+    expect(consoleErrorSpy).toHaveBeenCalledExactlyOnceWith(
+      "API error %s:",
+      "listing items %s",
+      "upstream says %s"
+    );
+  });
+
+  it.each([
+    { body: '{"detail":"missing","extra":true}', expected: { detail: "missing", extra: true } },
+    { body: "not JSON", expected: { detail: "Bad Gateway" } },
+  ])("relay preserves error JSON or status text for $body", async ({ body, expected }) => {
+    fetchSpy.mockResolvedValueOnce(new Response(body, { status: 502, statusText: "Bad Gateway" }));
+    const response = await relayBankGet(new Request(URL), context(), getOptions("relay"));
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual(expected);
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it.each(modes)("%s catches rejected fetches and logs a constant format string", async (mode) => {
+    const error = new Error("offline");
+    fetchSpy.mockRejectedValueOnce(error);
+    const response = await relayBankGet(new Request(URL), context(), getOptions(mode));
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: failure.error });
+    expect(consoleErrorSpy).toHaveBeenCalledExactlyOnceWith("Error %s:", "listing items %s", error);
+  });
+
+  it.each(["log", "relay"] as const)("%s catches non-JSON successes", async (mode) => {
+    fetchSpy.mockResolvedValueOnce(new Response("bad success"));
+    const response = await relayBankGet(new Request(URL), context(), getOptions(mode));
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: failure.error });
+    expect(consoleErrorSpy).toHaveBeenCalledExactlyOnceWith(
+      "Error %s:",
+      "listing items %s",
+      expect.any(Error)
+    );
+  });
+
+  it("catches errors thrown while building the suffix", async () => {
+    const response = await relayBankGet(new Request(URL), context(), {
+      ...getOptions("log"),
+      suffix: () => {
+        throw new Error("query failed");
+      },
+    });
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: failure.error });
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(consoleErrorSpy).toHaveBeenCalledExactlyOnceWith(
+      "Error %s:",
+      "listing items %s",
+      expect.any(Error)
+    );
+  });
+
+  it("catches rejected route params", async () => {
+    const response = await relayBankGet(
+      new Request(URL),
+      { params: Promise.reject(new Error("params failed")) },
+      getOptions("log")
+    );
+    expect(response.status).toBe(500);
+    expect(await response.json()).toEqual({ error: failure.error });
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("the observation scopes route encodes bank ids containing a slash and space", async () => {
+    const { GET } = await import("@/app/api/banks/[bankId]/observations/scopes/route");
+    fetchSpy.mockResolvedValueOnce(Response.json({ scopes: [] }));
+    const response = await GET(new Request(`${URL}?limit=0`), context());
+    expect(response.status).toBe(200);
+    expect(fetchSpy.mock.calls[0][0]).toBe(
+      dataplaneBankUrl(bankId, "/observations/scopes?limit=0")
+    );
+    expect(fetchSpy.mock.calls[0][0]).toContain("team%2Fbank%201/");
   });
 });

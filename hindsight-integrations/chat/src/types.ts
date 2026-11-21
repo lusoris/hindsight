@@ -1,38 +1,20 @@
-/**
- * Budget levels for recall/reflect operations.
- */
-export type Budget = "low" | "mid" | "high";
-
-/**
- * Fact types for filtering recall results.
- */
-export type FactType = "world" | "experience" | "observation";
-
-/**
- * Recall result item from Hindsight.
- */
-export interface RecallResult {
-  id: string;
-  text: string;
-  type?: string | null;
-  entities?: string[] | null;
-  context?: string | null;
-  occurred_start?: string | null;
-  occurred_end?: string | null;
-  mentioned_at?: string | null;
-  document_id?: string | null;
-  metadata?: Record<string, string> | null;
-  chunk_id?: string | null;
-}
-
-/**
- * Entity state with observations.
- */
-export interface EntityState {
-  entity_id: string;
-  canonical_name: string;
-  observations: Array<{ text: string; mentioned_at?: string | null }>;
-}
+import type {
+  Budget,
+  EntityState,
+  FactType,
+  HindsightRetainClient,
+  RecallResult,
+  ReflectFact,
+  RetainResponse,
+} from "../../_shared/ts/hindsight-client-types.js";
+export type {
+  Budget,
+  EntityState,
+  FactType,
+  RecallResult,
+  ReflectFact,
+  RetainResponse,
+} from "../../_shared/ts/hindsight-client-types.js";
 
 /**
  * Recall response from Hindsight.
@@ -44,18 +26,6 @@ export interface RecallResponse {
 }
 
 /**
- * Reflect fact.
- */
-export interface ReflectFact {
-  id?: string | null;
-  text: string;
-  type?: string | null;
-  context?: string | null;
-  occurred_start?: string | null;
-  occurred_end?: string | null;
-}
-
-/**
  * Reflect response from Hindsight.
  */
 export interface ReflectResponse {
@@ -64,32 +34,9 @@ export interface ReflectResponse {
 }
 
 /**
- * Retain response from Hindsight.
- */
-export interface RetainResponse {
-  success: boolean;
-  bank_id: string;
-  items_count: number;
-  async: boolean;
-}
-
-/**
  * Hindsight client interface — matches @vectorize-io/hindsight-client.
  */
-export interface HindsightClient {
-  retain(
-    bankId: string,
-    content: string,
-    options?: {
-      timestamp?: Date | string;
-      context?: string;
-      metadata?: Record<string, string>;
-      documentId?: string;
-      tags?: string[];
-      async?: boolean;
-    }
-  ): Promise<RetainResponse>;
-
+export interface HindsightClient extends HindsightRetainClient {
   recall(
     bankId: string,
     query: string,

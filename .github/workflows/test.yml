@@ -193,14 +193,17 @@ jobs:
             - 'hindsight-integrations/openclaw/**'
           integrations-ai-sdk:
             - 'hindsight-integrations/ai-sdk/**'
+            - 'hindsight-integrations/_shared/ts/**'
           integrations-eliza:
             - 'hindsight-integrations/eliza/**'
+            - 'hindsight-integrations/_shared/ts/**'
           integrations-agent-framework:
             - 'hindsight-integrations/agent-framework/**'
           integrations-composio:
             - 'hindsight-integrations/composio/**'
           integrations-chat:
             - 'hindsight-integrations/chat/**'
+            - 'hindsight-integrations/_shared/ts/**'
           integrations-coding-agents:
             - 'hindsight-integrations/coding-agents/**'
           integrations-github-copilot:
@@ -310,6 +313,8 @@ jobs:
             - 'hindsight-dev/**'
             - 'scripts/dev/**'
             - 'scripts/check-scanner-suppressions.*'
+            # test_check_scanner_suppressions.py judges this file's real suppression marker.
+            - 'hindsight-control-plane/src/lib/knowledge-base-proxy.ts'
             # test-dev checks the root ruff config against the packages
             # (hindsight-dev/tests/test_root_ruff_src.py): ruff.toml, the root
             # pyproject.toml that extends it, and every added, removed or moved package.

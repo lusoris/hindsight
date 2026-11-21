@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { sdk, lowLevelClient } from "@/lib/hindsight-client";
 import { respondWithSdk } from "@/lib/sdk-response";
+import { validateBankId } from "@/lib/route-validation";
 
 const HTTP_CREATED = 201;
 
@@ -36,15 +37,8 @@ export async function POST(request: Request) {
   }
   const { bank_id } = body;
 
-  if (!bank_id) {
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "bank_id is required",
-        errorKey: "api.errors.validation.bankIdRequired",
-      }),
-      { status: 400 }
-    );
-  }
+  const bankIdError = validateBankId(request, bank_id);
+  if (bankIdError) return bankIdError;
 
   const response = await sdk.createOrUpdateBank({
     client: lowLevelClient,

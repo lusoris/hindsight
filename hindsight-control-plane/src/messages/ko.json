@@ -2055,6 +2055,7 @@
       },
       "validation": {
         "bankIdRequired": "bank_id는 필수입니다",
+        "bankIdDotSegment": "bank_id는 \".\" 또는 \"..\"일 수 없습니다",
         "bankAndDirectiveIdRequired": "bank_id와 directive_id는 필수입니다",
         "bankAndMentalModelIdRequired": "bank_id와 mental_model_id는 필수입니다",
         "bankAndModelIdRequired": "bank_id와 model_id는 필수입니다",
@@ -2063,6 +2064,7 @@
         "missingBankId": "bank_id가 누락되었습니다",
         "fileRequired": "파일이 필요합니다",
         "targetBankIdRequired": "target_bank_id는 필수입니다",
+        "targetBankIdDotSegment": "target_bank_id는 \".\" 또는 \"..\"일 수 없습니다",
         "attachmentIdRequired": "유효한 첨부 파일 ID가 필요합니다"
       },
       "generic": {

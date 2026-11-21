@@ -1,6 +1,13 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, type Mock } from "vitest";
 import { withHindsightChat } from "./wrapper.js";
-import type { HindsightClient, ChatThread, ChatMessage, HindsightChatContext } from "./types.js";
+import type {
+  HindsightClient,
+  ChatThread,
+  ChatMessage,
+  HindsightChatContext,
+  HindsightChatHandler,
+  HindsightChatOptions,
+} from "./types.js";
 
 // --- Mocks ---
 
@@ -62,12 +69,20 @@ describe("withHindsightChat", () => {
     message = mockMessage();
   });
 
+  async function runWrapped(
+    options: Partial<HindsightChatOptions> = {}
+  ): Promise<{ handler: Mock<HindsightChatHandler>; ctx: HindsightChatContext }> {
+    const handler = vi.fn<HindsightChatHandler>();
+    const wrapped = withHindsightChat({ client, bankId: "bank", ...options }, handler);
+
+    await wrapped(thread, message);
+
+    return { handler, ctx: handler.mock.calls[0][2] };
+  }
+
   describe("bankId resolution", () => {
     it("uses static bankId", async () => {
-      const handler = vi.fn();
-      const wrapped = withHindsightChat({ client, bankId: "static-bank" }, handler);
-
-      await wrapped(thread, message);
+      const { handler } = await runWrapped({ bankId: "static-bank" });
 
       expect(client.recall).toHaveBeenCalledWith("static-bank", message.text, expect.any(Object));
       expect(handler).toHaveBeenCalledWith(
@@ -78,13 +93,7 @@ describe("withHindsightChat", () => {
     });
 
     it("uses dynamic bankId from message", async () => {
-      const handler = vi.fn();
-      const wrapped = withHindsightChat(
-        { client, bankId: (msg) => `bank-${msg.author.userId}` },
-        handler
-      );
-
-      await wrapped(thread, message);
+      const { handler } = await runWrapped({ bankId: (msg) => `bank-${msg.author.userId}` });
 
       expect(client.recall).toHaveBeenCalledWith("bank-user-123", message.text, expect.any(Object));
       expect(handler).toHaveBeenCalledWith(
@@ -97,10 +106,7 @@ describe("withHindsightChat", () => {
 
   describe("auto-recall", () => {
     it("recalls by default", async () => {
-      const handler = vi.fn();
-      const wrapped = withHindsightChat({ client, bankId: "bank" }, handler);
-
-      await wrapped(thread, message);
+      const { ctx } = await runWrapped();
 
       expect(client.recall).toHaveBeenCalledOnce();
       expect(client.recall).toHaveBeenCalledWith("bank", message.text, {
@@ -110,46 +116,30 @@ describe("withHindsightChat", () => {
         includeEntities: true,
       });
 
-      const ctx: HindsightChatContext = handler.mock.calls[0][2];
       expect(ctx.memories).toHaveLength(1);
       expect(ctx.memories[0].text).toBe("User likes TypeScript");
       expect(ctx.entities).not.toBeNull();
     });
 
     it("can be disabled", async () => {
-      const handler = vi.fn();
-      const wrapped = withHindsightChat(
-        { client, bankId: "bank", recall: { enabled: false } },
-        handler
-      );
-
-      await wrapped(thread, message);
+      const { ctx } = await runWrapped({ recall: { enabled: false } });
 
       expect(client.recall).not.toHaveBeenCalled();
 
-      const ctx: HindsightChatContext = handler.mock.calls[0][2];
       expect(ctx.memories).toEqual([]);
       expect(ctx.entities).toBeNull();
     });
 
     it("passes recall options through", async () => {
-      const handler = vi.fn();
-      const wrapped = withHindsightChat(
-        {
-          client,
-          bankId: "bank",
-          recall: {
-            budget: "high",
-            maxTokens: 500,
-            types: ["experience"],
-            tags: ["team-a"],
-            includeEntities: false,
-          },
+      await runWrapped({
+        recall: {
+          budget: "high",
+          maxTokens: 500,
+          types: ["experience"],
+          tags: ["team-a"],
+          includeEntities: false,
         },
-        handler
-      );
-
-      await wrapped(thread, message);
+      });
 
       expect(client.recall).toHaveBeenCalledWith("bank", message.text, {
         budget: "high",
@@ -174,17 +164,13 @@ describe("withHindsightChat", () => {
       client = mockClient({
         recall: vi.fn().mockRejectedValue(new Error("Network error")),
       });
-      const handler = vi.fn();
-      const wrapped = withHindsightChat({ client, bankId: "bank" }, handler);
-
-      await wrapped(thread, message);
+      const { ctx } = await runWrapped();
 
       expect(warnSpy).toHaveBeenCalledWith(
         "[hindsight-chat] Auto-recall failed:",
         expect.any(Error)
       );
       // Handler still runs with empty memories
-      const ctx: HindsightChatContext = handler.mock.calls[0][2];
       expect(ctx.memories).toEqual([]);
       warnSpy.mockRestore();
     });
@@ -192,22 +178,13 @@ describe("withHindsightChat", () => {
 
   describe("auto-retain", () => {
     it("does not retain by default", async () => {
-      const handler = vi.fn();
-      const wrapped = withHindsightChat({ client, bankId: "bank" }, handler);
-
-      await wrapped(thread, message);
+      await runWrapped();
 
       expect(client.retain).not.toHaveBeenCalled();
     });
 
     it("retains when enabled", async () => {
-      const handler = vi.fn();
-      const wrapped = withHindsightChat(
-        { client, bankId: "bank", retain: { enabled: true } },
-        handler
-      );
-
-      await wrapped(thread, message);
+      await runWrapped({ retain: { enabled: true } });
 
       expect(client.retain).toHaveBeenCalledWith("bank", message.text, {
         tags: undefined,
@@ -217,22 +194,14 @@ describe("withHindsightChat", () => {
     });
 
     it("passes retain options through", async () => {
-      const handler = vi.fn();
-      const wrapped = withHindsightChat(
-        {
-          client,
-          bankId: "bank",
-          retain: {
-            enabled: true,
-            tags: ["slack"],
-            metadata: { source: "chat" },
-            async: false,
-          },
+      await runWrapped({
+        retain: {
+          enabled: true,
+          tags: ["slack"],
+          metadata: { source: "chat" },
+          async: false,
         },
-        handler
-      );
-
-      await wrapped(thread, message);
+      });
 
       expect(client.retain).toHaveBeenCalledWith("bank", message.text, {
         tags: ["slack"],
@@ -270,14 +239,8 @@ describe("withHindsightChat", () => {
       client = mockClient({
         retain: vi.fn().mockRejectedValue(new Error("Retain failed")),
       });
-      const handler = vi.fn();
-      const wrapped = withHindsightChat(
-        { client, bankId: "bank", retain: { enabled: true } },
-        handler
-      );
-
       // Should not throw
-      await wrapped(thread, message);
+      const { handler } = await runWrapped({ retain: { enabled: true } });
 
       expect(warnSpy).toHaveBeenCalledWith(
         "[hindsight-chat] Auto-retain failed:",
@@ -291,12 +254,7 @@ describe("withHindsightChat", () => {
 
   describe("context methods", () => {
     it("memoriesAsSystemPrompt() formats recalled memories", async () => {
-      const handler = vi.fn();
-      const wrapped = withHindsightChat({ client, bankId: "bank" }, handler);
-
-      await wrapped(thread, message);
-
-      const ctx: HindsightChatContext = handler.mock.calls[0][2];
+      const { ctx } = await runWrapped();
       const prompt = ctx.memoriesAsSystemPrompt();
       expect(prompt).toContain("<memories>");
       expect(prompt).toContain("User likes TypeScript");
@@ -304,12 +262,7 @@ describe("withHindsightChat", () => {
     });
 
     it("ctx.retain() delegates to client", async () => {
-      const handler = vi.fn();
-      const wrapped = withHindsightChat({ client, bankId: "bank" }, handler);
-
-      await wrapped(thread, message);
-
-      const ctx: HindsightChatContext = handler.mock.calls[0][2];
+      const { ctx } = await runWrapped();
       await ctx.retain("New memory content", { tags: ["test"] });
 
       expect(client.retain).toHaveBeenCalledWith("bank", "New memory content", {
@@ -318,12 +271,7 @@ describe("withHindsightChat", () => {
     });
 
     it("ctx.recall() delegates to client", async () => {
-      const handler = vi.fn();
-      const wrapped = withHindsightChat({ client, bankId: "bank" }, handler);
-
-      await wrapped(thread, message);
-
-      const ctx: HindsightChatContext = handler.mock.calls[0][2];
+      const { ctx } = await runWrapped();
       await ctx.recall("search query", { budget: "high" });
 
       // Second call (first was auto-recall)
@@ -334,12 +282,7 @@ describe("withHindsightChat", () => {
     });
 
     it("ctx.reflect() delegates to client", async () => {
-      const handler = vi.fn();
-      const wrapped = withHindsightChat({ client, bankId: "bank" }, handler);
-
-      await wrapped(thread, message);
-
-      const ctx: HindsightChatContext = handler.mock.calls[0][2];
+      const { ctx } = await runWrapped();
       await ctx.reflect("What does the user prefer?");
 
       expect(client.reflect).toHaveBeenCalledWith("bank", "What does the user prefer?", undefined);
@@ -348,10 +291,7 @@ describe("withHindsightChat", () => {
 
   describe("handler invocation", () => {
     it("passes thread and message through", async () => {
-      const handler = vi.fn();
-      const wrapped = withHindsightChat({ client, bankId: "bank" }, handler);
-
-      await wrapped(thread, message);
+      const { handler } = await runWrapped();
 
       expect(handler).toHaveBeenCalledWith(thread, message, expect.any(Object));
     });

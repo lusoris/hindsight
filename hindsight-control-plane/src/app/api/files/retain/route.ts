@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { validateBankId } from "@/lib/route-validation";
 
 export async function POST(request: NextRequest) {
   try {
@@ -43,6 +44,9 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
+
+    const bankIdError = validateBankId(request, bankId);
+    if (bankIdError) return bankIdError;
 
     // Use the shared dataplane URL configuration
     const url = dataplaneBankUrl(bankId, "/files/retain");

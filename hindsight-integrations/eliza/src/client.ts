@@ -6,26 +6,18 @@
  * dependency on it. Only `recall` and `retain` are required.
  */
 
-/** Processing budget controlling latency vs. depth. */
-export type Budget = "low" | "mid" | "high";
-
-/** Fact types for filtering recall results. */
-export type FactType = "world" | "experience" | "observation";
-
-/** A single recalled memory. */
-export interface RecallResult {
-  id: string;
-  text: string;
-  type?: string | null;
-  entities?: string[] | null;
-  context?: string | null;
-  occurred_start?: string | null;
-  occurred_end?: string | null;
-  mentioned_at?: string | null;
-  document_id?: string | null;
-  metadata?: Record<string, string> | null;
-  chunk_id?: string | null;
-}
+import type {
+  Budget,
+  FactType,
+  RecallResult,
+  HindsightRetainClient,
+} from "../../_shared/ts/hindsight-client-types.js";
+export type {
+  Budget,
+  FactType,
+  RecallResult,
+  RetainResponse,
+} from "../../_shared/ts/hindsight-client-types.js";
 
 export interface RecallResponse {
   results: RecallResult[];
@@ -34,30 +26,10 @@ export interface RecallResponse {
   chunks?: Record<string, unknown> | null;
 }
 
-export interface RetainResponse {
-  success: boolean;
-  bank_id: string;
-  items_count: number;
-  async: boolean;
-}
-
 /**
  * Hindsight client interface - matches `@vectorize-io/hindsight-client`.
  */
-export interface HindsightClient {
-  retain(
-    bankId: string,
-    content: string,
-    options?: {
-      timestamp?: Date | string;
-      context?: string;
-      metadata?: Record<string, string>;
-      documentId?: string;
-      tags?: string[];
-      async?: boolean;
-    }
-  ): Promise<RetainResponse>;
-
+export interface HindsightClient extends HindsightRetainClient {
   recall(
     bankId: string,
     query: string,

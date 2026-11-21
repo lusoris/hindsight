@@ -2055,6 +2055,7 @@
       },
       "validation": {
         "bankIdRequired": "bank_id ist erforderlich",
+        "bankIdDotSegment": "bank_id darf nicht \".\" oder \"..\" sein",
         "bankAndDirectiveIdRequired": "bank_id und directive_id sind erforderlich",
         "bankAndMentalModelIdRequired": "bank_id und mental_model_id sind erforderlich",
         "bankAndModelIdRequired": "bank_id und model_id sind erforderlich",
@@ -2063,6 +2064,7 @@
         "missingBankId": "bank_id fehlt",
         "fileRequired": "Eine Datei ist erforderlich",
         "targetBankIdRequired": "target_bank_id ist erforderlich",
+        "targetBankIdDotSegment": "target_bank_id darf nicht \".\" oder \"..\" sein",
         "attachmentIdRequired": "Eine gültige Anhang-ID ist erforderlich"
       },
       "generic": {

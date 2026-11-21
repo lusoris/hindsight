@@ -1,8 +1,16 @@
 import { type NextRequest, NextResponse } from "next/server";
-import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
+import { isDotSegmentBankId } from "@/lib/bank-id";
+import { localizeApiErrorPayload, type RequestLike } from "@/lib/i18n/api-errors";
 
-/** The 400 `api.errors.validation.bankIdRequired` response when `bankId` is empty, else `null`. */
-export function validateBankId(request: Request, bankId: string | undefined): NextResponse | null {
+/**
+ * `null` for a usable bank id, else the 400 response: `api.errors.validation.bankIdRequired`
+ * when it is empty, `api.errors.validation.bankIdDotSegment` when it is "." or ".." (a URL
+ * parser would resolve it out of the bank path; see `isDotSegmentBankId`).
+ */
+export function validateBankId(
+  request: RequestLike,
+  bankId: string | undefined
+): NextResponse | null {
   if (!bankId) {
     return NextResponse.json(
       localizeApiErrorPayload(request, {
@@ -12,12 +20,21 @@ export function validateBankId(request: Request, bankId: string | undefined): Ne
       { status: 400 }
     );
   }
+  if (isDotSegmentBankId(bankId)) {
+    return NextResponse.json(
+      localizeApiErrorPayload(request, {
+        error: 'bank_id cannot be "." or ".."',
+        errorKey: "api.errors.validation.bankIdDotSegment",
+      }),
+      { status: 400 }
+    );
+  }
   return null;
 }
 
 /**
  * The bank id from the query string (first non-empty of `names`, default `["bank_id"]`),
- * or the 400 `api.errors.validation.bankIdRequired` response when none is set.
+ * or the 400 response `validateBankId` gives when none is set or the first one is "." or "..".
  */
 export function requireQueryBankId(
   request: NextRequest,
@@ -26,7 +43,7 @@ export function requireQueryBankId(
   for (const name of names) {
     const value = request.nextUrl.searchParams.get(name);
     if (value) {
-      return value;
+      return validateBankId(request, value) ?? value;
     }
   }
   return validateBankId(request, undefined)!;

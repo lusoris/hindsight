@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
+import { validateBankId } from "@/lib/route-validation";
 
 export async function GET(
   request: NextRequest,
@@ -8,6 +9,8 @@ export async function GET(
 ) {
   try {
     const { agentId } = await params;
+    const bankIdError = validateBankId(request, agentId);
+    if (bankIdError) return bankIdError;
     const period = request.nextUrl.searchParams.get("period") || "7d";
     const timeField = request.nextUrl.searchParams.get("time_field") || "created_at";
     const url = dataplaneBankUrl(

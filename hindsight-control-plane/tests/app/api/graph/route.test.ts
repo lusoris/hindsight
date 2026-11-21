@@ -2,8 +2,12 @@ import { NextRequest } from "next/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { gunzipSync } from "node:zlib";
 
-vi.mock("@/lib/hindsight-client", () => ({
-  DATAPLANE_URL: "http://dataplane",
+vi.hoisted(() => {
+  process.env.HINDSIGHT_CP_DATAPLANE_API_URL = "http://dataplane";
+});
+
+vi.mock("@/lib/hindsight-client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/hindsight-client")>()),
   getDataplaneHeaders: () => ({}),
 }));
 
@@ -52,5 +56,25 @@ describe("GET /api/graph", () => {
 
     expect(fetchMock.mock.calls[0][0]).toBe("http://dataplane/v1/default/banks/b/graph?type=world&limit=10");
     expect((fetchMock.mock.calls[0][1].signal as AbortSignal).aborted).toBe(true);
+  });
+
+  // The route interpolated the raw id before, so `a/../b` reached bank `b`.
+  it("keeps a decoded a/../b bank id inside one segment", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify(graph)));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await GET(new NextRequest("http://localhost/api/graph?bank_id=a%2F..%2Fb"));
+
+    expect(fetchMock.mock.calls[0][0]).toBe("http://dataplane/v1/default/banks/a%2F..%2Fb/graph?");
+  });
+
+  it("answers 400 for the bank id .. without calling the dataplane", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await GET(new NextRequest("http://localhost/api/graph?bank_id=.."));
+
+    expect(response.status).toBe(400);
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 });

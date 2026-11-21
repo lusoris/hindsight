@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { sdk, lowLevelClient } from "@/lib/hindsight-client";
 import { respondWithSdk } from "@/lib/sdk-response";
+import { validateBankId } from "@/lib/route-validation";
 
 export async function POST(request: NextRequest) {
   let body;
@@ -17,6 +18,8 @@ export async function POST(request: NextRequest) {
     );
   }
   const bankId = body.bank_id || body.agent_id || "default";
+  const bankIdError = validateBankId(request, bankId);
+  if (bankIdError) return bankIdError;
   const {
     query,
     budget,

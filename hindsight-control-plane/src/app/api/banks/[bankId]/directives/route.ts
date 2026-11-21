@@ -2,63 +2,26 @@ import { NextResponse } from "next/server";
 import { localizeApiErrorPayload } from "@/lib/i18n/api-errors";
 import { dataplaneBankUrl, getDataplaneHeaders } from "@/lib/hindsight-client";
 import { validateBankId } from "@/lib/route-validation";
+import type { BankRouteContext } from "@/lib/bank-sdk-route";
+import { relayBankGet } from "@/lib/dataplane-proxy";
+import { forwardParams } from "@/lib/query-params";
 
-export async function GET(request: Request, { params }: { params: Promise<{ bankId: string }> }) {
-  try {
-    const { bankId } = await params;
-    const bankIdError = validateBankId(request, bankId);
-    if (bankIdError) return bankIdError;
-
-    const { searchParams } = new URL(request.url);
-    const tags = searchParams.getAll("tags");
-    const tagsMatch = searchParams.get("tags_match");
-    const limit = searchParams.get("limit");
-    const offset = searchParams.get("offset");
-
-    const queryParams = new URLSearchParams();
-    if (tags.length > 0) {
-      tags.forEach((t) => queryParams.append("tags", t));
-    }
-    if (tagsMatch) {
-      queryParams.append("tags_match", tagsMatch);
-    }
-    if (limit) {
-      queryParams.append("limit", limit);
-    }
-    if (offset) {
-      queryParams.append("offset", offset);
-    }
-
-    const url = dataplaneBankUrl(
-      bankId,
-      `/directives${queryParams.toString() ? `?${queryParams}` : ""}`
-    );
-    const response = await fetch(url, { method: "GET", headers: getDataplaneHeaders() });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error("API error listing directives:", errorText);
-      return NextResponse.json(
-        localizeApiErrorPayload(request, {
-          error: "Failed to list directives",
-          errorKey: "api.errors.directives.list",
-        }),
-        { status: response.status }
-      );
-    }
-
-    const data = await response.json();
-    return NextResponse.json(data, { status: 200 });
-  } catch (error) {
-    console.error("Error listing directives:", error);
-    return NextResponse.json(
-      localizeApiErrorPayload(request, {
-        error: "Failed to list directives",
-        errorKey: "api.errors.directives.list",
-      }),
-      { status: 500 }
-    );
-  }
+export async function GET(request: Request, context: BankRouteContext) {
+  return relayBankGet(request, context, {
+    failure: {
+      error: "Failed to list directives",
+      errorKey: "api.errors.directives.list",
+    },
+    action: "listing directives",
+    onUpstreamError: "log",
+    suffix: (q) => {
+      const query = forwardParams(q, {
+        repeated: ["tags"],
+        single: ["tags_match", "limit", "offset"],
+      }).toString();
+      return `/directives${query ? `?${query}` : ""}`;
+    },
+  });
 }
 
 export async function POST(request: Request, { params }: { params: Promise<{ bankId: string }> }) {
