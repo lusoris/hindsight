@@ -41,7 +41,11 @@ import * as routeValidation from "@/lib/route-validation";
  * on its source text, so a braced one failed (see `isGuard`). The ninth skipped a function's
  * parameters, so a default that fetched before the body ran passed, and followed a helper call to
  * the top-level function of its name, so a local function of that name answering 200 passed (see
- * `misboundHelpers`).
+ * `misboundHelpers`). The tenth let a `catch` before the validator answer with any named status,
+ * as the retain route relayed the status of the error it caught, so `{ status: code }` after
+ * `const code = 200` in a `catch` passed; a status must now be a literal of 400 or more, and the
+ * retain route reads its body in a `try` of its own and relays an error's status only after its
+ * check.
  *
  * The walk guards against a handler that forgets or misplaces its validator. It does not check
  * which value a validator is given, or code that reassigns a bank id after its guard.
@@ -122,8 +126,7 @@ const STRAIGHT_LINE = new Set([
 /**
  * The calls a handler may make before its validator's answer reaches the client: reading the
  * request, encoding a path segment for the validator's own `suffix` argument, and answering a
- * missing parameter or, in a `catch` around the validator, a failure (logging it and building a
- * 500). Matched on the callee text with whitespace removed (`new X` for a constructor), so a new
+ * missing parameter or, in a `catch` around a read, a failure (logging it and building a 500). Matched on the callee text with whitespace removed (`new X` for a constructor), so a new
  * route that reads the request through another receiver name needs an entry here; anything else
  * that runs first (a `fetch`, an SDK call, `dataplaneBankUrl`, `new URL`) fails the walk. Building
  * a response is allowed only as an error answer (see `isErrorAnswer`).
@@ -195,11 +198,11 @@ function onlyRequestReads(nodes: readonly ts.Node[], later: ReadonlySet<ts.Node>
  * (always a 400), or `NextResponse.json(body, { status })` / `new NextResponse(body, { status })`
  * with a literal status of 400 or more (the `Response` constructor throws on one above 599) and no
  * spread that could replace it. A success answer that runs first (`if (body.dry_run) return
- * NextResponse.json({ ok: true })`) would serve the request with its bank id never checked. In a
- * `catch`, the status may also be a name, as the retain route relays the status of the error it
- * caught; the walk does not track values, so such a name could still hold a success status.
+ * NextResponse.json({ ok: true })`) would serve the request with its bank id never checked. A named
+ * status fails even in a `catch`: the walk does not track values, so the name could hold a success
+ * status (see the tenth round in the file header).
  */
-function isErrorAnswer(answer: ts.Expression | undefined, caught: boolean): boolean {
+function isErrorAnswer(answer: ts.Expression | undefined): boolean {
   if (!answer || !(ts.isCallExpression(answer) || ts.isNewExpression(answer))) return false;
   const callee = answer.expression.getText().replace(/\s+/g, "");
   if (ts.isCallExpression(answer) && callee === "missingQueryParam") return true;
@@ -212,20 +215,15 @@ function isErrorAnswer(answer: ts.Expression | undefined, caught: boolean): bool
   const status = init.properties.find(
     (p): p is ts.PropertyAssignment => ts.isPropertyAssignment(p) && p.name.getText() === "status"
   )?.initializer;
-  if (status && ts.isNumericLiteral(status)) return Number(status.text) >= 400;
-  return caught && status !== undefined && ts.isIdentifier(status);
+  return status !== undefined && ts.isNumericLiteral(status) && Number(status.text) >= 400;
 }
 
 /** Whether every return in `nodes`, outside the functions they define, is an error answer. */
-function onlyErrorAnswers(nodes: readonly ts.Node[], fn: RouteFunction): boolean {
+function onlyErrorAnswers(nodes: readonly ts.Node[]): boolean {
   let clean = true;
   const visit = (node: ts.Node) => {
     if (ts.isFunctionLike(node)) return;
-    if (ts.isReturnStatement(node)) {
-      let caught = false;
-      for (let up = node.parent; up !== fn; up = up.parent) caught ||= ts.isCatchClause(up);
-      clean &&= isErrorAnswer(node.expression, caught);
-    }
+    if (ts.isReturnStatement(node)) clean &&= isErrorAnswer(node.expression);
     ts.forEachChild(node, visit);
   };
   nodes.forEach(visit);
@@ -328,7 +326,7 @@ function answersFirst(call: IdentifierCall, fn: RouteFunction): boolean {
     )
     .filter((node) => ts.isArrowFunction(node) || ts.isFunctionExpression(node));
   if (!onlyRequestReads([...call.arguments, ...beforeAnswer], new Set(handed))) return false;
-  if (!onlyErrorAnswers(beforeAnswer, fn)) return false;
+  if (!onlyErrorAnswers(beforeAnswer)) return false;
   if (returned) return true;
   const form = VALIDATORS.get(call.expression.text)?.guard;
   if (!form || !statement || !declared || !ts.isBlock(statement.parent)) return false;

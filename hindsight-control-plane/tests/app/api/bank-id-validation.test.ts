@@ -442,7 +442,55 @@ describe("bank id validation in every route handler", () => {
         }`,
       },
       {
-        label: "an answer before the validator whose status is a name outside a catch",
+        label: "a named success status in a catch before the validator",
+        path: "recall/route.ts",
+        source: `export async function POST(request) {
+          try {
+            const body = await request.json();
+            const bankIdError = validateBankId(request, body.bank_id);
+            if (bankIdError) return bankIdError;
+            return sdk.recall({ path: { bank_id: body.bank_id } });
+          } catch {
+            const code = 200;
+            return NextResponse.json({ ok: true }, { status: code });
+          }
+        }`,
+      },
+      {
+        label: "a shorthand success status in a catch before the validator",
+        path: "recall/route.ts",
+        source: `export async function POST(request) {
+          try {
+            const body = await request.json();
+            const bankIdError = validateBankId(request, body.bank_id);
+            if (bankIdError) return bankIdError;
+            return sdk.recall({ path: { bank_id: body.bank_id } });
+          } catch {
+            const status = 200;
+            return NextResponse.json({ ok: true }, { status });
+          }
+        }`,
+      },
+      {
+        label: "a catch before the validator that relays the caught error's status",
+        path: "memories/retain/route.ts",
+        source: `export async function POST(request) {
+          try {
+            const body = await request.json();
+            const bankIdError = validateBankId(request, body.bank_id);
+            if (bankIdError) return bankIdError;
+            return sdk.retainMemories({ path: { bank_id: body.bank_id } });
+          } catch (error) {
+            const statusCode = error.statusCode;
+            if (statusCode && typeof statusCode === "number") {
+              return NextResponse.json({ error: String(error) }, { status: statusCode });
+            }
+            return NextResponse.json({ error: String(error) }, { status: 500 });
+          }
+        }`,
+      },
+      {
+        label: "an answer before the validator whose status is a name",
         path: "recall/route.ts",
         source: `export async function POST(request) {
           const body = await request.json();
@@ -727,13 +775,18 @@ describe("bank id validation in every route handler", () => {
         }`,
       },
       {
-        label: "a catch that relays the caught error's status",
+        label: "a catch that relays an error's status after the validator",
         path: "memories/retain/route.ts",
         source: `export async function POST(request) {
+          let body;
           try {
-            const body = await request.json();
-            const bankIdError = validateBankId(request, body.bank_id);
-            if (bankIdError) return bankIdError;
+            body = await request.json();
+          } catch (error) {
+            return NextResponse.json({ error: String(error) }, { status: 500 });
+          }
+          const bankIdError = validateBankId(request, body.bank_id);
+          if (bankIdError) return bankIdError;
+          try {
             return sdk.retainMemories({ path: { bank_id: body.bank_id } });
           } catch (error) {
             const statusCode = error.statusCode;

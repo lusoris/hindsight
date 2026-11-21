@@ -4,13 +4,30 @@ import { hindsightClient } from "@/lib/hindsight-client";
 import { validateBankId } from "@/lib/route-validation";
 
 export async function POST(request: NextRequest) {
+  // The body is read in its own `try`, ahead of the bank id check, so the `catch` that relays an
+  // SDK error's status runs only after the check: one `try` around both let that relay answer
+  // before the check with any status the caught value carried. A body that fails to read has no
+  // `statusCode`, so it gets the same 500 as before.
+  let body;
+  let bankId;
   try {
-    const body = await request.json();
-    const bankId = body.bank_id || body.agent_id;
+    body = await request.json();
+    bankId = body.bank_id || body.agent_id;
+  } catch (error: any) {
+    console.error("Error batch retain:", error);
+    return NextResponse.json(
+      localizeApiErrorPayload(request, {
+        error: error?.message || String(error) || "Failed to batch retain",
+        errorKey: "api.errors.memories.retain",
+      }),
+      { status: 500 }
+    );
+  }
 
-    const bankIdError = validateBankId(request, bankId);
-    if (bankIdError) return bankIdError;
+  const bankIdError = validateBankId(request, bankId);
+  if (bankIdError) return bankIdError;
 
+  try {
     const { items, document_id, document_tags, observation_scopes } = body;
 
     // Map observation_scopes into each item if provided at request level
