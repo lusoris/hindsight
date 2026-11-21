@@ -155,7 +155,15 @@ def r_precision(ranked: list[str], relevant: dict[str, int]) -> float:
 
 @dataclass(frozen=True, kw_only=True)
 class MetricFields:
-    """Shared ranking metrics; keyword-only fields keep subclass construction stable."""
+    """Ranking metrics shared by `QueryScore` and `RunScore`.
+
+    `kw_only` moves these fields behind each subclass's own fields in `__init__`, so the
+    subclass's own fields keep their positional slots and the metrics are passed by keyword,
+    as every construction site does. A positional metric argument is now a `TypeError`, and
+    `dataclasses.fields()`, `asdict()` and `repr()` list the metrics first, because a base
+    class's fields precede its subclass's. `as_record` builds its keys by name, so a stored
+    run record is unchanged.
+    """
 
     ndcg: dict[int, float]
     map: dict[int, float]
