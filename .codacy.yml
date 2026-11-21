@@ -4,6 +4,16 @@ engines:
     exclude_paths:
       # category D, entry 2026-11-07, expiry 2027-03-07, rule duplication: OpenAPI Generator output, regenerated from the API spec
       - "hindsight-clients/python/hindsight_client_api/**"
+      # category D, entry 2026-11-21, expiry 2027-03-21, rule duplication: OpenAPI Generator go output (scripts/generate-clients.sh), every file carries the Code generated DO NOT EDIT header
+      - "hindsight-clients/go/api_*.go"
+      # category D, entry 2026-11-21, expiry 2027-03-21, rule duplication: OpenAPI Generator go output (scripts/generate-clients.sh), every file carries the Code generated DO NOT EDIT header
+      - "hindsight-clients/go/model_*.go"
+      # category D, entry 2026-11-21, expiry 2027-03-21, rule duplication: OpenAPI Generator go test stubs (scripts/generate-clients.sh), every file carries the Code generated DO NOT EDIT header
+      - "hindsight-clients/go/test/api_*_test.go"
+      # category D, entry 2026-11-21, expiry 2027-03-21, rule duplication: OpenAPI Generator go supporting files (scripts/generate-clients.sh), each carries the Code generated DO NOT EDIT header; hindsight_client.go and the root tests stay scanned
+      - "hindsight-clients/go/{client,configuration,response,utils}.go"
+      # category D, entry 2026-11-21, expiry 2027-03-21, rule duplication: @hey-api/openapi-ts output (openapi-ts.config.ts output.path), every file carries its auto-generated header
+      - "hindsight-clients/typescript/generated/**"
       # category D, entry 2026-11-08, expiry 2027-03-08, rule duplication: generated copy of hindsight-integrations/_shared/user_config.py, kept identical by scripts/sync-integration-config.py --check
       - "hindsight-integrations/aider/hindsight_aider/_user_config.py"
       # category D, entry 2026-11-08, expiry 2027-03-08, rule duplication: generated copy of hindsight-integrations/_shared/user_config.py, kept identical by scripts/sync-integration-config.py --check
