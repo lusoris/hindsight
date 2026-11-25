@@ -1,0 +1,21 @@
+name: Workflow check
+
+# Runs actionlint on .github/workflows and fails on any action not pinned to a
+# full commit, on a pin comment that does not name exactly one ref of that
+# commit, and on undeclared action inputs (plurano/horistes tools/pins.py, via
+# zizmor). The reusable workflow refuses draft pull requests.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions: {}
+
+jobs:
+  workflow-check:
+    name: Workflow check
+    permissions:
+      contents: read
+    uses: plurano/horistes/.github/workflows/workflow-check.yml@dbaabecc82a35be5318cc52afd2955daef205f7e # main

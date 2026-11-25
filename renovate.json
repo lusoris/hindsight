@@ -1,0 +1,10 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": "Family preset; helpers:pinGitHubActionDigestsToSemver re-pins a uses: line that an upstream sync brings back as a tag, so the Workflow check gate stays green after a sync.",
+  "extends": [
+    "github>plurano/horistes",
+    ":enableVulnerabilityAlertsWithLabel(security)",
+    "helpers:pinGitHubActionDigestsToSemver"
+  ],
+  "forkProcessing": "enabled"
+}

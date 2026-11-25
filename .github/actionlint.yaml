@@ -1,0 +1,10 @@
+---
+# actionlint (run by the Workflow check gate, plurano/horistes workflow-check.yml)
+# rejects a runs-on label missing from its built-in table of GitHub-hosted
+# runners unless it is declared here. actionlint v1.7.12, the version the gate
+# pins, does not know ubuntu-26.04, the release ubuntu-latest stood for when the
+# workflows were moved off floating labels. Delete a label once the pinned
+# actionlint accepts .github/workflows without it.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04
