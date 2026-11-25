@@ -16,17 +16,17 @@ on:
           - large
         default: large
       suite:
-        description: "Perf-test suite to run (blank = all)"
+        description: "Perf-test suite to run (all = every suite)"
         type: choice
         options:
-          - ""
+          - all
           - retain
           - recall
           - recall-with-observations
           - recall-temporal
           - consolidation
           - graph-maintenance
-        default: ""
+        default: all
       amb_skip:
         description: "Skip the AMB benchmark job (LoComo + LongMemEval)"
         type: boolean
@@ -110,13 +110,16 @@ jobs:
 
     - name: Run perf-test
       run: |
-        SUITE_ARG=""
-        if [ -n "${{ inputs.suite }}" ]; then
-          SUITE_ARG="--suite ${{ inputs.suite }}"
+        # "all" replaced an empty choice option, which actionlint rejects. A scheduled
+        # run carries no inputs, so an empty suite still means every suite.
+        SUITE="${{ inputs.suite }}"
+        SUITE_ARGS=()
+        if [ -n "$SUITE" ] && [ "$SUITE" != "all" ]; then
+          SUITE_ARGS=(--suite "$SUITE")
         fi
         ./scripts/benchmarks/run-perf-test.sh \
           --scale ${{ inputs.scale || 'large' }} \
-          $SUITE_ARG \
+          "${SUITE_ARGS[@]}" \
           --output perf-results.json
 
     - name: Upload perf results
@@ -177,7 +180,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -270,7 +273,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -361,7 +364,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0

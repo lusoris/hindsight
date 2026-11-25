@@ -1475,7 +1475,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install Rust
       uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
@@ -1585,7 +1585,7 @@ jobs:
             echo "API server is ready after ${i}s"
             break
           fi
-          if [ $i -eq 120 ]; then
+          if [ "$i" -eq 120 ]; then
             echo "API server failed to start after 120s"
             cat /tmp/api-server.log
             exit 1
@@ -1778,7 +1778,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Smoke test - verify container starts
       if: matrix.smoke
@@ -1833,7 +1833,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -1960,7 +1960,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -2063,7 +2063,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -2210,7 +2210,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -2284,7 +2284,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -2351,7 +2351,7 @@ jobs:
             echo "API server is ready after ${i}s"
             break
           fi
-          if [ $i -eq 120 ]; then
+          if [ "$i" -eq 120 ]; then
             echo "API server failed to start after 120s"
             cat /tmp/api-server.log
             exit 1
@@ -2396,7 +2396,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -2468,7 +2468,7 @@ jobs:
             echo "API server is ready after ${i}s"
             break
           fi
-          if [ $i -eq 120 ]; then
+          if [ "$i" -eq 120 ]; then
             echo "API server failed to start after 120s"
             cat /tmp/api-server.log
             exit 1
@@ -2588,7 +2588,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -2659,7 +2659,7 @@ jobs:
             echo "API server is ready after ${i}s"
             break
           fi
-          if [ $i -eq 120 ]; then
+          if [ "$i" -eq 120 ]; then
             echo "API server failed to start after 120s"
             cat /tmp/api-server.log
             exit 1
@@ -2769,7 +2769,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -2843,7 +2843,7 @@ jobs:
             echo "API server is ready after ${i}s"
             break
           fi
-          if [ $i -eq 120 ]; then
+          if [ "$i" -eq 120 ]; then
             echo "API server failed to start after 120s"
             cat /tmp/api-server.log
             exit 1
@@ -2887,7 +2887,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -2966,7 +2966,7 @@ jobs:
             echo "API server is ready after ${i}s"
             break
           fi
-          if [ $i -eq 120 ]; then
+          if [ "$i" -eq 120 ]; then
             echo "API server failed to start after 120s"
             cat /tmp/api-server.log
             exit 1
@@ -3043,7 +3043,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -3114,7 +3114,7 @@ jobs:
             echo "API server is ready after ${i}s"
             break
           fi
-          if [ $i -eq 120 ]; then
+          if [ "$i" -eq 120 ]; then
             echo "API server failed to start after 120s"
             cat /tmp/api-server.log
             exit 1
@@ -3159,7 +3159,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -3224,7 +3224,7 @@ jobs:
             echo "API server is ready after ${i}s"
             break
           fi
-          if [ $i -eq 120 ]; then
+          if [ "$i" -eq 120 ]; then
             echo "API server failed to start after 120s"
             cat /tmp/api-server.log
             exit 1
@@ -3274,7 +3274,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -3359,7 +3359,7 @@ jobs:
             echo "API server is ready after ${i}s"
             break
           fi
-          if [ $i -eq 120 ]; then
+          if [ "$i" -eq 120 ]; then
             echo "API server failed to start after 120s"
             cat /tmp/api-server.log
             exit 1
@@ -3403,7 +3403,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -3466,7 +3466,7 @@ jobs:
             echo "API server is ready after ${i}s"
             break
           fi
-          if [ $i -eq 120 ]; then
+          if [ "$i" -eq 120 ]; then
             echo "API server failed to start after 120s"
             cat /tmp/api-server.log
             exit 1
@@ -4602,7 +4602,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -4628,7 +4628,7 @@ jobs:
             echo "API server is ready after ${i}s"
             break
           fi
-          if [ $i -eq 60 ]; then
+          if [ "$i" -eq 60 ]; then
             echo "API server failed to start after 60s"
             cat /tmp/slim-api-server.log
             exit 1
@@ -4713,7 +4713,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -5028,7 +5028,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install uv
       uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
@@ -5125,7 +5125,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Install Rust
       if: matrix.language == 'cli'
@@ -5222,7 +5222,7 @@ jobs:
             echo "API server is ready after ${i}s"
             break
           fi
-          if [ $i -eq 120 ]; then
+          if [ "$i" -eq 120 ]; then
             echo "API server failed to start after 120s"
             cat /tmp/api-server.log
             exit 1
@@ -5269,7 +5269,7 @@ jobs:
       run: |
         printf '%s' '${{ secrets.GCP_VERTEXAI_CREDENTIALS }}' > /tmp/gcp-credentials.json
         PROJECT_ID=$(jq -r '.project_id' /tmp/gcp-credentials.json)
-        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
+        echo "HINDSIGHT_API_LLM_VERTEXAI_PROJECT_ID=$PROJECT_ID" >> "$GITHUB_ENV"
 
     - name: Fetch tags
       run: git fetch --tags

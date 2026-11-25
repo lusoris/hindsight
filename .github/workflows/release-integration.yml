@@ -25,9 +25,11 @@ jobs:
         TAG="${GITHUB_REF#refs/tags/}"
         INTEGRATION=$(echo "$TAG" | cut -d'/' -f2)
         VERSION=$(echo "$TAG" | cut -d'/' -f3 | sed 's/^v//')
-        echo "integration=$INTEGRATION" >> $GITHUB_OUTPUT
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
-        echo "tag=$TAG" >> $GITHUB_OUTPUT
+        {
+          echo "integration=$INTEGRATION"
+          echo "version=$VERSION"
+          echo "tag=$TAG"
+        } >> "$GITHUB_OUTPUT"
         echo "Integration: $INTEGRATION, Version: $VERSION"
 
     - name: Detect integration type
@@ -38,13 +40,13 @@ jobs:
         # pip-installs it, and its setup.py is the `hermes memory setup` wizard, not a build
         # script, so `uv build` crashed on every release since v1.1.0 and it never reached PyPI.
         if [ "${{ steps.info.outputs.integration }}" = "hermes" ]; then
-          echo "type=plugin" >> $GITHUB_OUTPUT
+          echo "type=plugin" >> "$GITHUB_OUTPUT"
         elif [ -f "hindsight-integrations/${{ steps.info.outputs.integration }}/pyproject.toml" ]; then
-          echo "type=python" >> $GITHUB_OUTPUT
+          echo "type=python" >> "$GITHUB_OUTPUT"
         elif [ -f "hindsight-integrations/${{ steps.info.outputs.integration }}/package.json" ]; then
-          echo "type=typescript" >> $GITHUB_OUTPUT
+          echo "type=typescript" >> "$GITHUB_OUTPUT"
         else
-          echo "type=plugin" >> $GITHUB_OUTPUT
+          echo "type=plugin" >> "$GITHUB_OUTPUT"
         fi
 
     # ── Python integrations (litellm, pydantic-ai, crewai) ──────────────────
@@ -184,12 +186,12 @@ jobs:
         # Cut the BRAT / community-store release. Bare version tag (e.g. 0.1.0)
         # to match manifest.json — idempotent so re-runs just refresh the assets.
         export GH_TOKEN="$DIST_TOKEN"
-        ASSETS="$OBS_DIR/main.js $OBS_DIR/manifest.json $OBS_DIR/styles.css"
+        ASSETS=("$OBS_DIR/main.js" "$OBS_DIR/manifest.json" "$OBS_DIR/styles.css")
         NOTES="Hindsight for Obsidian v${VERSION}. Install via BRAT (add ${DIST_REPO}) or copy main.js/manifest.json/styles.css into <vault>/.obsidian/plugins/hindsight/."
         if gh release view "$VERSION" --repo "$DIST_REPO" >/dev/null 2>&1; then
-          gh release upload "$VERSION" $ASSETS --repo "$DIST_REPO" --clobber
+          gh release upload "$VERSION" "${ASSETS[@]}" --repo "$DIST_REPO" --clobber
         else
-          gh release create "$VERSION" $ASSETS --repo "$DIST_REPO" --title "$VERSION" --notes "$NOTES"
+          gh release create "$VERSION" "${ASSETS[@]}" --repo "$DIST_REPO" --title "$VERSION" --notes "$NOTES"
         fi
 
     - name: Publish TypeScript package to npm
