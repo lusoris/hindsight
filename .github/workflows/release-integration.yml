@@ -7,7 +7,7 @@ on:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       id-token: write  # for PyPI trusted publishing + build-provenance attestations
       attestations: write  # for actions/attest-build-provenance (Obsidian assets)
@@ -16,7 +16,7 @@ jobs:
       # OBSIDIAN_DIST_TOKEN (see the "Mirror Obsidian plugin" step below).
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
     - name: Extract integration info
       id: info
@@ -51,13 +51,13 @@ jobs:
 
     - name: Install uv
       if: steps.type.outputs.type == 'python'
-      uses: astral-sh/setup-uv@v7
+      uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       with:
         enable-cache: true
 
     - name: Set up Python
       if: steps.type.outputs.type == 'python'
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
       with:
         python-version-file: ".python-version"
 
@@ -74,7 +74,7 @@ jobs:
 
     - name: Publish Python package to PyPI
       if: steps.type.outputs.type == 'python'
-      uses: pypa/gh-action-pypi-publish@release/v1
+      uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
       with:
         packages-dir: ./hindsight-integrations/${{ steps.info.outputs.integration }}/dist
         skip-existing: true
@@ -93,7 +93,7 @@ jobs:
 
     - name: Set up Node.js
       if: steps.type.outputs.type == 'typescript'
-      uses: actions/setup-node@v6
+      uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
       with:
         node-version: '22'
         registry-url: 'https://registry.npmjs.org'
@@ -133,7 +133,7 @@ jobs:
     # owner scope: `gh attestation verify main.js --owner vectorize-io`.
     - name: Attest Obsidian plugin build provenance
       if: steps.type.outputs.type == 'typescript' && steps.info.outputs.integration == 'obsidian'
-      uses: actions/attest-build-provenance@v2
+      uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
       with:
         subject-path: |
           hindsight-integrations/obsidian/main.js

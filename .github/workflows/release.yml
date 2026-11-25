@@ -7,21 +7,21 @@ on:
 
 jobs:
   release-python-packages:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     environment: pypi
     permissions:
       id-token: write
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
     - name: Install uv
-      uses: astral-sh/setup-uv@v7
+      uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
       with:
         enable-cache: true
 
     - name: Set up Python
-      uses: actions/setup-python@v6
+      uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
       with:
         python-version-file: ".python-version"
 
@@ -84,44 +84,44 @@ jobs:
 
     # Publish in order (client and api-slim first, then api/all wrappers which depend on them)
     - name: Publish hindsight-client to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
+      uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
       with:
         packages-dir: ./hindsight-clients/python/dist
         skip-existing: true
 
     - name: Publish hindsight-api-slim to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
+      uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
       with:
         packages-dir: ./hindsight-api-slim/dist
         skip-existing: true
 
     - name: Publish hindsight-api to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
+      uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
       with:
         packages-dir: ./hindsight-api/dist
         skip-existing: true
 
     - name: Publish hindsight-all to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
+      uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
       with:
         packages-dir: ./hindsight-all/dist
         skip-existing: true
 
     - name: Publish hindsight-all-slim to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
+      uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
       with:
         packages-dir: ./hindsight-all-slim/dist
         skip-existing: true
 
     - name: Publish hindsight-embed to PyPI
-      uses: pypa/gh-action-pypi-publish@release/v1
+      uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
       with:
         packages-dir: ./hindsight-embed/dist
         skip-existing: true
 
     # Upload artifacts for GitHub release
     - name: Upload artifacts
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: python-packages
         path: |
@@ -134,14 +134,14 @@ jobs:
         retention-days: 1
 
   release-typescript-client:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     environment: npm
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
     - name: Set up Node.js
-      uses: actions/setup-node@v6
+      uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
       with:
         node-version: '20'
         registry-url: 'https://registry.npmjs.org'
@@ -176,21 +176,21 @@ jobs:
       run: npm pack
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: typescript-client
         path: hindsight-clients/typescript/*.tgz
         retention-days: 1
 
   release-hindsight-all-npm:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     environment: npm
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
     - name: Set up Node.js
-      uses: actions/setup-node@v6
+      uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
       with:
         node-version: '22'
         registry-url: 'https://registry.npmjs.org'
@@ -225,21 +225,21 @@ jobs:
       run: npm pack
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: hindsight-all-npm
         path: hindsight-all-npm/*.tgz
         retention-days: 1
 
   release-control-plane:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     environment: npm
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
     - name: Set up Node.js
-      uses: actions/setup-node@v6
+      uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
       with:
         node-version: '24'
         registry-url: 'https://registry.npmjs.org'
@@ -287,7 +287,7 @@ jobs:
       run: npm pack
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: control-plane
         path: hindsight-control-plane/*.tgz
@@ -302,11 +302,11 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact_name: hindsight
             asset_name: hindsight-linux-amd64
-          - os: macos-latest
+          - os: macos-26
             target: x86_64-apple-darwin
             artifact_name: hindsight
             asset_name: hindsight-darwin-amd64
-          - os: macos-latest
+          - os: macos-26
             target: aarch64-apple-darwin
             artifact_name: hindsight
             asset_name: hindsight-darwin-arm64
@@ -316,10 +316,10 @@ jobs:
             asset_name: hindsight-linux-arm64
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
     - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
       with:
         targets: ${{ matrix.target }}
 
@@ -329,7 +329,7 @@ jobs:
 
     - name: Install cargo-about
       if: matrix.asset_name == 'hindsight-linux-amd64'
-      uses: taiki-e/install-action@v2
+      uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2.90.8
       with:
         tool: cargo-about@0.9.1
 
@@ -367,7 +367,7 @@ jobs:
         chmod +x artifacts/${{ matrix.asset_name }}
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: rust-cli-${{ matrix.asset_name }}
         path: artifacts/*
@@ -375,7 +375,7 @@ jobs:
 
   release-docker-images:
     name: Release Docker (${{ matrix.image_name }}${{ matrix.tag_suffix }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       packages: write
@@ -414,10 +414,10 @@ jobs:
               PRELOAD_ML_MODELS=false
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
     - name: Free Disk Space
-      uses: jlumbroso/free-disk-space@main
+      uses: jlumbroso/free-disk-space@cf1e78c50ca91e757bab3edc229027eebfc07871 # main
       with:
         tool-cache: true
         android: true
@@ -428,13 +428,13 @@ jobs:
         swap-storage: true
 
     - name: Set up QEMU
-      uses: docker/setup-qemu-action@v4
+      uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
 
     - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v4
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
     - name: Log in to GitHub Container Registry
-      uses: docker/login-action@v4
+      uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
       with:
         registry: ghcr.io
         username: ${{ github.actor }}
@@ -446,7 +446,7 @@ jobs:
 
     - name: Extract metadata for release tags
       id: meta
-      uses: docker/metadata-action@v6
+      uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
       with:
         images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image_name }}
         flavor: |
@@ -482,7 +482,7 @@ jobs:
     # Build multi-platform and push to release tags
     - name: Build and push release images
       id: build
-      uses: docker/build-push-action@v7
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
       with:
         context: .
         file: ${{ matrix.dockerfile }}
@@ -494,7 +494,7 @@ jobs:
         labels: ${{ steps.meta.outputs.labels }}
 
     - name: Install cosign
-      uses: sigstore/cosign-installer@v3
+      uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
 
     - name: Sign published images
       env:
@@ -519,16 +519,16 @@ jobs:
           --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
   release-helm-chart:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       packages: write
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
     - name: Install Helm
-      uses: azure/setup-helm@v5
+      uses: azure/setup-helm@2f5e7bc67f1f9972ab16657bb795f36d8f04de0e # v5.1.0
       with:
         version: 'latest'
 
@@ -545,75 +545,75 @@ jobs:
       run: helm push helm-packages/*.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
 
     - name: Upload artifacts
-      uses: actions/upload-artifact@v7
+      uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
       with:
         name: helm-chart
         path: helm-packages/*.tgz
         retention-days: 1
 
   create-github-release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     needs: [release-python-packages, release-typescript-client, release-hindsight-all-npm, release-control-plane, release-rust-cli, release-docker-images, release-helm-chart]
     permissions:
       contents: write
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
     - name: Extract version from tag
       id: get_version
       run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
 
     - name: Download Python packages
-      uses: actions/download-artifact@v8
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: python-packages
         path: ./artifacts/python-packages
 
     - name: Download TypeScript client
-      uses: actions/download-artifact@v8
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: typescript-client
         path: ./artifacts/typescript-client
 
     - name: Download Control Plane
-      uses: actions/download-artifact@v8
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: control-plane
         path: ./artifacts/control-plane
 
     - name: Download hindsight-embed npm wrapper
-      uses: actions/download-artifact@v8
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: hindsight-all-npm
         path: ./artifacts/hindsight-all-npm
 
     - name: Download Rust CLI (Linux)
-      uses: actions/download-artifact@v8
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: rust-cli-hindsight-linux-amd64
         path: ./artifacts/rust-cli-linux
 
     - name: Download Rust CLI (Linux ARM)
-      uses: actions/download-artifact@v8
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: rust-cli-hindsight-linux-arm64
         path: ./artifacts/rust-cli-linux-arm64
 
     - name: Download Rust CLI (macOS Intel)
-      uses: actions/download-artifact@v8
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: rust-cli-hindsight-darwin-amd64
         path: ./artifacts/rust-cli-darwin-amd64
 
     - name: Download Rust CLI (macOS ARM)
-      uses: actions/download-artifact@v8
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: rust-cli-hindsight-darwin-arm64
         path: ./artifacts/rust-cli-darwin-arm64
 
     - name: Download Helm chart
-      uses: actions/download-artifact@v8
+      uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
       with:
         name: helm-chart
         path: ./artifacts/helm-chart
@@ -652,7 +652,7 @@ jobs:
     # published. With immutable releases enabled a published release is sealed,
     # and assets uploaded after publication are rejected.
     - name: Create GitHub Release (draft)
-      uses: softprops/action-gh-release@v3
+      uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
       with:
         files: release-assets/*
         generate_release_notes: true
